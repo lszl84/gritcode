@@ -1,0 +1,91 @@
+#pragma once
+
+#include <string>
+#include <vector>
+#include <optional>
+#include <functional>
+#include <wx/string.h>
+#include <wx/webrequest.h>
+#include <wx/event.h>
+
+namespace zencode::network {
+
+struct Message {
+  std::string role;
+  std::string content;
+};
+
+struct ChatRequest {
+  std::string model;
+  std::vector<Message> messages;
+  bool stream = false;
+  std::optional<float> temperature;
+  std::optional<int> maxTokens;
+};
+
+struct ChatResponse {
+  std::string id;
+  std::string content;
+  std::string finishReason;
+  int promptTokens = 0;
+  int completionTokens = 0;
+  int totalTokens = 0;
+  bool error = false;
+  std::string errorMessage;
+};
+
+struct ModelInfo {
+  std::string id;
+  std::string name;
+  bool allowAnonymous = false;
+  int rateLimit = 0;
+};
+
+// Callbacks for async operations
+using ModelsCallback = std::function<void(const std::vector<ModelInfo>&)>;
+using ChatCallback = std::function<void(const ChatResponse&)>;
+
+class HttpClient : public wxEvtHandler {
+public:
+  HttpClient();
+  ~HttpClient();
+
+  bool Initialize();
+  void Shutdown();
+
+  void SetBaseUrl(const std::string& url);
+  void SetApiKey(const std::string& apiKey);
+  void SetTimeout(int seconds);
+
+  // Async methods - callbacks will be invoked when complete
+  void FetchModels(ModelsCallback callback);
+  void SendChatRequest(const ChatRequest& request, ChatCallback callback);
+  
+  void SendStreamingChatRequest(
+    const ChatRequest& request,
+    std::function<void(const std::string& chunk)> onChunk,
+    std::function<void(const ChatResponse& response)> onComplete
+  );
+
+  bool IsAnonymous() const { return apiKey_.empty(); }
+
+private:
+  void OnRequestStateChanged(wxWebRequestEvent& event);
+  
+  std::string BuildRequestJson(const ChatRequest& request);
+  ChatResponse ParseResponse(const std::string& json);
+  std::vector<ModelInfo> ParseModels(const std::string& json);
+  
+  wxWebRequest currentRequest_;
+  
+  std::string baseUrl_ = "https://opencode.ai/zen/v1";
+  std::string apiKey_;
+  int timeout_ = 60;
+  bool initialized_ = false;
+  
+  // Callbacks for current operation
+  ModelsCallback modelsCallback_;
+  ChatCallback chatCallback_;
+};
+
+} // namespace zencode::network
