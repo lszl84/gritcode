@@ -3,7 +3,6 @@
 #include <wx/wx.h>
 #include <wx/splitter.h>
 #include <wx/textctrl.h>
-#include <wx/stc/stc.h>
 #include "network/zen_client.h"
 #include "mcp/mcp_server.h"
 
@@ -12,9 +11,6 @@ namespace zencode::ui {
 class MainFrame : public wxFrame {
 public:
   MainFrame();
-  
-  // MCP Access - allow programmatic control
-  friend class mcp::MCPServer;
   
 private:
   void CreateMenuBar();

@@ -5,8 +5,6 @@
 
 namespace zencode {
 
-wxIMPLEMENT_APP(Application);
-
 bool Application::OnInit() {
   if (!wxApp::OnInit()) {
     return false;

@@ -45,8 +45,11 @@ MainFrame::MainFrame()
 void MainFrame::StartMCPServer() {
   wxLogMessage("MainFrame::StartMCPServer: Starting MCP server...");
   auto& mcp = mcp::MCPServer::Instance();
-  mcp.Start(8765);
-  wxLogMessage("MainFrame::StartMCPServer: MCP server started on port 8765");
+  if (mcp.Start()) {
+    wxLogMessage("MainFrame::StartMCPServer: MCP stdio server started");
+  } else {
+    wxLogMessage("MainFrame::StartMCPServer: MCP server not started (stdin is a terminal)");
+  }
 }
 
 void MainFrame::CreateMenuBar() {
@@ -197,7 +200,11 @@ void MainFrame::OnSendMessage(wxCommandEvent& event) {
   if (zen.IsConnected()) {
     std::string model = zen.GetActiveModel();
     if (model.empty() && m_modelChoice->GetSelection() != wxNOT_FOUND) {
-      model = m_modelChoice->GetString(m_modelChoice->GetSelection()).ToStdString();
+      auto* data = dynamic_cast<wxStringClientData*>(
+          m_modelChoice->GetClientObject(m_modelChoice->GetSelection()));
+      if (data) {
+        model = data->GetData().ToStdString();
+      }
     }
     zen.SendMessage(model, message.ToStdString());
   }
@@ -206,10 +213,12 @@ void MainFrame::OnSendMessage(wxCommandEvent& event) {
 void MainFrame::OnModelSelected(wxCommandEvent& event) {
   int selection = m_modelChoice->GetSelection();
   if (selection != wxNOT_FOUND) {
-    wxString modelName = m_modelChoice->GetString(selection);
-    // Extract model ID from the choice (stored in client data or parsed)
-    // For now, we'll use the model name directly
-    zen::ZenClient::Instance().SetActiveModel(modelName.ToStdString());
+    auto* data = dynamic_cast<wxStringClientData*>(m_modelChoice->GetClientObject(selection));
+    if (data) {
+      std::string modelId = data->GetData().ToStdString();
+      wxLogMessage("MainFrame::OnModelSelected: Setting model to '%s'", modelId.c_str());
+      zen::ZenClient::Instance().SetActiveModel(modelId);
+    }
   }
 }
 
@@ -294,8 +303,10 @@ void MainFrame::PopulateModelList() {
   wxLogMessage("MainFrame::PopulateModelList: Got %zu free models", models.size());
   
   for (const auto& model : models) {
-    wxLogMessage("MainFrame::PopulateModelList: Adding model '%s'", model.name.c_str());
-    m_modelChoice->Append(wxString::FromUTF8(model.name));
+    wxLogMessage("MainFrame::PopulateModelList: Adding model '%s' (id='%s')",
+                 model.name.c_str(), model.id.c_str());
+    m_modelChoice->Append(wxString::FromUTF8(model.name),
+                          new wxStringClientData(wxString::FromUTF8(model.id)));
   }
   
   if (!models.empty()) {
