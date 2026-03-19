@@ -6,6 +6,7 @@
 #include <wx/choice.h>
 #include <wx/statline.h>
 #include <wx/log.h>
+#include <wx/secretstore.h>
 
 namespace zencode::ui {
 
@@ -15,6 +16,8 @@ wxBEGIN_EVENT_TABLE(MainFrame, wxFrame)
   EVT_MENU(static_cast<int>(MenuID::Connect), MainFrame::OnConnect)
   EVT_MENU(static_cast<int>(MenuID::Disconnect), MainFrame::OnDisconnect)
   EVT_BUTTON(static_cast<int>(MenuID::SendMessage), MainFrame::OnSendMessage)
+  EVT_BUTTON(static_cast<int>(MenuID::SetApiKey), MainFrame::OnSetApiKey)
+  EVT_MENU(static_cast<int>(MenuID::SetApiKey), MainFrame::OnSetApiKey)
   EVT_CHOICE(wxID_ANY, MainFrame::OnModelSelected)
   
   // Zen events
@@ -33,13 +36,22 @@ MainFrame::MainFrame()
   SetupEventHandlers();
   
   Centre();
-  
+  Raise();
+  RequestUserAttention();
+
   // Start MCP server for programmatic control
   StartMCPServer();
   
-  // Auto-connect anonymously on startup
-  wxCommandEvent dummy;
-  OnConnect(dummy);
+  // Auto-connect: use saved API key from keychain if available
+  wxString savedKey = LoadApiKeyFromKeychain();
+  auto& zen = zen::ZenClient::Instance();
+  if (!savedKey.IsEmpty()) {
+    AppendToChat("System", "Connecting with saved API key...");
+    zen.Connect(savedKey.ToStdString());
+  } else {
+    AppendToChat("System", "Connecting anonymously...");
+    zen.Connect("");
+  }
 }
 
 void MainFrame::StartMCPServer() {
@@ -57,7 +69,9 @@ void MainFrame::CreateMenuBar() {
   
   // File menu
   auto* fileMenu = new wxMenu();
-  fileMenu->Append(static_cast<int>(MenuID::Connect), "&Connect (Anonymous)\tCtrl+C", "Connect to OpenCode Zen anonymously");
+  fileMenu->Append(static_cast<int>(MenuID::SetApiKey), "Set &API Key...\tCtrl+K", "Set or clear your OpenCode Zen API key");
+  fileMenu->AppendSeparator();
+  fileMenu->Append(static_cast<int>(MenuID::Connect), "&Reconnect\tCtrl+R", "Reconnect to OpenCode Zen");
   fileMenu->Append(static_cast<int>(MenuID::Disconnect), "&Disconnect\tCtrl+D", "Disconnect from Zen");
   fileMenu->AppendSeparator();
   fileMenu->Append(static_cast<int>(MenuID::Exit), "E&xit\tAlt+F4", "Quit the application");
@@ -93,8 +107,14 @@ void MainFrame::CreateUI() {
   m_modelChoice = new wxChoice(m_sidebarPanel, wxID_ANY);
   sidebarSizer->Add(m_modelChoice, 0, wxALL | wxEXPAND, 10);
   
+  sidebarSizer->Add(new wxStaticLine(m_sidebarPanel), 0, wxALL | wxEXPAND, 5);
+
+  auto* apiKeyButton = new wxButton(m_sidebarPanel, static_cast<int>(MenuID::SetApiKey),
+                                     "API Key...");
+  sidebarSizer->Add(apiKeyButton, 0, wxALL | wxEXPAND, 10);
+
   sidebarSizer->AddStretchSpacer();
-  
+
   m_sidebarPanel->SetSizer(sidebarSizer);
   
   // Main content panel - Chat interface
@@ -136,6 +156,13 @@ void MainFrame::SetupEventHandlers() {
     OnSendMessage(evt);
   });
   
+  // Handle MCP send_message requests — simulate typing in the input box
+  Bind(mcp::MCP_SEND_MESSAGE_REQUEST, [this](wxCommandEvent& evt) {
+    m_messageInput->SetValue(evt.GetString());
+    wxCommandEvent dummy;
+    OnSendMessage(dummy);
+  });
+
   // Bind ZenClient events directly to our handlers
   auto& zen = zen::ZenClient::Instance();
   zen.Bind(zencode::zen::ZEN_CONNECTED, &MainFrame::OnZenConnected, this);
@@ -164,19 +191,18 @@ void MainFrame::OnAbout(wxCommandEvent& event) {
 }
 
 void MainFrame::OnConnect(wxCommandEvent& event) {
-  wxLogMessage("OnConnect: Starting connection...");
-  AppendToChat("System", "Connecting to OpenCode Zen...");
-  
-  // Connect anonymously (empty API key)
+  wxLogMessage("OnConnect: Reconnecting...");
+
   auto& zen = zen::ZenClient::Instance();
-  if (!zen.Connect("")) {
-    wxLogError("OnConnect: Connection failed!");
-    AppendToChat("Error", "Failed to connect to OpenCode Zen - check console for details");
-    wxMessageBox("Failed to connect to OpenCode Zen\n\nMake sure you have internet connectivity.", 
-                 "Connection Error", wxOK | wxICON_ERROR);
-  } else {
-    wxLogMessage("OnConnect: Connection initialized successfully");
-    AppendToChat("System", "Connection initialized - waiting for models...");
+  zen.Disconnect();
+
+  wxString savedKey = LoadApiKeyFromKeychain();
+  AppendToChat("System", savedKey.IsEmpty()
+               ? "Reconnecting anonymously..."
+               : "Reconnecting with saved API key...");
+
+  if (!zen.Connect(savedKey.ToStdString())) {
+    AppendToChat("Error", "Failed to connect to OpenCode Zen");
   }
 }
 
@@ -296,11 +322,13 @@ void MainFrame::UpdateConnectionStatus() {
 void MainFrame::PopulateModelList() {
   wxLogMessage("MainFrame::PopulateModelList: Clearing choice control");
   m_modelChoice->Clear();
-  
+
   auto& zen = zen::ZenClient::Instance();
-  auto models = zen.GetFreeModels();
-  
-  wxLogMessage("MainFrame::PopulateModelList: Got %zu free models", models.size());
+  // Show all models when authenticated, only free models when anonymous
+  auto models = zen.IsAnonymous() ? zen.GetFreeModels() : zen.GetModels();
+
+  wxLogMessage("MainFrame::PopulateModelList: Got %zu models (anonymous=%d)",
+               models.size(), zen.IsAnonymous());
   
   for (const auto& model : models) {
     wxLogMessage("MainFrame::PopulateModelList: Adding model '%s' (id='%s')",
@@ -310,11 +338,19 @@ void MainFrame::PopulateModelList() {
   }
   
   if (!models.empty()) {
-    m_modelChoice->SetSelection(0);
-    zen.SetActiveModel(models[0].id);
-    wxLogMessage("MainFrame::PopulateModelList: Set active model to '%s'", models[0].id.c_str());
+    // Prefer kimi-k2.5 to save tokens, otherwise fall back to first model
+    int defaultIdx = 0;
+    for (size_t i = 0; i < models.size(); ++i) {
+      if (models[i].id == "kimi-k2.5") {
+        defaultIdx = static_cast<int>(i);
+        break;
+      }
+    }
+    m_modelChoice->SetSelection(defaultIdx);
+    zen.SetActiveModel(models[defaultIdx].id);
+    wxLogMessage("MainFrame::PopulateModelList: Set active model to '%s'", models[defaultIdx].id.c_str());
   } else {
-    wxLogWarning("MainFrame::PopulateModelList: No free models available!");
+    wxLogWarning("MainFrame::PopulateModelList: No models available!");
   }
 }
 
@@ -338,6 +374,88 @@ void MainFrame::AppendToChat(const wxString& sender, const wxString& message) {
   
   m_chatDisplay->AppendText(formatted);
   m_chatDisplay->ShowPosition(m_chatDisplay->GetLastPosition());
+}
+
+// --- API Key management via wxSecretStore ---
+
+static const wxString KEYCHAIN_SERVICE = "ZenCode/OpenCodeZen";
+
+wxString MainFrame::LoadApiKeyFromKeychain() {
+    auto store = wxSecretStore::GetDefault();
+    if (!store.IsOk()) {
+        wxLogWarning("MainFrame: Could not access system keychain");
+        return {};
+    }
+
+    wxString username;
+    wxSecretValue secret;
+    if (store.Load(KEYCHAIN_SERVICE, username, secret)) {
+        wxLogMessage("MainFrame: Loaded API key from keychain");
+        return secret.GetAsString();
+    }
+
+    return {};
+}
+
+bool MainFrame::SaveApiKeyToKeychain(const wxString& key) {
+    auto store = wxSecretStore::GetDefault();
+    if (!store.IsOk()) {
+        wxLogError("MainFrame: Could not access system keychain");
+        return false;
+    }
+
+    if (!store.Save(KEYCHAIN_SERVICE, "apikey", wxSecretValue(key))) {
+        wxLogError("MainFrame: Failed to save API key to keychain");
+        return false;
+    }
+
+    wxLogMessage("MainFrame: API key saved to keychain");
+    return true;
+}
+
+bool MainFrame::ClearApiKeyFromKeychain() {
+    auto store = wxSecretStore::GetDefault();
+    if (!store.IsOk()) return false;
+    return store.Delete(KEYCHAIN_SERVICE);
+}
+
+void MainFrame::OnSetApiKey(wxCommandEvent& event) {
+    wxString currentKey = LoadApiKeyFromKeychain();
+    bool hasKey = !currentKey.IsEmpty();
+
+    wxString prompt = hasKey
+        ? "An API key is currently saved in your keychain.\n\n"
+          "Enter a new key to replace it, or clear the field and\n"
+          "click OK to remove it and use anonymous access."
+        : "Enter your OpenCode Zen API key to unlock all models.\n\n"
+          "Get your key at https://opencode.ai\n"
+          "Leave empty for anonymous access (free models only).";
+
+    wxTextEntryDialog dlg(this, prompt, "API Key", hasKey ? "********" : "");
+
+    if (dlg.ShowModal() != wxID_OK) return;
+
+    wxString input = dlg.GetValue().Trim();
+
+    // User didn't change the placeholder
+    if (input == "********") return;
+
+    auto& zen = zen::ZenClient::Instance();
+    zen.Disconnect();
+
+    if (input.IsEmpty()) {
+        ClearApiKeyFromKeychain();
+        AppendToChat("System", "API key removed. Reconnecting anonymously...");
+        zen.Connect("");
+    } else {
+        if (!SaveApiKeyToKeychain(input)) {
+            wxMessageBox("Could not save the API key to your system keychain.",
+                         "Keychain Error", wxOK | wxICON_ERROR);
+            return;
+        }
+        AppendToChat("System", "API key saved to keychain. Reconnecting...");
+        zen.Connect(input.ToStdString());
+    }
 }
 
 } // namespace zencode::ui

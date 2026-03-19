@@ -24,6 +24,7 @@ private:
   void OnDisconnect(wxCommandEvent& event);
   void OnSendMessage(wxCommandEvent& event);
   void OnModelSelected(wxCommandEvent& event);
+  void OnSetApiKey(wxCommandEvent& event);
   
   // Zen event handlers
   void OnZenConnected(wxCommandEvent& event);
@@ -35,6 +36,9 @@ private:
   void UpdateConnectionStatus();
   void PopulateModelList();
   void AppendToChat(const wxString& sender, const wxString& message);
+  wxString LoadApiKeyFromKeychain();
+  bool SaveApiKeyToKeychain(const wxString& key);
+  bool ClearApiKeyFromKeychain();
   
   wxPanel* m_sidebarPanel = nullptr;
   wxPanel* m_mainPanel = nullptr;
@@ -56,7 +60,8 @@ enum class MenuID : int {
   Connect = 1000,
   Disconnect,
   Settings,
-  SendMessage = 2000
+  SendMessage = 2000,
+  SetApiKey = 3000
 };
 
 } // namespace zencode::ui

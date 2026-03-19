@@ -14,6 +14,7 @@ namespace zencode::mcp {
 using json = nlohmann::json;
 
 wxDECLARE_EVENT(MCP_STDIN_MESSAGE, wxThreadEvent);
+wxDECLARE_EVENT(MCP_SEND_MESSAGE_REQUEST, wxCommandEvent);
 
 // MCP Server implementing the Model Context Protocol over stdio.
 // When stdin is a pipe (launched by an MCP client), reads JSON-RPC 2.0

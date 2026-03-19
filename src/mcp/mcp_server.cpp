@@ -1,5 +1,7 @@
 #include "mcp/mcp_server.h"
 #include "network/zen_client.h"
+#include <wx/app.h>
+#include <wx/window.h>
 #include <wx/log.h>
 #include <iostream>
 #include <string>
@@ -15,6 +17,7 @@
 namespace zencode::mcp {
 
 wxDEFINE_EVENT(MCP_STDIN_MESSAGE, wxThreadEvent);
+wxDEFINE_EVENT(MCP_SEND_MESSAGE_REQUEST, wxCommandEvent);
 
 MCPServer::MCPServer() {
     Bind(MCP_STDIN_MESSAGE, &MCPServer::OnStdinMessage, this);
@@ -226,10 +229,14 @@ void MCPServer::HandleToolsCall(const json& id, const json& params) {
         responseReceived_ = false;
         chatHistory_.push_back("You: " + wxString::FromUTF8(message));
 
-        auto& zen = zen::ZenClient::Instance();
-        std::string model = zen.GetActiveModel();
-        if (model.empty()) model = "big-pickle";
-        zen.SendMessage(model, message);
+        // Post to the main window so the message goes through the UI
+        // input box, just like a real user typed it.
+        auto* topWindow = wxTheApp->GetTopWindow();
+        if (topWindow) {
+            auto* evt = new wxCommandEvent(MCP_SEND_MESSAGE_REQUEST);
+            evt->SetString(wxString::FromUTF8(message));
+            wxQueueEvent(topWindow->GetEventHandler(), evt);
+        }
 
         // Response will be sent from OnMessageReceived() or OnError()
         return;
@@ -266,6 +273,7 @@ json MCPServer::ToolGetStatus() {
     json status;
     status["connected"] = connected_;
     status["status"] = connectionStatus_.ToStdString();
+    status["anonymous"] = zen.IsAnonymous();
     status["models_loaded"] = modelsLoaded_;
     status["model_count"] = static_cast<int>(availableModels_.size());
     status["active_model"] = zen.GetActiveModel();
@@ -407,7 +415,7 @@ void MCPServer::OnError(const wxString& error) {
 
 void MCPServer::OnModelsLoaded() {
     auto& zen = zen::ZenClient::Instance();
-    auto models = zen.GetFreeModels();
+    auto models = zen.IsAnonymous() ? zen.GetFreeModels() : zen.GetModels();
 
     availableModels_.clear();
     for (const auto& model : models) {
