@@ -184,7 +184,9 @@ void HttpClient::OnRequestStateChanged(wxWebRequestEvent& event) {
     
     if (response.GetStatus() == 200) {
       wxString responseStr = response.AsString();
-      std::string responseBody = responseStr.ToStdString();
+      // Use ToUTF8() to preserve all bytes including nulls, then convert to std::string
+      wxCharBuffer utf8Buffer = responseStr.ToUTF8();
+      std::string responseBody(utf8Buffer.data(), utf8Buffer.length());
       
       wxLogMessage("HttpClient: Got response, length=%zu, wxString length=%zu", 
                    responseBody.length(), responseStr.length());
@@ -196,7 +198,9 @@ void HttpClient::OnRequestStateChanged(wxWebRequestEvent& event) {
         if (stream) {
           wxStringOutputStream outStream;
           stream->Read(outStream);
-          responseBody = outStream.GetString().ToStdString();
+          wxString streamStr = outStream.GetString();
+          wxCharBuffer utf8Buffer = streamStr.ToUTF8();
+          responseBody = std::string(utf8Buffer.data(), utf8Buffer.length());
           wxLogMessage("HttpClient: Read %zu bytes from stream", responseBody.length());
         }
       }
