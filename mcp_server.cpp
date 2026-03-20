@@ -14,7 +14,7 @@
 #include <unistd.h>
 #endif
 
-namespace fastcode::mcp {
+namespace fcn::mcp {
 
 wxDEFINE_EVENT(MCP_STDIN_MESSAGE, wxThreadEvent);
 wxDEFINE_EVENT(MCP_SEND_MESSAGE_REQUEST, wxCommandEvent);
@@ -426,4 +426,4 @@ void MCPServer::OnModelsLoaded() {
     wxLogMessage("MCPServer: Models loaded, count=%zu", availableModels_.size());
 }
 
-} // namespace fastcode::mcp
+} // namespace fcn::mcp

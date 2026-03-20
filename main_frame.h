@@ -8,7 +8,7 @@
 
 class StreamingTextCtrl;
 
-namespace fastcode::ui {
+namespace fcn::ui {
 
 class MainFrame : public wxFrame {
 public:
@@ -66,4 +66,4 @@ enum class MenuID : int {
   SetApiKey = 3000
 };
 
-} // namespace fastcode::ui
+} // namespace fcn::ui

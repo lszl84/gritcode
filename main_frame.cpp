@@ -9,7 +9,7 @@
 #include <wx/log.h>
 #include <wx/secretstore.h>
 
-namespace fastcode::ui {
+namespace fcn::ui {
 
 wxBEGIN_EVENT_TABLE(MainFrame, wxFrame)
   EVT_MENU(static_cast<int>(MenuID::Exit), MainFrame::OnExit)
@@ -22,11 +22,11 @@ wxBEGIN_EVENT_TABLE(MainFrame, wxFrame)
   EVT_CHOICE(wxID_ANY, MainFrame::OnModelSelected)
   
   // Zen events
-  EVT_COMMAND(wxID_ANY, fastcode::zen::ZEN_CONNECTED, MainFrame::OnZenConnected)
-  EVT_COMMAND(wxID_ANY, fastcode::zen::ZEN_DISCONNECTED, MainFrame::OnZenDisconnected)
-  EVT_COMMAND(wxID_ANY, fastcode::zen::ZEN_MESSAGE_RECEIVED, MainFrame::OnZenMessageReceived)
-  EVT_COMMAND(wxID_ANY, fastcode::zen::ZEN_ERROR_OCCURRED, MainFrame::OnZenError)
-  EVT_COMMAND(wxID_ANY, fastcode::zen::ZEN_MODELS_LOADED, MainFrame::OnZenModelsLoaded)
+  EVT_COMMAND(wxID_ANY, fcn::zen::ZEN_CONNECTED, MainFrame::OnZenConnected)
+  EVT_COMMAND(wxID_ANY, fcn::zen::ZEN_DISCONNECTED, MainFrame::OnZenDisconnected)
+  EVT_COMMAND(wxID_ANY, fcn::zen::ZEN_MESSAGE_RECEIVED, MainFrame::OnZenMessageReceived)
+  EVT_COMMAND(wxID_ANY, fcn::zen::ZEN_ERROR_OCCURRED, MainFrame::OnZenError)
+  EVT_COMMAND(wxID_ANY, fcn::zen::ZEN_MODELS_LOADED, MainFrame::OnZenModelsLoaded)
 wxEND_EVENT_TABLE()
 
 MainFrame::MainFrame() 
@@ -161,11 +161,11 @@ void MainFrame::SetupEventHandlers() {
 
   // Bind ZenClient events directly to our handlers
   auto& zen = zen::ZenClient::Instance();
-  zen.Bind(fastcode::zen::ZEN_CONNECTED, &MainFrame::OnZenConnected, this);
-  zen.Bind(fastcode::zen::ZEN_DISCONNECTED, &MainFrame::OnZenDisconnected, this);
-  zen.Bind(fastcode::zen::ZEN_MESSAGE_RECEIVED, &MainFrame::OnZenMessageReceived, this);
-  zen.Bind(fastcode::zen::ZEN_ERROR_OCCURRED, &MainFrame::OnZenError, this);
-  zen.Bind(fastcode::zen::ZEN_MODELS_LOADED, &MainFrame::OnZenModelsLoaded, this);
+  zen.Bind(fcn::zen::ZEN_CONNECTED, &MainFrame::OnZenConnected, this);
+  zen.Bind(fcn::zen::ZEN_DISCONNECTED, &MainFrame::OnZenDisconnected, this);
+  zen.Bind(fcn::zen::ZEN_MESSAGE_RECEIVED, &MainFrame::OnZenMessageReceived, this);
+  zen.Bind(fcn::zen::ZEN_ERROR_OCCURRED, &MainFrame::OnZenError, this);
+  zen.Bind(fcn::zen::ZEN_MODELS_LOADED, &MainFrame::OnZenModelsLoaded, this);
   wxLogMessage("MainFrame::SetupEventHandlers: Bound ZenClient events to MainFrame");
 }
 
@@ -445,4 +445,4 @@ void MainFrame::OnSetApiKey(wxCommandEvent& event) {
     }
 }
 
-} // namespace fastcode::ui
+} // namespace fcn::ui

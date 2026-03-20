@@ -3,7 +3,7 @@
 #include <wx/log.h>
 #include <wx/file.h>
 
-namespace fastcode {
+namespace fcn {
 
 bool Application::OnInit() {
   if (!wxApp::OnInit()) {
@@ -24,6 +24,6 @@ int Application::OnExit() {
   return wxApp::OnExit();
 }
 
-} // namespace fastcode
+} // namespace fcn
 
-wxIMPLEMENT_APP(fastcode::Application);
+wxIMPLEMENT_APP(fcn::Application);

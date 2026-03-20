@@ -3,7 +3,7 @@
 #include <wx/wx.h>
 #include <string>
 
-namespace fastcode {
+namespace fcn {
 
 class Application : public wxApp {
 public:
@@ -11,4 +11,4 @@ public:
   int OnExit() override;
 };
 
-} // namespace fastcode
+} // namespace fcn

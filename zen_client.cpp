@@ -3,7 +3,7 @@
 #include <wx/log.h>
 #include <algorithm>
 
-namespace fastcode::zen {
+namespace fcn::zen {
 
 wxDEFINE_EVENT(ZEN_MESSAGE_RECEIVED, wxCommandEvent);
 wxDEFINE_EVENT(ZEN_ERROR_OCCURRED, wxCommandEvent);
@@ -198,4 +198,4 @@ bool ZenClient::IsAnonymous() const {
   return httpClient_->IsAnonymous();
 }
 
-} // namespace fastcode::zen
+} // namespace fcn::zen

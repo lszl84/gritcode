@@ -5,7 +5,7 @@
 #include <wx/log.h>
 #include <wx/sstream.h>
 
-namespace fastcode::network {
+namespace fcn::network {
 
 using json = nlohmann::json;
 
@@ -382,4 +382,4 @@ void HttpClient::SendStreamingChatRequest(
   });
 }
 
-} // namespace fastcode::network
+} // namespace fcn::network
