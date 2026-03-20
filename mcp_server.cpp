@@ -114,7 +114,7 @@ void MCPServer::HandleMessage(const json& msg) {
     }
 }
 
-void MCPServer::HandleInitialize(const json& id, const json& params) {
+void MCPServer::HandleInitialize(const json& id, const json& /*params*/) {
     mcpInitialized_ = true;
 
     json result;
