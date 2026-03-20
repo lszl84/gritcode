@@ -9,7 +9,7 @@
 #include <atomic>
 #include <optional>
 
-namespace zencode::mcp {
+namespace fastcode::mcp {
 
 using json = nlohmann::json;
 
@@ -90,4 +90,4 @@ private:
     bool mcpInitialized_ = false;
 };
 
-} // namespace zencode::mcp
+} // namespace fastcode::mcp

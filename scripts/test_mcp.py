@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """
-ZenCode MCP Test Script
+FastCode Native MCP Test Script
 
 This script demonstrates how to use the MCP (Model Context Protocol) server
-to programmatically control and test the ZenCode application.
+to programmatically control and test the FastCode Native application.
 
 Usage:
-  1. Start ZenCode: ./build/zencode
+  1. Start FastCode Native: ./build/fastcode-native
   2. Run this script: python3 scripts/test_mcp.py
 """
 
@@ -20,7 +20,7 @@ sys.path.insert(0, 'src')
 def test_mcp():
     """Test basic MCP functionality"""
     print("=" * 60)
-    print("ZenCode MCP Server Test")
+    print("FastCode Native MCP Server Test")
     print("=" * 60)
     
     try:
@@ -54,7 +54,7 @@ def test_mcp():
         print("the MCP server events and calls the MCPServer methods.")
         
         print("\n" + "=" * 60)
-        print("Check /tmp/zencode_mcp.log for actual MCP activity")
+        print("Check /tmp/fastcode-native_mcp.log for actual MCP activity")
         print("=" * 60)
         
     except Exception as e:

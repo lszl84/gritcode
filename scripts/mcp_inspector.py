@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """
-ZenCode MCP Inspector - Auto-detects port
+FastCode Native MCP Inspector - Auto-detects port
 
-Connects to a running ZenCode instance via MCP server.
+Connects to a running FastCode Native instance via MCP server.
 Auto-detects port (tries 8765, 8766, 8767)
 """
 
@@ -11,7 +11,7 @@ import json
 import sys
 import time
 
-class ZenCodeInspector:
+class FastCode NativeInspector:
     def __init__(self, host="localhost", ports=[8765, 8766, 8767]):
         self.host = host
         self.ports = ports
@@ -19,22 +19,22 @@ class ZenCodeInspector:
         self.sock = None
         
     def connect(self):
-        """Connect to ZenCode MCP server (auto-detect port)"""
+        """Connect to FastCode Native MCP server (auto-detect port)"""
         for port in self.ports:
             try:
                 self.sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
                 self.sock.settimeout(3)
                 self.sock.connect((self.host, port))
                 self.port = port
-                print(f"✅ Connected to ZenCode MCP on port {port}")
+                print(f"✅ Connected to FastCode Native MCP on port {port}")
                 return True
             except (ConnectionRefusedError, socket.timeout):
                 self.sock.close()
                 self.sock = None
                 continue
         
-        print(f"❌ Could not connect to ZenCode on any port: {self.ports}")
-        print("   Is ZenCode running? Start it with: ./build/zencode")
+        print(f"❌ Could not connect to FastCode Native on any port: {self.ports}")
+        print("   Is FastCode Native running? Start it with: ./build/fastcode-native")
         return False
         
     def disconnect(self):
@@ -59,7 +59,7 @@ class ZenCodeInspector:
             return {"success": False, "error": str(e)}
 
 def main():
-    inspector = ZenCodeInspector()
+    inspector = FastCode NativeInspector()
     
     if not inspector.connect():
         sys.exit(1)
@@ -74,7 +74,7 @@ def main():
             print(f"   Models: {result.get('modelCount')}")
             
             if result.get('connected'):
-                print("\n✅ ZenCode is working! Connected to OpenCode Zen.")
+                print("\n✅ FastCode Native is working! Connected to OpenCode Zen.")
                 print(f"   Status: {result.get('status')}")
             else:
                 print("\n⚠️  Not connected to Zen")

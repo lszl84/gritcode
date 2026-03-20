@@ -1,18 +1,19 @@
 # What is this
 
-This is a multi-platform agent harness, working natively on Windows,
-Mac, and Linux. Connects to OpenCode Zen. Meant as a fast, small and
-lean replacement for bloated, react-based TUI applications.
+FastCode Native -- a multi-platform native AI coding harness, working
+natively on Windows, Mac, and Linux. Connects to OpenCode Zen. Built as
+a fast, small, lean replacement for bloated Electron/web-based TUI apps.
 
 # Guidelines
 
 - Use CMake and FetchContent
 - Try to minimize dependencies
-- All dependencies, including curl, should be downloaded with FetchContent
+- All dependencies should be downloaded with FetchContent
 - Use newest wxWidgets 3.3.x
-- Use modern C++26 features, focusing on producing fast code.
+- Use modern C++23 features, focusing on producing fast code.
   Templates, ranges::views, spans, move semantics, etc
 - Use ninja for faster builds
+- Flat source file layout in project root (no src/ subdirectories)
 
 # Reference
 

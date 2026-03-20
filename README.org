@@ -1,0 +1,150 @@
+#+TITLE: FastCode Native
+#+SUBTITLE: The native AI coding harness. No Electron. No web views. Just speed.
+
+* FastCode Native
+
+A *blazing-fast*, *pixel-perfect* native desktop client for [[https://opencode.ai][OpenCode Zen]] -- built from scratch in C++ with wxWidgets.
+
+No Electron. No Chromium. No 800 MB RAM for a chat window. Just raw, compiled performance on every platform.
+
+#+begin_quote
+"The fastest path between you and your AI is a native binary."
+#+end_quote
+
+** Why FastCode Native?
+
+Every other AI coding tool ships as an Electron app or a web-based TUI. That means:
+
+- *Chromium eating your RAM* while you're trying to compile
+- *JavaScript runtime overhead* on every keystroke
+- *No native text selection* -- try selecting across code blocks in a web view
+- *Sluggish scrolling* through long conversations
+
+FastCode Native is the antidote:
+
+| Feature                     | Electron apps | FastCode Native    |
+|-----------------------------+---------------+--------------------|
+| Memory usage                | 400-800 MB    | ~30 MB             |
+| Startup time                | 2-5 seconds   | Instant            |
+| Text selection              | Broken        | Pixel-perfect      |
+| Unicode / RTL support       | Partial       | Full (Arabic, Hebrew, CJK) |
+| Code block rendering        | CSS hacks     | Native custom paint |
+| OS integration              | Simulated     | Real native widgets |
+| Binary size                 | 200+ MB       | ~15 MB (release)   |
+
+** Features
+
+- *Native performance* -- C++23, wxWidgets 3.3, compiled to a single binary
+- *Pixel-perfect text selection* -- Custom text control with word wrap, double/triple-click, drag selection with auto-scroll, full Unicode/RTL support
+- *Block-type rendering* -- Distinct visual styles for user prompts, AI responses, code blocks, and thinking/reasoning
+- *OpenCode Zen integration* -- Works with all models, including free anonymous access
+- *Dark and light themes* -- Follows your OS theme automatically
+- *Cross-platform* -- Windows, macOS, and Linux from the same codebase
+- *MCP Protocol server* -- Built-in Model Context Protocol support for tool integration
+- *API key management* -- Stored securely in your OS keychain (libsecret / Keychain / Credential Manager)
+- *Streaming support* -- Real-time token-by-token display with loading animations
+
+** Quick Start
+
+#+begin_src bash
+# Clone
+git clone https://github.com/lszl84/fastcode-native.git
+cd fastcode-native
+
+# Build (CMake fetches all dependencies automatically)
+cmake -B build -G Ninja
+cmake --build build
+
+# Run
+./build/fastcode-native
+#+end_src
+
+That's it. No =npm install=. No =yarn=. No =node_modules=. Just CMake and a C++ compiler.
+
+** Free Models (No Login Required)
+
+FastCode Native connects to OpenCode Zen's free tier out of the box -- no API key needed:
+
+- Big Pickle
+- MiMo V2 Flash Free
+- Nemotron 3 Super Free
+- MiniMax M2.5 Free
+- Trinity Large Preview Free
+
+For access to all models (Claude, GPT-4, Gemini, etc.), set your API key via =File > Set API Key= or =Ctrl+K=.
+
+** Requirements
+
+- CMake 3.24+
+- C++23-compatible compiler (GCC 13+, Clang 16+, MSVC 2022+)
+- Ninja (recommended, but not required)
+
+All other dependencies (wxWidgets, nlohmann/json) are fetched automatically via CMake FetchContent.
+
+** Architecture
+
+#+begin_src
+fastcode-native/
+  application.cpp/h        -- wxApp entry point
+  main_frame.cpp/h         -- Main window, sidebar, input area
+  streaming_text_ctrl.cpp/h -- Custom text control (the core magic)
+  block_manager.cpp/h      -- Content block storage and management
+  http_client.cpp/h        -- Async HTTP via wxWebRequest
+  zen_client.cpp/h         -- OpenCode Zen API client
+  mcp_server.cpp/h         -- MCP protocol server (stdio JSON-RPC)
+#+end_src
+
+The =StreamingTextCtrl= is the heart of the project: a fully custom =wxControl= with:
+
+- O(log N) visibility culling via prefix-sum block cache
+- Lazy per-character caret position computation
+- Word-wrap with hard and soft line breaks
+- Pixel-perfect selection across mixed LTR/RTL content
+- Zero-allocation incremental layout updates
+
+** Sponsoring
+
+#+begin_quote
+*This project needs sponsors to survive.*
+#+end_quote
+
+FastCode Native is a solo effort to build what the AI coding tools industry should have built from day one: a *real native application*.
+
+Building and maintaining a cross-platform native desktop app is significantly harder than wrapping a web page in Electron. It requires deep knowledge of platform APIs, text layout, Unicode, GPU rendering, and native widget toolkits. This work takes serious time and commitment.
+
+*** Why Sponsor?
+
+- *Keep native alive.* Every sponsor is a vote against the Electron monoculture.
+- *Direct impact.* Your contribution goes straight to development -- no corporate overhead.
+- *Priority features.* Sponsors get a voice in the roadmap.
+
+*** How to Sponsor
+
+- [[https://github.com/sponsors/lszl84][GitHub Sponsors]] -- Monthly or one-time contributions
+- *Corporate sponsorship* -- Contact for logo placement, priority support, and custom features
+
+If your company uses AI coding tools and cares about performance, developer experience, or simply not shipping 800 MB of Chromium to your engineers -- *please consider sponsoring this project*.
+
+Even small contributions make a real difference. A few dollars a month from enough people means this project gets maintained, improved, and kept free for everyone.
+
+** Roadmap
+
+- [ ] Streaming token-by-token display (SSE support)
+- [ ] Syntax highlighting in code blocks
+- [ ] Conversation persistence (SQLite)
+- [ ] Multi-conversation tabs
+- [ ] Image/file attachment support
+- [ ] Plugin system
+- [ ] GPU-accelerated rendering
+
+** License
+
+GPL v3 -- See [[./LICENSE][LICENSE]] file.
+
+** Credits
+
+Built by [[https://github.com/lszl84][lszl84]].
+
+The =StreamingTextCtrl= component is based on the [[https://github.com/lszl84/cutescroll][cutescroll]] project.
+
+Powered by [[https://opencode.ai][OpenCode Zen]].

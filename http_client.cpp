@@ -5,7 +5,7 @@
 #include <wx/log.h>
 #include <wx/sstream.h>
 
-namespace zencode::network {
+namespace fastcode::network {
 
 using json = nlohmann::json;
 
@@ -382,4 +382,4 @@ void HttpClient::SendStreamingChatRequest(
   });
 }
 
-} // namespace zencode::network
+} // namespace fastcode::network

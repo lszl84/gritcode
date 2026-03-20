@@ -8,7 +8,7 @@
 
 class StreamingTextCtrl;
 
-namespace zencode::ui {
+namespace fastcode::ui {
 
 class MainFrame : public wxFrame {
 public:
@@ -66,4 +66,4 @@ enum class MenuID : int {
   SetApiKey = 3000
 };
 
-} // namespace zencode::ui
+} // namespace fastcode::ui

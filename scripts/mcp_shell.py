@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """
-ZenCode MCP Client - Simple interactive client
+FastCode Native MCP Client - Simple interactive client
 
-Connects to ZenCode MCP server and allows sending commands.
+Connects to FastCode Native MCP server and allows sending commands.
 """
 
 import socket
@@ -36,7 +36,7 @@ def main():
     host = sys.argv[1] if len(sys.argv) > 1 else "localhost"
     port = int(sys.argv[2]) if len(sys.argv) > 2 else 8765
     
-    print(f"Connecting to ZenCode MCP server at {host}:{port}...")
+    print(f"Connecting to FastCode Native MCP server at {host}:{port}...")
     
     try:
         sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -115,7 +115,7 @@ def main():
         sock.close()
         
     except ConnectionRefusedError:
-        print(f"❌ Connection refused. Is ZenCode running with MCP server?")
+        print(f"❌ Connection refused. Is FastCode Native running with MCP server?")
         sys.exit(1)
     except Exception as e:
         print(f"❌ Error: {e}")

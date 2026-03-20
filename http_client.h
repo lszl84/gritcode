@@ -8,7 +8,7 @@
 #include <wx/webrequest.h>
 #include <wx/event.h>
 
-namespace zencode::network {
+namespace fastcode::network {
 
 struct Message {
   std::string role;
@@ -88,4 +88,4 @@ private:
   ChatCallback chatCallback_;
 };
 
-} // namespace zencode::network
+} // namespace fastcode::network

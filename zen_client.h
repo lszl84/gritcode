@@ -5,7 +5,7 @@
 #include <memory>
 #include <vector>
 
-namespace zencode::zen {
+namespace fastcode::zen {
 
 class ZenClient : public wxEvtHandler {
 public:
@@ -49,4 +49,4 @@ wxDECLARE_EVENT(ZEN_CONNECTED, wxCommandEvent);
 wxDECLARE_EVENT(ZEN_DISCONNECTED, wxCommandEvent);
 wxDECLARE_EVENT(ZEN_MODELS_LOADED, wxCommandEvent);
 
-} // namespace zencode::zen
+} // namespace fastcode::zen

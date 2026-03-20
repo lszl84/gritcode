@@ -9,7 +9,7 @@
 #include <wx/log.h>
 #include <wx/secretstore.h>
 
-namespace zencode::ui {
+namespace fastcode::ui {
 
 wxBEGIN_EVENT_TABLE(MainFrame, wxFrame)
   EVT_MENU(static_cast<int>(MenuID::Exit), MainFrame::OnExit)
@@ -22,15 +22,15 @@ wxBEGIN_EVENT_TABLE(MainFrame, wxFrame)
   EVT_CHOICE(wxID_ANY, MainFrame::OnModelSelected)
   
   // Zen events
-  EVT_COMMAND(wxID_ANY, zencode::zen::ZEN_CONNECTED, MainFrame::OnZenConnected)
-  EVT_COMMAND(wxID_ANY, zencode::zen::ZEN_DISCONNECTED, MainFrame::OnZenDisconnected)
-  EVT_COMMAND(wxID_ANY, zencode::zen::ZEN_MESSAGE_RECEIVED, MainFrame::OnZenMessageReceived)
-  EVT_COMMAND(wxID_ANY, zencode::zen::ZEN_ERROR_OCCURRED, MainFrame::OnZenError)
-  EVT_COMMAND(wxID_ANY, zencode::zen::ZEN_MODELS_LOADED, MainFrame::OnZenModelsLoaded)
+  EVT_COMMAND(wxID_ANY, fastcode::zen::ZEN_CONNECTED, MainFrame::OnZenConnected)
+  EVT_COMMAND(wxID_ANY, fastcode::zen::ZEN_DISCONNECTED, MainFrame::OnZenDisconnected)
+  EVT_COMMAND(wxID_ANY, fastcode::zen::ZEN_MESSAGE_RECEIVED, MainFrame::OnZenMessageReceived)
+  EVT_COMMAND(wxID_ANY, fastcode::zen::ZEN_ERROR_OCCURRED, MainFrame::OnZenError)
+  EVT_COMMAND(wxID_ANY, fastcode::zen::ZEN_MODELS_LOADED, MainFrame::OnZenModelsLoaded)
 wxEND_EVENT_TABLE()
 
 MainFrame::MainFrame() 
-  : wxFrame(nullptr, wxID_ANY, "ZenCode", wxDefaultPosition, wxSize(1200, 800)) {
+  : wxFrame(nullptr, wxID_ANY, "FastCode Native", wxDefaultPosition, wxSize(1200, 800)) {
   
   CreateMenuBar();
   CreateUI();
@@ -161,11 +161,11 @@ void MainFrame::SetupEventHandlers() {
 
   // Bind ZenClient events directly to our handlers
   auto& zen = zen::ZenClient::Instance();
-  zen.Bind(zencode::zen::ZEN_CONNECTED, &MainFrame::OnZenConnected, this);
-  zen.Bind(zencode::zen::ZEN_DISCONNECTED, &MainFrame::OnZenDisconnected, this);
-  zen.Bind(zencode::zen::ZEN_MESSAGE_RECEIVED, &MainFrame::OnZenMessageReceived, this);
-  zen.Bind(zencode::zen::ZEN_ERROR_OCCURRED, &MainFrame::OnZenError, this);
-  zen.Bind(zencode::zen::ZEN_MODELS_LOADED, &MainFrame::OnZenModelsLoaded, this);
+  zen.Bind(fastcode::zen::ZEN_CONNECTED, &MainFrame::OnZenConnected, this);
+  zen.Bind(fastcode::zen::ZEN_DISCONNECTED, &MainFrame::OnZenDisconnected, this);
+  zen.Bind(fastcode::zen::ZEN_MESSAGE_RECEIVED, &MainFrame::OnZenMessageReceived, this);
+  zen.Bind(fastcode::zen::ZEN_ERROR_OCCURRED, &MainFrame::OnZenError, this);
+  zen.Bind(fastcode::zen::ZEN_MODELS_LOADED, &MainFrame::OnZenModelsLoaded, this);
   wxLogMessage("MainFrame::SetupEventHandlers: Bound ZenClient events to MainFrame");
 }
 
@@ -174,7 +174,7 @@ void MainFrame::OnExit(wxCommandEvent& event) {
 }
 
 void MainFrame::OnAbout(wxCommandEvent& event) {
-  wxMessageBox("ZenCode - OpenCode Zen Agent Harness\n\n"
+  wxMessageBox("FastCode Native - OpenCode Zen Agent Harness\n\n"
                "A fast, native replacement for web-based TUIs\n\n"
                "Free models available:\n"
                "- Big Pickle\n"
@@ -182,7 +182,7 @@ void MainFrame::OnAbout(wxCommandEvent& event) {
                "- Nemotron 3 Super Free\n"
                "- MiniMax M2.5 Free\n\n"
                "License: GPL v3",
-               "About ZenCode",
+               "About FastCode Native",
                wxOK | wxICON_INFORMATION);
 }
 
@@ -365,7 +365,7 @@ void MainFrame::AppendToChat(const wxString& sender, const wxString& message) {
 
 // --- API Key management via wxSecretStore ---
 
-static const wxString KEYCHAIN_SERVICE = "ZenCode/OpenCodeZen";
+static const wxString KEYCHAIN_SERVICE = "FastCodeNative/OpenCodeZen";
 
 wxString MainFrame::LoadApiKeyFromKeychain() {
     auto store = wxSecretStore::GetDefault();
@@ -445,4 +445,4 @@ void MainFrame::OnSetApiKey(wxCommandEvent& event) {
     }
 }
 
-} // namespace zencode::ui
+} // namespace fastcode::ui

@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """
-ZenCode MCP Client
+FastCode Native MCP Client
 
-A simple Python client to connect to the ZenCode MCP server and 
+A simple Python client to connect to the FastCode Native MCP server and 
 programmatically investigate issues.
 
 Usage:
@@ -42,7 +42,7 @@ def main():
     host = sys.argv[1]
     port = int(sys.argv[2])
     
-    print(f"Connecting to ZenCode MCP server at {host}:{port}...")
+    print(f"Connecting to FastCode Native MCP server at {host}:{port}...")
     
     try:
         sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)

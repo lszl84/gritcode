@@ -14,7 +14,7 @@
 #include <unistd.h>
 #endif
 
-namespace zencode::mcp {
+namespace fastcode::mcp {
 
 wxDEFINE_EVENT(MCP_STDIN_MESSAGE, wxThreadEvent);
 wxDEFINE_EVENT(MCP_SEND_MESSAGE_REQUEST, wxCommandEvent);
@@ -120,7 +120,7 @@ void MCPServer::HandleInitialize(const json& id, const json& params) {
     json result;
     result["protocolVersion"] = "2024-11-05";
     result["capabilities"]["tools"] = json::object();
-    result["serverInfo"]["name"] = "zencode";
+    result["serverInfo"]["name"] = "fastcode-native";
     result["serverInfo"]["version"] = "1.0.0";
 
     SendResult(id, result);
@@ -426,4 +426,4 @@ void MCPServer::OnModelsLoaded() {
     wxLogMessage("MCPServer: Models loaded, count=%zu", availableModels_.size());
 }
 
-} // namespace zencode::mcp
+} // namespace fastcode::mcp
