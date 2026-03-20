@@ -7,6 +7,14 @@
 ** TODO Markdown responses parsing and styling
 Need to parse markdown formatting in AI responses (bold, italic, code blocks, lists, links) and render them with appropriate styling in the chat display.
 
+** TODO Line-by-line responses rendering (streaming)
+Investigate how opencode.ai handles streaming responses:
+- Does the API support streaming/chunked responses?
+- How is partial content delivered (Server-Sent Events, chunked JSON, etc.)?
+- Can we render content as it arrives instead of waiting for full response?
+- What is the latency improvement?
+- Update streaming_text_ctrl to support incremental text updates
+
 ** TODO Keeping the context of the conversation
 Investigate how opencode.ai actually maintains conversation context:
 - Does it send full message history with each request?
