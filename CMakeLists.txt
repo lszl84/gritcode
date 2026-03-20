@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.24)
-project(fastcode-native VERSION 1.0.0 LANGUAGES CXX)
+project(main VERSION 1.0.0 LANGUAGES CXX)
 
 # Require C++23
 set(CMAKE_CXX_STANDARD 23)

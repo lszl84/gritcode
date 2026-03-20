@@ -32,6 +32,8 @@ wxEND_EVENT_TABLE()
 MainFrame::MainFrame() 
   : wxFrame(nullptr, wxID_ANY, "FastCode Native", wxDefaultPosition, wxSize(1200, 800)) {
   
+  SetName("wxapp");
+  
   CreateMenuBar();
   CreateUI();
   SetupEventHandlers();
@@ -385,19 +387,42 @@ wxString MainFrame::LoadApiKeyFromKeychain() {
 }
 
 bool MainFrame::SaveApiKeyToKeychain(const wxString& key) {
-    auto store = wxSecretStore::GetDefault();
-    if (!store.IsOk()) {
-        wxLogError("MainFrame: Could not access system keychain");
+    wxLogMessage("SaveApiKeyToKeychain: Starting...");
+    
+    try {
+        wxLogMessage("SaveApiKeyToKeychain: Getting store...");
+        auto store = wxSecretStore::GetDefault();
+        
+        wxLogMessage("SaveApiKeyToKeychain: Checking if store is OK...");
+        if (!store.IsOk()) {
+            wxLogError("MainFrame: Could not access system keychain");
+            return false;
+        }
+        
+        wxLogMessage("SaveApiKeyToKeychain: Creating secret value...");
+        wxSecretValue secret(key);
+        
+        wxLogMessage("SaveApiKeyToKeychain: Checking if secret is OK...");
+        if (!secret.IsOk()) {
+            wxLogError("MainFrame: Failed to create secret value");
+            return false;
+        }
+        
+        wxLogMessage("SaveApiKeyToKeychain: Calling store.Save()...");
+        if (!store.Save(KEYCHAIN_SERVICE, "apikey", secret)) {
+            wxLogError("MainFrame: Failed to save API key to keychain");
+            return false;
+        }
+
+        wxLogMessage("MainFrame: API key saved to keychain");
+        return true;
+    } catch (const std::exception& e) {
+        wxLogError("SaveApiKeyToKeychain: Exception: %s", e.what());
+        return false;
+    } catch (...) {
+        wxLogError("SaveApiKeyToKeychain: Unknown exception");
         return false;
     }
-
-    if (!store.Save(KEYCHAIN_SERVICE, "apikey", wxSecretValue(key))) {
-        wxLogError("MainFrame: Failed to save API key to keychain");
-        return false;
-    }
-
-    wxLogMessage("MainFrame: API key saved to keychain");
-    return true;
 }
 
 bool MainFrame::ClearApiKeyFromKeychain() {

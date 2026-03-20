@@ -27,10 +27,20 @@ bool HttpClient::Initialize() {
 }
 
 void HttpClient::Shutdown() {
-  if (currentRequest_.IsOk()) {
+  wxLogMessage("HttpClient::Shutdown: Shutting down...");
+  
+  // Clear callbacks first to prevent any late events from invoking them
+  modelsCallback_ = nullptr;
+  chatCallback_ = nullptr;
+  
+  // Just cancel if active - don't reset the request object
+  if (currentRequest_.IsOk() && currentRequest_.GetState() == wxWebRequest::State_Active) {
+    wxLogMessage("HttpClient::Shutdown: Cancelling active request");
     currentRequest_.Cancel();
   }
+  
   initialized_ = false;
+  wxLogMessage("HttpClient::Shutdown: Done");
 }
 
 void HttpClient::SetBaseUrl(const std::string& url) {
@@ -161,6 +171,13 @@ std::vector<ModelInfo> HttpClient::ParseModels(const std::string& responseJson) 
 void HttpClient::OnRequestStateChanged(wxWebRequestEvent& event) {
   wxLogMessage("HttpClient: Request state changed to %d", static_cast<int>(event.GetState()));
   
+  // Verify this event is from the current request (not an old cancelled one)
+  if (event.GetRequest().GetId() != currentRequest_.GetId()) {
+    wxLogMessage("HttpClient: Ignoring event - request ID mismatch (event=%d, current=%d)",
+                 event.GetRequest().GetId(), currentRequest_.GetId());
+    return;
+  }
+  
   if (event.GetState() == wxWebRequest::State_Completed) {
     auto response = event.GetResponse();
     wxLogMessage("HttpClient: Request completed with status %d", response.GetStatus());
@@ -287,6 +304,12 @@ void HttpClient::FetchModels(ModelsCallback callback) {
     wxLogError("HttpClient::FetchModels: Not initialized");
     callback({});
     return;
+  }
+  
+  // Check if there's an existing active request - if so, cancel it
+  if (currentRequest_.IsOk() && currentRequest_.GetState() == wxWebRequest::State_Active) {
+    wxLogWarning("HttpClient::FetchModels: Cancelling existing active request");
+    currentRequest_.Cancel();
   }
   
   std::string url = baseUrl_ + "/models";

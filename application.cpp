@@ -10,6 +10,8 @@ bool Application::OnInit() {
     return false;
   }
 
+  SetAppName("main");
+
   // Enable logging to console for debugging
   wxLog::SetActiveTarget(new wxLogStderr());
   wxLog::SetLogLevel(wxLOG_Info);
