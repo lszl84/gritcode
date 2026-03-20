@@ -44,6 +44,7 @@ struct ModelInfo {
 // Callbacks for async operations
 using ModelsCallback = std::function<void(const std::vector<ModelInfo>&)>;
 using ChatCallback = std::function<void(const ChatResponse&)>;
+using JsonLogCallback = std::function<void(const std::string& direction, const std::string& json)>;
 
 class HttpClient : public wxEvtHandler {
 public:
@@ -56,6 +57,7 @@ public:
   void SetBaseUrl(const std::string& url);
   void SetApiKey(const std::string& apiKey);
   void SetTimeout(int seconds);
+  void SetJsonLogCallback(JsonLogCallback callback);
 
   // Async methods - callbacks will be invoked when complete
   void FetchModels(ModelsCallback callback);
@@ -86,6 +88,7 @@ private:
   // Callbacks for current operation
   ModelsCallback modelsCallback_;
   ChatCallback chatCallback_;
+  JsonLogCallback jsonLogCallback_;
 };
 
 } // namespace fcn::network

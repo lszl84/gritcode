@@ -55,6 +55,10 @@ void HttpClient::SetTimeout(int seconds) {
   timeout_ = seconds;
 }
 
+void HttpClient::SetJsonLogCallback(JsonLogCallback callback) {
+  jsonLogCallback_ = callback;
+}
+
 std::string HttpClient::BuildRequestJson(const ChatRequest& request) {
   json j;
   j["model"] = request.model;
@@ -190,6 +194,11 @@ void HttpClient::OnRequestStateChanged(wxWebRequestEvent& event) {
       
       wxLogMessage("HttpClient: Got response, length=%zu, wxString length=%zu", 
                    responseBody.length(), responseStr.length());
+      
+      // Log the JSON response
+      if (jsonLogCallback_ && !responseBody.empty()) {
+        jsonLogCallback_("RECV", responseBody);
+      }
       
       // If AsString is empty, try reading from stream
       if (responseBody.empty()) {
@@ -366,6 +375,11 @@ void HttpClient::SendChatRequest(const ChatRequest& request, ChatCallback callba
   std::string requestBody = BuildRequestJson(request);
   
   wxLogMessage("HttpClient::SendChatRequest: URL=%s, body length=%zu", url.c_str(), requestBody.length());
+  
+  // Log the JSON being sent
+  if (jsonLogCallback_) {
+    jsonLogCallback_("SEND", requestBody);
+  }
   
   currentRequest_ = wxWebSession::GetDefault().CreateRequest(this, wxString::FromUTF8(url));
   

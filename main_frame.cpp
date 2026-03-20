@@ -8,6 +8,7 @@
 #include <wx/statline.h>
 #include <wx/log.h>
 #include <wx/secretstore.h>
+#include <wx/datetime.h>
 
 namespace fcn::ui {
 
@@ -32,7 +33,8 @@ wxEND_EVENT_TABLE()
 MainFrame::MainFrame() 
   : wxFrame(nullptr, wxID_ANY, "FastCode Native", wxDefaultPosition, wxSize(1200, 800)) {
   
-  SetName("wxapp");
+  // Set X11 WM_CLASS instance name (class is set by SetAppName in Application)
+  SetName("main");
   
   CreateMenuBar();
   CreateUI();
@@ -89,12 +91,12 @@ void MainFrame::CreateMenuBar() {
 void MainFrame::CreateUI() {
   auto* mainSizer = new wxBoxSizer(wxVERTICAL);
   
-  // Create splitter for sidebar and main content
-  m_splitter = new wxSplitterWindow(this, wxID_ANY);
-  m_splitter->SetMinimumPaneSize(200);
+  // Create outer splitter for sidebar vs (chat+debug)
+  m_mainSplitter = new wxSplitterWindow(this, wxID_ANY);
+  m_mainSplitter->SetMinimumPaneSize(150);
   
   // Sidebar panel
-  m_sidebarPanel = new wxPanel(m_splitter);
+  m_sidebarPanel = new wxPanel(m_mainSplitter);
   auto* sidebarSizer = new wxBoxSizer(wxVERTICAL);
   
   // Connection status
@@ -118,11 +120,15 @@ void MainFrame::CreateUI() {
 
   m_sidebarPanel->SetSizer(sidebarSizer);
   
-  // Main content panel - Chat interface
-  m_mainPanel = new wxPanel(m_splitter);
+  // Create inner splitter for chat vs debug (inside the right pane of main splitter)
+  m_chatSplitter = new wxSplitterWindow(m_mainSplitter);
+  m_chatSplitter->SetMinimumPaneSize(300);
+  
+  // Chat panel (left side of chat splitter)
+  m_mainPanel = new wxPanel(m_chatSplitter);
   auto* mainPanelSizer = new wxBoxSizer(wxVERTICAL);
   
-  // Chat display - pixel-perfect custom text control with block types and selection
+  // Chat display
   m_chatDisplay = new StreamingTextCtrl(m_mainPanel, wxID_ANY);
   m_chatDisplay->SetAutoScroll(true);
   mainPanelSizer->Add(m_chatDisplay, 1, wxEXPAND);
@@ -141,10 +147,27 @@ void MainFrame::CreateUI() {
   mainPanelSizer->Add(inputSizer, 0, wxALL | wxEXPAND, 5);
   m_mainPanel->SetSizer(mainPanelSizer);
   
-  // Split the window
-  m_splitter->SplitVertically(m_sidebarPanel, m_mainPanel, 250);
+  // Debug panel (right side of chat splitter)
+  m_debugPanel = new wxPanel(m_chatSplitter);
+  auto* debugSizer = new wxBoxSizer(wxVERTICAL);
   
-  mainSizer->Add(m_splitter, 1, wxEXPAND);
+  debugSizer->Add(new wxStaticText(m_debugPanel, wxID_ANY, "JSON Traffic:"), 0, wxALL, 5);
+  
+  m_jsonLog = new wxTextCtrl(m_debugPanel, wxID_ANY, wxEmptyString,
+                              wxDefaultPosition, wxDefaultSize,
+                              wxTE_MULTILINE | wxTE_READONLY | wxTE_WORDWRAP);
+  m_jsonLog->SetFont(wxFont(9, wxFONTFAMILY_TELETYPE, wxFONTSTYLE_NORMAL, wxFONTWEIGHT_NORMAL));
+  debugSizer->Add(m_jsonLog, 1, wxEXPAND | wxALL, 5);
+  
+  m_debugPanel->SetSizer(debugSizer);
+  
+  // Split chat and debug (chat on left, debug on right)
+  m_chatSplitter->SplitVertically(m_mainPanel, m_debugPanel, 600);
+  
+  // Split main (sidebar on left, chat+debug on right)
+  m_mainSplitter->SplitVertically(m_sidebarPanel, m_chatSplitter, 200);
+  
+  mainSizer->Add(m_mainSplitter, 1, wxEXPAND);
   SetSizer(mainSizer);
 }
 
@@ -168,14 +191,20 @@ void MainFrame::SetupEventHandlers() {
   zen.Bind(fcn::zen::ZEN_MESSAGE_RECEIVED, &MainFrame::OnZenMessageReceived, this);
   zen.Bind(fcn::zen::ZEN_ERROR_OCCURRED, &MainFrame::OnZenError, this);
   zen.Bind(fcn::zen::ZEN_MODELS_LOADED, &MainFrame::OnZenModelsLoaded, this);
+  
+  // Set up JSON logging callback
+  zen.SetJsonLogCallback([this](const std::string& direction, const std::string& json) {
+    this->LogJsonTraffic(wxString::FromUTF8(direction), wxString::FromUTF8(json));
+  });
+  
   wxLogMessage("MainFrame::SetupEventHandlers: Bound ZenClient events to MainFrame");
 }
 
-void MainFrame::OnExit(wxCommandEvent& event) {
+void MainFrame::OnExit(wxCommandEvent& /*event*/) {
   Close(true);
 }
 
-void MainFrame::OnAbout(wxCommandEvent& event) {
+void MainFrame::OnAbout(wxCommandEvent& /*event*/) {
   wxMessageBox("FastCode Native - OpenCode Zen Agent Harness\n\n"
                "A fast, native replacement for web-based TUIs\n\n"
                "Free models available:\n"
@@ -188,7 +217,7 @@ void MainFrame::OnAbout(wxCommandEvent& event) {
                wxOK | wxICON_INFORMATION);
 }
 
-void MainFrame::OnConnect(wxCommandEvent& event) {
+void MainFrame::OnConnect(wxCommandEvent& /*event*/) {
   wxLogMessage("OnConnect: Reconnecting...");
 
   auto& zen = zen::ZenClient::Instance();
@@ -204,13 +233,13 @@ void MainFrame::OnConnect(wxCommandEvent& event) {
   }
 }
 
-void MainFrame::OnDisconnect(wxCommandEvent& event) {
+void MainFrame::OnDisconnect(wxCommandEvent& /*event*/) {
   auto& zen = zen::ZenClient::Instance();
   zen.Disconnect();
   UpdateConnectionStatus();
 }
 
-void MainFrame::OnSendMessage(wxCommandEvent& event) {
+void MainFrame::OnSendMessage(wxCommandEvent& /*event*/) {
   wxString message = m_messageInput->GetValue();
   if (message.IsEmpty()) return;
   
@@ -234,7 +263,7 @@ void MainFrame::OnSendMessage(wxCommandEvent& event) {
   }
 }
 
-void MainFrame::OnModelSelected(wxCommandEvent& event) {
+void MainFrame::OnModelSelected(wxCommandEvent& /*event*/) {
   int selection = m_modelChoice->GetSelection();
   if (selection != wxNOT_FOUND) {
     auto* data = dynamic_cast<wxStringClientData*>(m_modelChoice->GetClientObject(selection));
@@ -257,7 +286,7 @@ void MainFrame::OnZenConnected(wxCommandEvent& event) {
   AppendToChat("System", msg);
 }
 
-void MainFrame::OnZenDisconnected(wxCommandEvent& event) {
+void MainFrame::OnZenDisconnected(wxCommandEvent& /*event*/) {
   wxLogMessage("MainFrame::OnZenDisconnected called");
   UpdateConnectionStatus();
   m_modelChoice->Clear();
@@ -294,7 +323,7 @@ void MainFrame::OnZenError(wxCommandEvent& event) {
   m_sendButton->Enable();
 }
 
-void MainFrame::OnZenModelsLoaded(wxCommandEvent& event) {
+void MainFrame::OnZenModelsLoaded(wxCommandEvent& /*event*/) {
   wxLogMessage("MainFrame::OnZenModelsLoaded: Models have been loaded, populating list...");
   PopulateModelList();
   
@@ -365,6 +394,20 @@ void MainFrame::AppendToChat(const wxString& sender, const wxString& message) {
   }
 }
 
+void MainFrame::LogJsonTraffic(const wxString& direction, const wxString& json) {
+  if (!m_jsonLog) return;
+  
+  wxString timestamp = wxDateTime::Now().Format("%H:%M:%S");
+  wxString prefix = direction;  // Now "SEND" or "RECV"
+  
+  m_jsonLog->AppendText(wxString::Format("\n=== %s [%s] ===\n", prefix, timestamp));
+  m_jsonLog->AppendText(json);
+  m_jsonLog->AppendText("\n");
+  
+  // Auto-scroll to bottom
+  m_jsonLog->ShowPosition(m_jsonLog->GetLastPosition());
+}
+
 // --- API Key management via wxSecretStore ---
 
 static const wxString KEYCHAIN_SERVICE = "FastCodeNative/OpenCodeZen";
@@ -431,7 +474,7 @@ bool MainFrame::ClearApiKeyFromKeychain() {
     return store.Delete(KEYCHAIN_SERVICE);
 }
 
-void MainFrame::OnSetApiKey(wxCommandEvent& event) {
+void MainFrame::OnSetApiKey(wxCommandEvent& /*event*/) {
     wxString currentKey = LoadApiKeyFromKeychain();
     bool hasKey = !currentKey.IsEmpty();
 

@@ -198,4 +198,8 @@ bool ZenClient::IsAnonymous() const {
   return httpClient_->IsAnonymous();
 }
 
+void ZenClient::SetJsonLogCallback(network::JsonLogCallback callback) {
+  httpClient_->SetJsonLogCallback(callback);
+}
+
 } // namespace fcn::zen

@@ -10,7 +10,9 @@ bool Application::OnInit() {
     return false;
   }
 
-  SetAppName("main");
+  // Set WM_CLASS for dwm to identify all wxWidgets apps
+  // Class = "wxapp" (generic for all wxWidgets applications)
+  SetAppName("wxapp");  // This sets the CLASS in WM_CLASS
 
   // Enable logging to console for debugging
   wxLog::SetActiveTarget(new wxLogStderr());

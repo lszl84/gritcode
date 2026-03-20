@@ -25,6 +25,8 @@ public:
   std::string GetActiveModel() const;
   
   bool IsAnonymous() const;
+  
+  void SetJsonLogCallback(network::JsonLogCallback callback);
 
 private:
   ZenClient();

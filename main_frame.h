@@ -38,13 +38,16 @@ private:
   void UpdateConnectionStatus();
   void PopulateModelList();
   void AppendToChat(const wxString& sender, const wxString& message);
+  void LogJsonTraffic(const wxString& direction, const wxString& json);
   wxString LoadApiKeyFromKeychain();
   bool SaveApiKeyToKeychain(const wxString& key);
   bool ClearApiKeyFromKeychain();
   
   wxPanel* m_sidebarPanel = nullptr;
   wxPanel* m_mainPanel = nullptr;
-  wxSplitterWindow* m_splitter = nullptr;
+  wxPanel* m_debugPanel = nullptr;
+  wxSplitterWindow* m_mainSplitter = nullptr;
+  wxSplitterWindow* m_chatSplitter = nullptr;
   
   // Chat UI elements
   StreamingTextCtrl* m_chatDisplay = nullptr;
@@ -52,6 +55,9 @@ private:
   wxButton* m_sendButton = nullptr;
   wxChoice* m_modelChoice = nullptr;
   wxStaticText* m_statusLabel = nullptr;
+  
+  // Debug UI elements
+  wxTextCtrl* m_jsonLog = nullptr;
   
   wxDECLARE_EVENT_TABLE();
 };
