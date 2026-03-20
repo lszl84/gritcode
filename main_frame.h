@@ -3,8 +3,10 @@
 #include <wx/wx.h>
 #include <wx/splitter.h>
 #include <wx/textctrl.h>
-#include "network/zen_client.h"
-#include "mcp/mcp_server.h"
+#include "zen_client.h"
+#include "mcp_server.h"
+
+class StreamingTextCtrl;
 
 namespace zencode::ui {
 
@@ -45,7 +47,7 @@ private:
   wxSplitterWindow* m_splitter = nullptr;
   
   // Chat UI elements
-  wxTextCtrl* m_chatDisplay = nullptr;
+  StreamingTextCtrl* m_chatDisplay = nullptr;
   wxTextCtrl* m_messageInput = nullptr;
   wxButton* m_sendButton = nullptr;
   wxChoice* m_modelChoice = nullptr;

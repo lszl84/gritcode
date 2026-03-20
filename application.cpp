@@ -1,5 +1,5 @@
-#include "core/application.h"
-#include "ui/main_frame.h"
+#include "application.h"
+#include "main_frame.h"
 #include <wx/log.h>
 #include <wx/file.h>
 

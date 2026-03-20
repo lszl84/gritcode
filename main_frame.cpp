@@ -1,5 +1,6 @@
-#include "ui/main_frame.h"
-#include "mcp/mcp_server.h"
+#include "main_frame.h"
+#include "streaming_text_ctrl.h"
+#include "mcp_server.h"
 #include <wx/splitter.h>
 #include <wx/textctrl.h>
 #include <wx/button.h>
@@ -36,8 +37,6 @@ MainFrame::MainFrame()
   SetupEventHandlers();
   
   Centre();
-  Raise();
-  RequestUserAttention();
 
   // Start MCP server for programmatic control
   StartMCPServer();
@@ -121,13 +120,10 @@ void MainFrame::CreateUI() {
   m_mainPanel = new wxPanel(m_splitter);
   auto* mainPanelSizer = new wxBoxSizer(wxVERTICAL);
   
-  // Chat display (read-only)
-  m_chatDisplay = new wxTextCtrl(m_mainPanel, wxID_ANY, wxEmptyString, 
-                                  wxDefaultPosition, wxDefaultSize,
-                                  wxTE_MULTILINE | wxTE_READONLY | wxTE_RICH);
-  m_chatDisplay->SetBackgroundColour(wxColour(30, 30, 30));
-  m_chatDisplay->SetForegroundColour(wxColour(220, 220, 220));
-  mainPanelSizer->Add(m_chatDisplay, 1, wxALL | wxEXPAND, 10);
+  // Chat display - pixel-perfect custom text control with block types and selection
+  m_chatDisplay = new StreamingTextCtrl(m_mainPanel, wxID_ANY);
+  m_chatDisplay->SetAutoScroll(true);
+  mainPanelSizer->Add(m_chatDisplay, 1, wxEXPAND);
   
   // Message input area
   auto* inputSizer = new wxBoxSizer(wxHORIZONTAL);
@@ -355,25 +351,16 @@ void MainFrame::PopulateModelList() {
 }
 
 void MainFrame::AppendToChat(const wxString& sender, const wxString& message) {
-  wxString timestamp = wxDateTime::Now().Format("%H:%M:%S");
-  wxString formatted;
-  
   if (sender == "You") {
-    formatted = wxString::Format("[%s] %s:\n%s\n\n", timestamp, sender, message);
-    m_chatDisplay->SetDefaultStyle(wxTextAttr(wxColour(100, 200, 255)));
+    m_chatDisplay->AppendStream(BlockType::USER_PROMPT, message);
   } else if (sender == "AI") {
-    formatted = wxString::Format("[%s] %s:\n%s\n\n", timestamp, sender, message);
-    m_chatDisplay->SetDefaultStyle(wxTextAttr(wxColour(150, 255, 150)));
+    m_chatDisplay->AppendStream(BlockType::NORMAL, message);
   } else if (sender == "Error") {
-    formatted = wxString::Format("[%s] ERROR: %s\n\n", timestamp, message);
-    m_chatDisplay->SetDefaultStyle(wxTextAttr(wxColour(255, 100, 100)));
+    m_chatDisplay->AppendStream(BlockType::THINKING, "Error: " + message);
   } else {
-    formatted = wxString::Format("[%s] %s: %s\n\n", timestamp, sender, message);
-    m_chatDisplay->SetDefaultStyle(wxTextAttr(wxColour(200, 200, 200)));
+    // System messages
+    m_chatDisplay->AppendStream(BlockType::THINKING, sender + ": " + message);
   }
-  
-  m_chatDisplay->AppendText(formatted);
-  m_chatDisplay->ShowPosition(m_chatDisplay->GetLastPosition());
 }
 
 // --- API Key management via wxSecretStore ---

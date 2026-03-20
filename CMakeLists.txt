@@ -36,22 +36,24 @@ FetchContent_MakeAvailable(json)
 
 # Source files - explicitly listed (no GLOB)
 set(SOURCES
-  src/core/application.cpp
-  src/core/application.h
-  src/network/http_client.cpp
-  src/network/http_client.h
-  src/network/zen_client.cpp
-  src/network/zen_client.h
-  src/ui/main_frame.cpp
-  src/ui/main_frame.h
-  src/mcp/mcp_server.cpp
-  src/mcp/mcp_server.h
+  application.cpp
+  application.h
+  http_client.cpp
+  http_client.h
+  zen_client.cpp
+  zen_client.h
+  main_frame.cpp
+  main_frame.h
+  block_manager.cpp
+  block_manager.h
+  streaming_text_ctrl.cpp
+  streaming_text_ctrl.h
+  mcp_server.cpp
+  mcp_server.h
 )
 
 # Create executable
 add_executable(${PROJECT_NAME} ${SOURCES})
-
-target_include_directories(${PROJECT_NAME} PRIVATE src)
 
 # Link wxWidgets and libraries
 target_link_libraries(${PROJECT_NAME} PRIVATE

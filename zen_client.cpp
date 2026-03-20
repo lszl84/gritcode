@@ -1,4 +1,4 @@
-#include "network/zen_client.h"
+#include "zen_client.h"
 #include <wx/wx.h>
 #include <wx/log.h>
 #include <algorithm>

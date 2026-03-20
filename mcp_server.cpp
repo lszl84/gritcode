@@ -1,5 +1,5 @@
-#include "mcp/mcp_server.h"
-#include "network/zen_client.h"
+#include "mcp_server.h"
+#include "zen_client.h"
 #include <wx/app.h>
 #include <wx/window.h>
 #include <wx/log.h>

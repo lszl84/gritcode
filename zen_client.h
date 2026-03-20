@@ -1,6 +1,6 @@
 #pragma once
 
-#include "network/http_client.h"
+#include "http_client.h"
 #include <wx/event.h>
 #include <memory>
 #include <vector>
