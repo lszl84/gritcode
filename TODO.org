@@ -1,86 +1,113 @@
 # TODO.org
-#+TITLE: FastCode Native - Project TODO
+#+TITLE: FastCode Native - Project Roadmap
 #+AUTHOR: FastCode Team
 
-* Features to Implement
+* Current Status (DONE)
 
-** TODO Markdown responses parsing and styling
-Need to parse markdown formatting in AI responses (bold, italic, code blocks, lists, links) and render them with appropriate styling in the chat display.
+** DONE Fix UTF-8 string conversion in wxCommandEvent
+- Fixed content being lost when passing std::string to wxCommandEvent
+- Use explicit wxString::FromUTF8() with length parameter
 
-** TODO Line-by-line responses rendering (streaming)
-Investigate how opencode.ai handles streaming responses:
-- Does the API support streaming/chunked responses?
-- How is partial content delivered (Server-Sent Events, chunked JSON, etc.)?
-- Can we render content as it arrives instead of waiting for full response?
-- What is the latency improvement?
-- Update streaming_text_ctrl to support incremental text updates
+** DONE Remove duplicate Zen event bindings
+- Events were bound in both event table and SetupEventHandlers
+- Could cause handlers to fire twice
 
-** TODO Keeping the context of the conversation
-Investigate how opencode.ai actually maintains conversation context:
-- Does it send full message history with each request?
-- Is there a session/conversation ID mechanism?
-- How does it handle context window limits?
-- Check the API documentation and actual request/response patterns
-
-** TODO Handling tool use and web searches
-Investigate how opencode.ai implements tool use:
-- What tools are available (web search, file operations, etc.)?
-- How are tool calls represented in the API?
-- How are tool results sent back to the model?
-- Is there a specific tool use format in requests/responses?
-
-** TODO Handling subagents
-Investigate how opencode.ai handles subagent orchestration:
-- How are subagents defined and invoked?
-- What is the communication protocol between main agent and subagents?
-- How is subagent output integrated into the main response?
-- Are there special API endpoints or message formats for subagents?
-
-* Research Tasks
-
-** INVESTIGATE OpenCode Zen API documentation
-- [ ] Find official API docs or schema
-- [ ] Analyze actual request/response payloads
-- [ ] Document conversation context mechanism
-- [ ] Document tool use protocol
-- [ ] Document subagent protocol
-
-** INVESTIGATE Cutescroll tutorial for text styling
-The cutescroll project in parent directory might have examples of:
-- Rich text rendering
-- Styled text blocks
-- Mixed content types
-
-* Implementation Notes
-
-** Markdown Parsing Options
-- Use existing library (md4c, cmark, etc.)
-- Implement lightweight parser for common markdown features
-- Map markdown elements to BlockType in streaming_text_ctrl
-
-** Conversation Context
-Options:
-1. Store full message history locally and send with each request
-2. Use server-side session management (if API supports it)
-3. Hybrid approach with periodic summarization
-
-** Tool Use Architecture
-Need to design:
-- Tool registry/discovery mechanism
-- Tool call serialization format
-- Tool result handling
-- Async tool execution
-
-** Subagent Architecture
-Need to understand:
-- Are subagents separate API calls or part of main request?
-- How is subagent output tagged/formatted?
-- Error handling for subagent failures
-
-* Completed Tasks
-
-** DONE Fix duplicate event binding issue causing missing responses
-** DONE Fix crashes when changing API key
 ** DONE Add debug panel for JSON traffic
-** DONE Fix UTF-8 response handling
+- Shows SEND/RECV JSON payloads with word wrap
+- Helps diagnose API communication issues
+
+** DONE Fix crashes when changing API key
+- Proper wxWebRequest lifecycle management
+- Cancel without resetting request object
+
+* Active Development (IN PROGRESS)
+
+** TODO Conversation Context Management [HIGH PRIORITY]
+Current behavior: Each message is independent
+Goal: Maintain conversation history
+
+*** Research Questions:
+- Does OpenCode Zen API support conversation sessions?
+- Do we send full message history with each request?
+- Or is there a session/conversation ID mechanism?
+- Check the JSON debug panel for patterns
+
+*** Implementation Options:
+1. Store message history locally, append to each request
+2. Use server-side session management (if supported)
+3. Hybrid: server session + local cache
+
+*** Implementation Plan:
+- [ ] Analyze JSON traffic to see if opencode sends history
+- [ ] Add message history storage (vector of ChatMessage)
+- [ ] Modify SendMessage to include previous messages
+- [ ] Add UI to show/manage conversation threads
+
+** TODO Markdown Response Rendering [MEDIUM PRIORITY]
+Current behavior: Markdown shown as raw text
+Goal: Render formatted text (bold, italic, code, lists)
+
+*** Implementation Options:
+- Use lightweight markdown parser
+- Map markdown elements to BlockType in streaming_text_ctrl
+- Support: **bold**, *italic*, `code`, ```blocks```, lists, [links](url)
+
+*** Research:
+- Check cutescroll tutorial in parent dir for text styling examples
+
+* Future Features (PLANNED)
+
+** TODO Line-by-line Streaming Responses
+Current behavior: Wait for full response
+Goal: Render as it arrives for better UX
+
+*** Research Questions:
+- Does API support Server-Sent Events or chunked responses?
+- How does opencode handle streaming?
+
+** TODO Tool Use and Web Searches
+Implement tool calling:
+- Web search
+- File operations
+- Code execution
+
+*** Research Questions:
+- How are tools defined in API?
+- What is the request/response format for tool calls?
+
+** TODO Subagent Support
+Handle subagent orchestration
+
+*** Research Questions:
+- How are subagents invoked?
+- How is subagent output integrated?
+
+* Technical Debt
+
+** TODO Add unit tests for HTTP client JSON parsing
+- Test ParseResponse with various JSON formats
+- Test UTF-8 string handling
+- Test error cases
+
+** TODO Optimize streaming_text_ctrl for long conversations
+- Currently keeps all text in memory
+- Consider virtual scrolling for very long chats
+
+* Reference Materials
+
+** OpenCode Zen API
+- Clone at ../opencode for reference
+- Use JSON debug panel to analyze real traffic
+
+** wxWidgets Tutorials
+- cutescroll: rich text rendering examples
+- wx_webrequest_tutorial: proper HTTP request patterns
+- wx_cmake_fetchcontent_template: build system reference
+
+* Completed Tasks Archive
+
 ** DONE Fix all compiler warnings
+** DONE Fix empty responses after multiple requests
+** DONE Add API key management via keychain
+** DONE Implement MCP server protocol
+** DONE Integrate StreamingTextCtrl

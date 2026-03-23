@@ -12,6 +12,7 @@ using json = nlohmann::json;
 HttpClient::HttpClient() : initialized_(false) {
   // Bind to web request events
   Bind(wxEVT_WEBREQUEST_STATE, &HttpClient::OnRequestStateChanged, this);
+  Bind(wxEVT_WEBREQUEST_DATA, &HttpClient::OnRequestData, this);
 }
 
 HttpClient::~HttpClient() {
@@ -186,6 +187,35 @@ void HttpClient::OnRequestStateChanged(wxWebRequestEvent& event) {
     auto response = event.GetResponse();
     wxLogMessage("HttpClient: Request completed with status %d", response.GetStatus());
     
+    // Handle streaming completion
+    if (isStreaming_) {
+      wxLogMessage("HttpClient: Streaming request completed");
+      
+      // Process any remaining data in buffer
+      if (!sseBuffer_.empty()) {
+        ProcessSSEChunk("\n\n"); // Force process remaining buffer
+      }
+      
+      ChatResponse finalResponse;
+      finalResponse.content = accumulatedContent_;
+      finalResponse.finishReason = "stop";
+      
+      if (response.GetStatus() != 200) {
+        finalResponse.error = true;
+        finalResponse.errorMessage = "HTTP Error " + std::to_string(response.GetStatus());
+      }
+      
+      if (streamingCompleteCallback_) {
+        auto cb = streamingCompleteCallback_;
+        streamingCompleteCallback_ = nullptr;
+        streamingChunkCallback_ = nullptr;
+        isStreaming_ = false;
+        cb(finalResponse);
+      }
+      return;
+    }
+    
+    // Non-streaming handling (existing code)
     if (response.GetStatus() == 200) {
       wxString responseStr = response.AsString();
       // Use ToUTF8() to preserve all bytes including nulls, then convert to std::string
@@ -260,19 +290,84 @@ void HttpClient::OnRequestStateChanged(wxWebRequestEvent& event) {
     }
   } else if (event.GetState() == wxWebRequest::State_Failed) {
     // Request failed - get more details
-    wxString errorStr = event.GetErrorDescription();
-    std::string errorMsg = "Request failed";
-    if (!errorStr.IsEmpty()) {
-      errorMsg += ": " + errorStr.ToStdString();
-    } else {
-      errorMsg += " (network error or timeout)";
+    wxString errorDesc = event.GetErrorDescription();
+    wxLogError("HttpClient: Request failed: %s", errorDesc.c_str());
+    
+    // Handle streaming failure
+    if (isStreaming_) {
+      ChatResponse error;
+      error.error = true;
+      error.errorMessage = "Request failed: " + std::string(errorDesc.ToUTF8());
+      
+      if (streamingCompleteCallback_) {
+        auto cb = streamingCompleteCallback_;
+        streamingCompleteCallback_ = nullptr;
+        streamingChunkCallback_ = nullptr;
+        isStreaming_ = false;
+        cb(error);
+      }
+      return;
     }
-    wxLogError("HttpClient: %s", errorMsg.c_str());
     
     if (chatCallback_) {
       ChatResponse error;
       error.error = true;
-      error.errorMessage = errorMsg;
+      error.errorMessage = "Request failed: " + std::string(errorDesc.ToUTF8());
+      auto cb = chatCallback_;
+      modelsCallback_ = nullptr;
+      chatCallback_ = nullptr;
+      cb(error);
+    } else if (modelsCallback_) {
+      auto cb = modelsCallback_;
+      modelsCallback_ = nullptr;
+      chatCallback_ = nullptr;
+      cb({});
+    }
+  } else if (event.GetState() == wxWebRequest::State_Cancelled) {
+    wxLogMessage("HttpClient: Request was cancelled");
+    // Handle streaming cancellation
+    if (isStreaming_) {
+      ChatResponse cancelled;
+      cancelled.error = true;
+      cancelled.errorMessage = "Request cancelled";
+      cancelled.content = accumulatedContent_; // Return what we got so far
+      
+      if (streamingCompleteCallback_) {
+        auto cb = streamingCompleteCallback_;
+        streamingCompleteCallback_ = nullptr;
+        streamingChunkCallback_ = nullptr;
+        isStreaming_ = false;
+        cb(cancelled);
+      }
+    }
+    // Don't call non-streaming callbacks for cancelled requests - they were intentionally stopped
+  } else if (event.GetState() == wxWebRequest::State_Active) {
+    wxLogMessage("HttpClient: Request is active...");
+  } else if (event.GetState() == wxWebRequest::State_Idle) {
+    wxLogMessage("HttpClient: Request is idle");
+  } else if (event.GetState() == wxWebRequest::State_Unauthorized) {
+    wxLogError("HttpClient: Request unauthorized");
+    
+    // Handle streaming unauthorized
+    if (isStreaming_) {
+      ChatResponse error;
+      error.error = true;
+      error.errorMessage = "Unauthorized - check API key";
+      
+      if (streamingCompleteCallback_) {
+        auto cb = streamingCompleteCallback_;
+        streamingCompleteCallback_ = nullptr;
+        streamingChunkCallback_ = nullptr;
+        isStreaming_ = false;
+        cb(error);
+      }
+      return;
+    }
+    
+    if (chatCallback_) {
+      ChatResponse error;
+      error.error = true;
+      error.errorMessage = "Unauthorized - check API key";
       auto cb = chatCallback_;
       modelsCallback_ = nullptr;
       chatCallback_ = nullptr;
@@ -414,13 +509,198 @@ void HttpClient::SendStreamingChatRequest(
   std::function<void(const std::string& chunk)> onChunk,
   std::function<void(const ChatResponse& response)> onComplete
 ) {
-  // For now, just call the regular request and pass the whole content as one chunk
-  SendChatRequest(request, [onChunk, onComplete](const ChatResponse& response) {
-    if (!response.content.empty()) {
-      onChunk(response.content);
+  wxLogMessage("HttpClient::SendStreamingChatRequest: Starting...");
+  
+  if (!initialized_) {
+    wxLogError("HttpClient::SendStreamingChatRequest: Not initialized");
+    ChatResponse error;
+    error.error = true;
+    error.errorMessage = "HTTP client not initialized";
+    onComplete(error);
+    return;
+  }
+  
+  // Check if there's an existing active request - if so, cancel it
+  if (currentRequest_.IsOk() && currentRequest_.GetState() == wxWebRequest::State_Active) {
+    wxLogWarning("HttpClient::SendStreamingChatRequest: Cancelling existing active request");
+    currentRequest_.Cancel();
+  }
+  
+  std::string url = baseUrl_ + "/chat/completions";
+  
+  // Build request with streaming enabled
+  ChatRequest streamRequest = request;
+  streamRequest.stream = true;
+  std::string requestBody = BuildRequestJson(streamRequest);
+  
+  wxLogMessage("HttpClient::SendStreamingChatRequest: URL=%s, body length=%zu", url.c_str(), requestBody.length());
+  
+  // Log the JSON being sent
+  if (jsonLogCallback_) {
+    jsonLogCallback_("SEND", requestBody);
+  }
+  
+  currentRequest_ = wxWebSession::GetDefault().CreateRequest(this, wxString::FromUTF8(url));
+  
+  if (!currentRequest_.IsOk()) {
+    wxLogError("HttpClient::SendStreamingChatRequest: Failed to create request");
+    ChatResponse error;
+    error.error = true;
+    error.errorMessage = "Failed to create web request";
+    onComplete(error);
+    return;
+  }
+  
+  // KEY: Set storage to None to receive data via wxEVT_WEBREQUEST_DATA events
+  currentRequest_.SetStorage(wxWebRequest::Storage_None);
+  
+  currentRequest_.SetHeader("Content-Type", "application/json");
+  currentRequest_.SetHeader("Accept", "text/event-stream");
+  
+  if (!apiKey_.empty()) {
+    currentRequest_.SetHeader("Authorization", "Bearer " + wxString::FromUTF8(apiKey_));
+  }
+  
+  // Set the data to POST
+  wxLogMessage("HttpClient::SendStreamingChatRequest: Setting POST data...");
+  currentRequest_.SetData(wxString::FromUTF8(requestBody), "application/json");
+  
+  // Store streaming callbacks
+  streamingChunkCallback_ = onChunk;
+  streamingCompleteCallback_ = onComplete;
+  sseBuffer_.clear();
+  accumulatedContent_.clear();
+  isStreaming_ = true;
+  
+  // Clear other callbacks
+  modelsCallback_ = nullptr;
+  chatCallback_ = nullptr;
+  
+  wxLogMessage("HttpClient::SendStreamingChatRequest: Starting request...");
+  currentRequest_.Start();
+}
+
+void HttpClient::OnRequestData(wxWebRequestEvent& event) {
+  if (!isStreaming_) {
+    wxLogMessage("HttpClient::OnRequestData: Ignoring - not in streaming mode");
+    return;
+  }
+  
+  // Get the data chunk
+  const void* buffer = event.GetDataBuffer();
+  size_t size = event.GetDataSize();
+  
+  wxLogMessage("HttpClient::OnRequestData: Event received, buffer=%p, size=%zu", buffer, size);
+  
+  if (buffer && size > 0) {
+    // Convert to string
+    std::string chunk(static_cast<const char*>(buffer), size);
+    wxLogMessage("HttpClient::OnRequestData: Processing chunk: '%s'", 
+                 wxString::FromUTF8(chunk.substr(0, 100)).c_str());
+    
+    // Process as SSE
+    ProcessSSEChunk(chunk);
+  } else {
+    wxLogWarning("HttpClient::OnRequestData: Empty buffer or zero size");
+  }
+}
+
+void HttpClient::ProcessSSEChunk(const std::string& chunk) {
+  wxLogMessage("HttpClient::ProcessSSEChunk: Appending %zu bytes to buffer (current size: %zu)", 
+               chunk.length(), sseBuffer_.length());
+  
+  // Append to buffer
+  sseBuffer_ += chunk;
+  
+  wxLogMessage("HttpClient::ProcessSSEChunk: Buffer now %zu bytes, looking for events...", sseBuffer_.length());
+  
+  // SSE format: lines starting with "data: " separated by double newlines
+  // Process complete events (separated by \n\n)
+  size_t pos = 0;
+  int eventsProcessed = 0;
+  while ((pos = sseBuffer_.find("\n\n")) != std::string::npos) {
+    std::string event = sseBuffer_.substr(0, pos);
+    sseBuffer_.erase(0, pos + 2);
+    eventsProcessed++;
+    
+    wxLogMessage("HttpClient::ProcessSSEChunk: Processing event #%d, length=%zu", 
+                 eventsProcessed, event.length());
+    
+    // Parse the event
+    std::istringstream stream(event);
+    std::string line;
+    std::string data;
+    
+    while (std::getline(stream, line)) {
+      // Remove trailing \r if present (for CRLF)
+      if (!line.empty() && line.back() == '\r') {
+        line.pop_back();
+      }
+      
+      wxLogMessage("HttpClient::ProcessSSEChunk: Line: '%s'", 
+                   wxString::FromUTF8(line).c_str());
+      
+      // Check if line starts with "data: "
+      if (line.substr(0, 6) == "data: ") {
+        data = line.substr(6);
+        
+        wxLogMessage("HttpClient::ProcessSSEChunk: Data line found: '%s'", 
+                     wxString::FromUTF8(data.substr(0, 50)).c_str());
+        
+        // Check for [DONE] marker
+        if (data == "[DONE]") {
+          wxLogMessage("HttpClient::ProcessSSEChunk: Received [DONE] marker");
+          continue;
+        }
+        
+        // Parse the JSON data
+        try {
+          json j = json::parse(data);
+          
+          wxLogMessage("HttpClient::ProcessSSEChunk: JSON parsed successfully");
+          
+          // Extract delta content from choices
+          if (j.contains("choices") && !j["choices"].empty()) {
+            const auto& choice = j["choices"][0];
+            if (choice.contains("delta")) {
+              const auto& delta = choice["delta"];
+              std::string content;
+              
+              // Check for content (regular response) or reasoning_content (thinking)
+              if (delta.contains("content")) {
+                content = delta["content"].get<std::string>();
+              } else if (delta.contains("reasoning_content")) {
+                content = delta["reasoning_content"].get<std::string>();
+              }
+              
+              if (!content.empty()) {
+                wxLogMessage("HttpClient::ProcessSSEChunk: Content extracted: '%s'", 
+                             wxString::FromUTF8(content).c_str());
+                accumulatedContent_ += content;
+                wxLogMessage("HttpClient::ProcessSSEChunk: Accumulated content now %zu chars", 
+                             accumulatedContent_.length());
+                if (streamingChunkCallback_) {
+                  wxLogMessage("HttpClient::ProcessSSEChunk: Calling chunk callback");
+                  streamingChunkCallback_(content);
+                } else {
+                  wxLogWarning("HttpClient::ProcessSSEChunk: No chunk callback set!");
+                }
+              }
+            } else {
+              wxLogMessage("HttpClient::ProcessSSEChunk: No delta in choice");
+            }
+          } else {
+            wxLogMessage("HttpClient::ProcessSSEChunk: No choices in JSON");
+          }
+        } catch (const json::exception& e) {
+          wxLogWarning("HttpClient::ProcessSSEChunk: Failed to parse JSON: %s", e.what());
+        }
+      }
     }
-    onComplete(response);
-  });
+  }
+  
+  wxLogMessage("HttpClient::ProcessSSEChunk: Finished processing, %d events handled, buffer remaining: %zu bytes", 
+               eventsProcessed, sseBuffer_.length());
 }
 
 } // namespace fcn::network

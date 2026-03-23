@@ -163,11 +163,32 @@ void ZenClient::SendMessage(const std::string& model, const std::string& message
   };
   request.stream = false;
   
-  wxLogMessage("ZenClient::SendMessage: Using model='%s'", request.model.c_str());
+  wxLogMessage("ZenClient::SendMessage: Using model='%s' (STREAMING MODE)", request.model.c_str());
   
-  httpClient_->SendChatRequest(request, [this](const network::ChatResponse& response) {
-    this->OnChatResponse(response);
-  });
+  // Use streaming for better UX
+  httpClient_->SendStreamingChatRequest(request, 
+    [this](const std::string& chunk) {
+      // Called for each chunk of text as it arrives
+      wxLogMessage("ZenClient::SendMessage: Received chunk: '%s'", 
+                   wxString::FromUTF8(chunk.substr(0, 50)).c_str());
+      
+      // Append to message being built
+      static wxString currentMessage;
+      currentMessage += wxString::FromUTF8(chunk);
+      
+      // Fire event with partial content for UI to show
+      wxCommandEvent event(ZEN_MESSAGE_RECEIVED);
+      event.SetString(currentMessage);
+      event.SetExtraLong(0); // Tokens unknown during streaming
+      wxPostEvent(this, event);
+    },
+    [this](const network::ChatResponse& response) {
+      // Called when streaming is complete
+      wxLogMessage("ZenClient::SendMessage: Streaming complete, content length=%zu", 
+                   response.content.length());
+      this->OnChatResponse(response);
+    }
+  );
 }
 
 void ZenClient::OnChatResponse(const network::ChatResponse& response) {
