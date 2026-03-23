@@ -176,11 +176,15 @@ void ZenClient::OnChatResponse(const network::ChatResponse& response) {
   
   if (response.error) {
     wxCommandEvent event(ZEN_ERROR_OCCURRED);
-    event.SetString(response.errorMessage);
+    event.SetString(wxString::FromUTF8(response.errorMessage));
     wxPostEvent(this, event);
   } else {
     wxCommandEvent event(ZEN_MESSAGE_RECEIVED);
-    event.SetString(response.content);
+    // Explicitly convert std::string to wxString with proper UTF-8 handling
+    wxString wxContent = wxString::FromUTF8(response.content.c_str(), response.content.length());
+    wxLogMessage("ZenClient::OnChatResponse: Converting content, wxString length=%zu", 
+                 wxContent.length());
+    event.SetString(wxContent);
     event.SetExtraLong(response.totalTokens);
     wxPostEvent(this, event);
   }
