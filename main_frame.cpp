@@ -21,13 +21,6 @@ wxBEGIN_EVENT_TABLE(MainFrame, wxFrame)
   EVT_BUTTON(static_cast<int>(MenuID::SetApiKey), MainFrame::OnSetApiKey)
   EVT_MENU(static_cast<int>(MenuID::SetApiKey), MainFrame::OnSetApiKey)
   EVT_CHOICE(wxID_ANY, MainFrame::OnModelSelected)
-  
-  // Zen events
-  EVT_COMMAND(wxID_ANY, fcn::zen::ZEN_CONNECTED, MainFrame::OnZenConnected)
-  EVT_COMMAND(wxID_ANY, fcn::zen::ZEN_DISCONNECTED, MainFrame::OnZenDisconnected)
-  EVT_COMMAND(wxID_ANY, fcn::zen::ZEN_MESSAGE_RECEIVED, MainFrame::OnZenMessageReceived)
-  EVT_COMMAND(wxID_ANY, fcn::zen::ZEN_ERROR_OCCURRED, MainFrame::OnZenError)
-  EVT_COMMAND(wxID_ANY, fcn::zen::ZEN_MODELS_LOADED, MainFrame::OnZenModelsLoaded)
 wxEND_EVENT_TABLE()
 
 MainFrame::MainFrame() 
