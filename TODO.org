@@ -79,6 +79,7 @@ Need to understand:
 
 * Completed Tasks
 
+** DONE Fix duplicate event binding issue causing missing responses
 ** DONE Fix crashes when changing API key
 ** DONE Add debug panel for JSON traffic
 ** DONE Fix UTF-8 response handling
