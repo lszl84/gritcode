@@ -23,7 +23,8 @@ wxBEGIN_EVENT_TABLE(MainFrame, wxFrame)
 wxEND_EVENT_TABLE()
 
 MainFrame::MainFrame() 
-  : wxFrame(nullptr, wxID_ANY, "FastCode Native", wxDefaultPosition, wxSize(1200, 800)) {
+  : wxFrame(nullptr, wxID_ANY, "FastCode Native", wxDefaultPosition, wxSize(1200, 800))
+  , m_chunkFlushTimer(this, CHUNK_FLUSH_TIMER_ID) {
   
   // Set X11 WM_CLASS instance name (class is set by SetAppName in Application)
   SetName("main");
@@ -147,8 +148,12 @@ void MainFrame::SetupEventHandlers() {
   zen.Bind(fcn::zen::ZEN_CONNECTED, &MainFrame::OnZenConnected, this);
   zen.Bind(fcn::zen::ZEN_DISCONNECTED, &MainFrame::OnZenDisconnected, this);
   zen.Bind(fcn::zen::ZEN_MESSAGE_RECEIVED, &MainFrame::OnZenMessageReceived, this);
+  zen.Bind(fcn::zen::ZEN_STREAM_CHUNK, &MainFrame::OnZenStreamChunk, this);
   zen.Bind(fcn::zen::ZEN_ERROR_OCCURRED, &MainFrame::OnZenError, this);
   zen.Bind(fcn::zen::ZEN_MODELS_LOADED, &MainFrame::OnZenModelsLoaded, this);
+  
+  // Bind chunk flush timer
+  Bind(wxEVT_TIMER, &MainFrame::OnChunkFlushTimer, this, CHUNK_FLUSH_TIMER_ID);
   
   // Set up JSON logging callback
   zen.SetJsonLogCallback([this](const std::string& direction, const std::string& json) {
@@ -203,6 +208,10 @@ void MainFrame::OnSendMessage(wxCommandEvent& /*event*/) {
   
   // Add user message to chat
   AppendToChat("You", message);
+  
+  // Create an empty AI block that streaming chunks will append to
+  m_chatDisplay->AppendStream(BlockType::NORMAL, wxEmptyString);
+  
   m_messageInput->Clear();
   m_sendButton->Disable();
   
@@ -256,19 +265,45 @@ void MainFrame::OnZenDisconnected(wxCommandEvent& /*event*/) {
 }
 
 void MainFrame::OnZenMessageReceived(wxCommandEvent& event) {
-  wxString message = event.GetString();
-  long tokens = event.GetExtraLong();
+  // Final message after streaming completes - flush any pending chunks
+  if (!m_pendingChunks.IsEmpty()) {
+    m_chatDisplay->ContinueStream(m_pendingChunks);
+    m_pendingChunks.clear();
+  }
+  m_chunkFlushTimer.Stop();
   
-  AppendToChat("AI", message);
+  long tokens = event.GetExtraLong();
   
   if (tokens > 0) {
     AppendToChat("System", wxString::Format("Tokens used: %ld", tokens));
   }
   
   // Notify MCP server
+  wxString message = event.GetString();
   mcp::MCPServer::Instance().OnMessageReceived(message, static_cast<int>(tokens));
   
   m_sendButton->Enable();
+}
+
+void MainFrame::OnZenStreamChunk(wxCommandEvent& event) {
+  wxString chunk = event.GetString();
+  if (!chunk.IsEmpty()) {
+    m_pendingChunks += chunk;
+    // Start timer if not running - will flush accumulated chunks at ~20 FPS
+    if (!m_chunkFlushTimer.IsRunning()) {
+      m_chunkFlushTimer.Start(CHUNK_FLUSH_INTERVAL_MS);
+    }
+  }
+}
+
+void MainFrame::OnChunkFlushTimer(wxTimerEvent& /*event*/) {
+  if (!m_pendingChunks.IsEmpty()) {
+    m_chatDisplay->ContinueStream(m_pendingChunks);
+    m_pendingChunks.clear();
+  } else {
+    // No pending chunks, stop the timer
+    m_chunkFlushTimer.Stop();
+  }
 }
 
 void MainFrame::OnZenError(wxCommandEvent& event) {

@@ -6,6 +6,7 @@
 namespace fcn::zen {
 
 wxDEFINE_EVENT(ZEN_MESSAGE_RECEIVED, wxCommandEvent);
+wxDEFINE_EVENT(ZEN_STREAM_CHUNK, wxCommandEvent);
 wxDEFINE_EVENT(ZEN_ERROR_OCCURRED, wxCommandEvent);
 wxDEFINE_EVENT(ZEN_CONNECTED, wxCommandEvent);
 wxDEFINE_EVENT(ZEN_DISCONNECTED, wxCommandEvent);
@@ -169,17 +170,9 @@ void ZenClient::SendMessage(const std::string& model, const std::string& message
   httpClient_->SendStreamingChatRequest(request, 
     [this](const std::string& chunk) {
       // Called for each chunk of text as it arrives
-      wxLogMessage("ZenClient::SendMessage: Received chunk: '%s'", 
-                   wxString::FromUTF8(chunk.substr(0, 50)).c_str());
-      
-      // Append to message being built
-      static wxString currentMessage;
-      currentMessage += wxString::FromUTF8(chunk);
-      
-      // Fire event with partial content for UI to show
-      wxCommandEvent event(ZEN_MESSAGE_RECEIVED);
-      event.SetString(currentMessage);
-      event.SetExtraLong(0); // Tokens unknown during streaming
+      // Send just the delta chunk for incremental UI append
+      wxCommandEvent event(ZEN_STREAM_CHUNK);
+      event.SetString(wxString::FromUTF8(chunk.c_str(), chunk.length()));
       wxPostEvent(this, event);
     },
     [this](const network::ChatResponse& response) {

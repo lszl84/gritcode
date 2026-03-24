@@ -31,6 +31,7 @@ private:
   void OnZenConnected(wxCommandEvent& event);
   void OnZenDisconnected(wxCommandEvent& event);
   void OnZenMessageReceived(wxCommandEvent& event);
+  void OnZenStreamChunk(wxCommandEvent& event);
   void OnZenError(wxCommandEvent& event);
   void OnZenModelsLoaded(wxCommandEvent& event);
   
@@ -51,6 +52,13 @@ private:
   
   // Debug UI elements
   wxTextCtrl* m_jsonLog = nullptr;
+  
+  // Streaming chunk batching
+  wxString m_pendingChunks;
+  wxTimer m_chunkFlushTimer;
+  static constexpr int CHUNK_FLUSH_TIMER_ID = 4001;
+  static constexpr int CHUNK_FLUSH_INTERVAL_MS = 50; // ~20 FPS
+  void OnChunkFlushTimer(wxTimerEvent& event);
   
   wxDECLARE_EVENT_TABLE();
 };
