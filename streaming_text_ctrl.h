@@ -161,6 +161,7 @@ private:
     std::vector<std::vector<WrappedLine>> wrappedLinesCache;
     std::vector<int> blockHeightCache;   // Total pixel height per block
     std::vector<int> charHeightCache;    // Char height per block (for loading dots)
+    std::vector<bool> blockDirty;        // True if block needs re-wrap (lazy on resize)
 
     // Prefix-sum of block Y positions for O(log N) visibility culling.
     // blockTopCache[i] = Y coordinate of top of block i (in virtual coords).
@@ -190,7 +191,7 @@ private:
     void WrapBlock(wxDC& dc, const TextBlock* block, int textAreaWidth, int clientWidth,
                    std::vector<WrappedLine>& outLines, int& outHeight, int& outCharHeight, size_t blockIdx);
     static WrappedLine MakeLine(const wxString& text, bool rtl, int textWidth, int textHeight,
-                                int margin, int clientWidth, wxDC& dc);
+                                int margin, int clientWidth);
 
     // Segment caching for fast re-layouts
     void MeasureSegments(wxDC& dc, size_t blockIdx);

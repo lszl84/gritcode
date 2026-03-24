@@ -138,9 +138,9 @@ StreamingTextCtrl::StreamingTextCtrl(wxWindow* parent, wxWindowID id,
     UpdateThemeColors();
     animator = std::make_unique<LoadingAnimator>(this);
 
-    // Defer DC measurement -- wxClientDC can crash if window isn't realized yet.
-    // Use a reasonable default; the real value will be computed in the first OnPaint.
-    lineHeight = defaultSize + 6;
+    wxClientDC dc(this);
+    dc.SetFont(normalFont);
+    lineHeight = dc.GetCharHeight();
 
     topMargin = lineHeight;
     blockSpacing = lineHeight / 2;
@@ -153,21 +153,25 @@ StreamingTextCtrl::StreamingTextCtrl(wxWindow* parent, wxWindowID id,
 StreamingTextCtrl::~StreamingTextCtrl() = default;
 
 // ============================================================================
-// Layout: wrap a block into WrappedLines (caretX computed lazily)
+// Layout: two-phase wrapping with cached word measurements
+//
+// Phase 1 (MeasureSegments): Uses DC to measure word widths. Expensive.
+//         Only called when block text changes. Results cached.
+// Phase 2 (LayoutFromSegments): Pure arithmetic line-breaking using cached
+//         widths. No DC needed. Called on every width change, but is fast.
 // ============================================================================
 
 WrappedLine StreamingTextCtrl::MakeLine(const wxString& text, bool rtl,
                                          int textWidth, int textHeight,
-                                         int margin, int clientWidth, wxDC& dc) {
+                                         int margin, int clientWidth) {
     WrappedLine wl;
     wl.text = text;
     wl.rightToLeft = rtl;
     wl.y = 0;
     wl.width = textWidth;
     wl.height = textHeight;
-    wl.caretXValid = false;  // Lazy: don't compute caretX here
+    wl.caretXValid = false;
 
-    // X position: RTL text is right-aligned
     if (rtl && textWidth > 0) {
         int xPos = clientWidth - margin - textWidth;
         wl.x = (xPos < margin) ? margin : xPos;
@@ -204,110 +208,199 @@ void StreamingTextCtrl::EnsureCaretX(WrappedLine& wl, wxDC& dc) const {
     wl.caretXValid = true;
 }
 
-void StreamingTextCtrl::WrapBlock(wxDC& dc, const TextBlock* block, int textAreaWidth,
-                                   int clientWidth,
-                                   std::vector<WrappedLine>& outLines, int& outHeight,
-                                   int& outCharHeight) {
-    outLines.clear();
-    outHeight = 0;
-    outCharHeight = dc.GetCharHeight();
+// Phase 1: Measure all text segments in a block. Requires DC.
+void StreamingTextCtrl::MeasureSegments(wxDC& dc, size_t blockIdx) {
+    const TextBlock* block = blockManager.GetBlock(blockIdx);
+    auto& segs = segmentCache[blockIdx];
+    segs.clear();
 
     if (!block || block->text.IsEmpty()) {
-        int h = dc.GetCharHeight();
-        WrappedLine wl = MakeLine(wxEmptyString, false, 0, h, leftMargin, clientWidth, dc);
-        wl.y = 0;
-        outLines.push_back(std::move(wl));
-        outHeight = h;
+        TextSegment seg;
+        seg.text = wxEmptyString;
+        seg.width = 0;
+        seg.height = dc.GetCharHeight();
+        seg.isNewline = true;
+        seg.isSpace = false;
+        segs.push_back(std::move(seg));
+        segmentCacheValid[blockIdx] = true;
         return;
     }
 
-    bool rtl = block->rightToLeft;
-    int availableWidth = textAreaWidth;
-    if (availableWidth <= 0) availableWidth = 1;
-
-    // Iterate hard newlines in-place (avoid wxSplit allocation)
     const wxString& fullText = block->text;
-    int yPos = 0;
     size_t pos = 0;
 
     while (pos <= fullText.length()) {
         size_t nlPos = fullText.find('\n', pos);
         if (nlPos == wxString::npos) nlPos = fullText.length();
 
-        wxString hardLine = fullText.Mid(pos, nlPos - pos);
-        pos = nlPos + 1;
+        if (nlPos == pos) {
+            // Empty line (hard newline)
+            TextSegment seg;
+            seg.text = wxEmptyString;
+            seg.width = 0;
+            seg.height = dc.GetCharHeight();
+            seg.isNewline = true;
+            seg.isSpace = false;
+            segs.push_back(std::move(seg));
+        } else {
+            // Split this hard line into word segments separated by spaces
+            wxString hardLine = fullText.Mid(pos, nlPos - pos);
+            size_t wpos = 0;
+            bool firstInLine = true;
 
-        if (hardLine.IsEmpty()) {
-            int h = dc.GetCharHeight();
-            WrappedLine wl = MakeLine(wxEmptyString, rtl, 0, h, leftMargin, clientWidth, dc);
-            wl.y = yPos;
-            outLines.push_back(std::move(wl));
-            yPos += h;
+            while (wpos < hardLine.length()) {
+                size_t spPos = hardLine.find(' ', wpos);
+
+                wxString word;
+                if (spPos == wxString::npos) {
+                    word = hardLine.Mid(wpos);
+                    wpos = hardLine.length();
+                } else {
+                    word = hardLine.Mid(wpos, spPos - wpos);
+                    wpos = spPos + 1;
+                }
+
+                // Add space segment before word (except first word in line)
+                if (!firstInLine) {
+                    wxCoord sw, sh;
+                    dc.GetTextExtent(wxS(" "), &sw, &sh);
+                    TextSegment spaceSeg;
+                    spaceSeg.text = wxS(" ");
+                    spaceSeg.width = sw;
+                    spaceSeg.height = sh;
+                    spaceSeg.isNewline = false;
+                    spaceSeg.isSpace = true;
+                    segs.push_back(std::move(spaceSeg));
+                }
+
+                if (!word.IsEmpty()) {
+                    wxCoord tw, th;
+                    dc.GetTextExtent(word, &tw, &th);
+                    TextSegment seg;
+                    seg.text = word;
+                    seg.width = tw;
+                    seg.height = th;
+                    seg.isNewline = false;
+                    seg.isSpace = false;
+                    segs.push_back(std::move(seg));
+                }
+
+                firstInLine = false;
+            }
+
+            // Mark end of hard line (unless this is the very last position)
+            if (nlPos < fullText.length()) {
+                TextSegment nlSeg;
+                nlSeg.text = wxEmptyString;
+                nlSeg.width = 0;
+                nlSeg.height = dc.GetCharHeight();
+                nlSeg.isNewline = true;
+                nlSeg.isSpace = false;
+                segs.push_back(std::move(nlSeg));
+            }
+        }
+
+        pos = nlPos + 1;
+    }
+
+    segmentCacheValid[blockIdx] = true;
+}
+
+// Phase 2: Line-breaking from cached segment widths. No DC needed.
+void StreamingTextCtrl::LayoutFromSegments(size_t blockIdx, int textAreaWidth, int clientWidth,
+                                            std::vector<WrappedLine>& outLines, int& outHeight) {
+    outLines.clear();
+    outHeight = 0;
+
+    const TextBlock* block = blockManager.GetBlock(blockIdx);
+    bool rtl = block ? block->rightToLeft : false;
+    const auto& segs = segmentCache[blockIdx];
+
+    if (segs.empty()) {
+        WrappedLine wl = MakeLine(wxEmptyString, rtl, 0, lineHeight, leftMargin, clientWidth);
+        wl.y = 0;
+        outLines.push_back(std::move(wl));
+        outHeight = lineHeight;
+        return;
+    }
+
+    int availableWidth = (textAreaWidth > 0) ? textAreaWidth : 1;
+    int yPos = 0;
+
+    // Accumulate segments into lines
+    wxString currentLine;
+    int currentWidth = 0;
+    int currentHeight = 0;
+
+    auto flushLine = [&]() {
+        if (currentHeight == 0) currentHeight = lineHeight;
+        WrappedLine wl = MakeLine(currentLine, rtl, currentWidth, currentHeight,
+                                   leftMargin, clientWidth);
+        wl.y = yPos;
+        outLines.push_back(std::move(wl));
+        yPos += currentHeight;
+        currentLine.clear();
+        currentWidth = 0;
+        currentHeight = 0;
+    };
+
+    for (size_t si = 0; si < segs.size(); si++) {
+        const auto& seg = segs[si];
+
+        if (seg.isNewline) {
+            // Hard newline - flush current line and start new one
+            flushLine();
             continue;
         }
 
-        wxString remaining = hardLine;
-        while (!remaining.IsEmpty()) {
-            wxCoord textW, textH;
-            dc.GetTextExtent(remaining, &textW, &textH);
+        // Would this segment fit on the current line?
+        int testWidth = currentWidth + seg.width;
 
-            if (textW <= availableWidth) {
-                WrappedLine wl = MakeLine(remaining, rtl, textW, textH, leftMargin, clientWidth, dc);
-                wl.y = yPos;
-                outLines.push_back(std::move(wl));
-                yPos += textH;
-                break;
+        if (testWidth <= availableWidth || currentLine.IsEmpty()) {
+            // Fits, or first segment on line (must take at least one)
+            currentLine += seg.text;
+            currentWidth += seg.width;
+            if (seg.height > currentHeight) currentHeight = seg.height;
+        } else {
+            // Doesn't fit - flush and start new line with this segment
+            // But skip leading space on the new line
+            flushLine();
+            if (!seg.isSpace) {
+                currentLine = seg.text;
+                currentWidth = seg.width;
+                currentHeight = seg.height;
             }
-
-            // Word-wrap: find the last space that fits
-            int lastBreakPos = -1;
-            int searchFrom = 0;
-
-            while (true) {
-                int spacePos = remaining.find(' ', searchFrom);
-                int testEnd = (spacePos == (int)wxString::npos) ? (int)remaining.length() : spacePos;
-
-                wxString testStr = remaining.Left(testEnd);
-                dc.GetTextExtent(testStr, &textW, &textH);
-
-                if (textW > availableWidth)
-                    break;
-
-                if (spacePos == (int)wxString::npos) {
-                    lastBreakPos = testEnd;
-                    break;
-                }
-
-                lastBreakPos = spacePos;
-                searchFrom = spacePos + 1;
-            }
-
-            wxString lineText;
-            if (lastBreakPos > 0) {
-                lineText = remaining.Left(lastBreakPos);
-                remaining = remaining.Mid(lastBreakPos + 1);
-            } else {
-                int fitCount = 1;
-                for (size_t c = 1; c <= remaining.length(); ++c) {
-                    dc.GetTextExtent(remaining.Left(c), &textW, &textH);
-                    if (textW > availableWidth)
-                        break;
-                    fitCount = c;
-                }
-                lineText = remaining.Left(fitCount);
-                remaining = remaining.Mid(fitCount);
-            }
-
-            dc.GetTextExtent(lineText, &textW, &textH);
-            WrappedLine wl = MakeLine(lineText, rtl, textW, textH, leftMargin, clientWidth, dc);
-            wl.y = yPos;
-            outLines.push_back(std::move(wl));
-            yPos += textH;
         }
     }
 
+    // Flush any remaining content
+    if (!currentLine.IsEmpty()) {
+        flushLine();
+    }
+
+    if (outHeight == 0) outHeight = lineHeight;
     outHeight = yPos;
     if (outHeight < lineHeight) outHeight = lineHeight;
+}
+
+// Full wrap: measure segments if needed, then layout
+void StreamingTextCtrl::WrapBlock(wxDC& dc, const TextBlock* block, int textAreaWidth,
+                                   int clientWidth,
+                                   std::vector<WrappedLine>& outLines, int& outHeight,
+                                   int& outCharHeight, size_t blockIdx) {
+    outCharHeight = dc.GetCharHeight();
+
+    // Ensure segment cache is valid
+    if (blockIdx >= segmentCache.size()) {
+        segmentCache.resize(blockIdx + 1);
+        segmentCacheValid.resize(blockIdx + 1, false);
+    }
+    if (!segmentCacheValid[blockIdx]) {
+        dc.SetFont(GetFontForType(block ? block->type : BlockType::NORMAL));
+        MeasureSegments(dc, blockIdx);
+    }
+
+    LayoutFromSegments(blockIdx, textAreaWidth, clientWidth, outLines, outHeight);
 }
 
 // ============================================================================
@@ -860,14 +953,17 @@ void StreamingTextCtrl::OnPaint(wxPaintEvent& event) {
     int clientHeight = clientSize.GetHeight();
 
     bool widthChanged = (clientWidth != cachedWidth);
+    size_t blockCount = blockManager.GetBlockCount();
+    int textAreaWidth = clientWidth - leftMargin * 2;
 
-    if (needsFullRebuild || widthChanged) {
-        size_t blockCount = blockManager.GetBlockCount();
-        int textAreaWidth = clientWidth - leftMargin * 2;
-
+    if (needsFullRebuild) {
+        // Full rebuild: measure and wrap all blocks
         wrappedLinesCache.resize(blockCount);
         blockHeightCache.resize(blockCount);
         charHeightCache.resize(blockCount);
+        blockDirty.assign(blockCount, false);
+        segmentCache.resize(blockCount);
+        segmentCacheValid.assign(blockCount, false);  // Force re-measure
         cachedTotalHeight = topMargin * 2;
 
         for (size_t i = 0; i < blockCount; i++) {
@@ -875,7 +971,7 @@ void StreamingTextCtrl::OnPaint(wxPaintEvent& event) {
             dc.SetFont(GetFontForType(block ? block->type : BlockType::NORMAL));
 
             int h = 0, ch = 0;
-            WrapBlock(dc, block, textAreaWidth, clientWidth, wrappedLinesCache[i], h, ch);
+            WrapBlock(dc, block, textAreaWidth, clientWidth, wrappedLinesCache[i], h, ch, i);
             blockHeightCache[i] = h;
             charHeightCache[i] = ch;
             cachedTotalHeight += h + blockSpacing;
@@ -884,32 +980,47 @@ void StreamingTextCtrl::OnPaint(wxPaintEvent& event) {
         cachedWidth = clientWidth;
         needsFullRebuild = false;
         RebuildBlockTopCache();
-    } else {
-        size_t blockCount = blockManager.GetBlockCount();
-        int textAreaWidth = clientWidth - leftMargin * 2;
-
-        if (wrappedLinesCache.size() < blockCount) {
-            size_t oldSize = wrappedLinesCache.size();
-            wrappedLinesCache.resize(blockCount);
-            blockHeightCache.resize(blockCount);
-            charHeightCache.resize(blockCount);
-
-            for (size_t i = oldSize; i < blockCount; i++) {
-                const TextBlock* block = blockManager.GetBlock(i);
-                dc.SetFont(GetFontForType(block ? block->type : BlockType::NORMAL));
-
-                int h = 0, ch = 0;
-                WrapBlock(dc, block, textAreaWidth, clientWidth, wrappedLinesCache[i], h, ch);
+    } else if (widthChanged) {
+        // Width changed: segment measurements are still valid!
+        // Just re-run layout (pure arithmetic) for blocks that have been measured.
+        size_t cachedCount = std::min({wrappedLinesCache.size(), segmentCache.size(), blockHeightCache.size()});
+        cachedTotalHeight = topMargin * 2;
+        for (size_t i = 0; i < cachedCount; i++) {
+            if (i < segmentCacheValid.size() && segmentCacheValid[i]) {
+                int h = 0;
+                LayoutFromSegments(i, textAreaWidth, clientWidth, wrappedLinesCache[i], h);
                 blockHeightCache[i] = h;
-                charHeightCache[i] = ch;
-                cachedTotalHeight += h + blockSpacing;
             }
-
-            RebuildBlockTopCache();
+            cachedTotalHeight += blockHeightCache[i] + blockSpacing;
         }
+        blockDirty.assign(cachedCount, false);
+        cachedWidth = clientWidth;
+        RebuildBlockTopCache();
     }
 
-    size_t blockCount = blockManager.GetBlockCount();
+    // Handle new blocks (incremental append)
+    if (wrappedLinesCache.size() < blockCount) {
+        size_t oldSize = wrappedLinesCache.size();
+        wrappedLinesCache.resize(blockCount);
+        blockHeightCache.resize(blockCount);
+        charHeightCache.resize(blockCount);
+        blockDirty.resize(blockCount, false);
+        segmentCache.resize(blockCount);
+        segmentCacheValid.resize(blockCount, false);
+
+        for (size_t i = oldSize; i < blockCount; i++) {
+            const TextBlock* block = blockManager.GetBlock(i);
+            dc.SetFont(GetFontForType(block ? block->type : BlockType::NORMAL));
+
+            int h = 0, ch = 0;
+            WrapBlock(dc, block, textAreaWidth, clientWidth, wrappedLinesCache[i], h, ch, i);
+            blockHeightCache[i] = h;
+            charHeightCache[i] = ch;
+            cachedTotalHeight += h + blockSpacing;
+        }
+
+        RebuildBlockTopCache();
+    }
 
     if (blockCount == 0) {
         dc.SetBackground(wxBrush(backgroundColor));
@@ -923,7 +1034,6 @@ void StreamingTextCtrl::OnPaint(wxPaintEvent& event) {
     }
 
     int totalHeight = cachedTotalHeight;
-    int textAreaWidth = clientWidth - leftMargin * 2;
 
     // Handle scroll-to-bottom
     if (scrollToBottomPending) {
@@ -1158,6 +1268,9 @@ void StreamingTextCtrl::AppendStream(BlockType type, const wxString& text, bool 
         wrappedLinesCache.resize(lastIdx);
         blockHeightCache.resize(lastIdx);
         charHeightCache.resize(lastIdx);
+        // Invalidate segment cache for merged block (text changed)
+        if (lastIdx < segmentCacheValid.size())
+            segmentCacheValid[lastIdx] = false;
     }
 
     if (!inBatch) {
@@ -1189,6 +1302,9 @@ void StreamingTextCtrl::ContinueStream(const wxString& text) {
                 blockHeightCache.resize(lastIdx);
                 charHeightCache.resize(lastIdx);
             }
+            // Invalidate segment cache (text changed)
+            if (lastIdx < segmentCacheValid.size())
+                segmentCacheValid[lastIdx] = false;
             if (!inBatch) {
                 if (autoScroll) scrollToBottomPending = true;
                 Refresh();
@@ -1208,6 +1324,9 @@ void StreamingTextCtrl::Clear() {
     wrappedLinesCache.clear();
     blockHeightCache.clear();
     charHeightCache.clear();
+    blockDirty.clear();
+    segmentCache.clear();
+    segmentCacheValid.clear();
     blockTopCache.clear();
     cachedTotalHeight = topMargin * 2;
     needsFullRebuild = true;
