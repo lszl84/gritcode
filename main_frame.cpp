@@ -1,7 +1,6 @@
 #include "main_frame.h"
 #include "streaming_text_ctrl.h"
 #include "mcp_server.h"
-#include <wx/splitter.h>
 #include <wx/textctrl.h>
 #include <wx/button.h>
 #include <wx/choice.h>
@@ -82,86 +81,52 @@ void MainFrame::CreateMenuBar() {
 }
 
 void MainFrame::CreateUI() {
+  // Create main panel (like cutescroll)
+  auto* panel = new wxPanel(this);
   auto* mainSizer = new wxBoxSizer(wxVERTICAL);
   
-  // Create outer splitter for sidebar vs (chat+debug)
-  m_mainSplitter = new wxSplitterWindow(this, wxID_ANY);
-  m_mainSplitter->SetMinimumPaneSize(150);
-  
-  // Sidebar panel
-  m_sidebarPanel = new wxPanel(m_mainSplitter);
-  auto* sidebarSizer = new wxBoxSizer(wxVERTICAL);
-  
-  // Connection status
-  m_statusLabel = new wxStaticText(m_sidebarPanel, wxID_ANY, "Disconnected");
-  sidebarSizer->Add(m_statusLabel, 0, wxALL | wxEXPAND, 10);
-  
-  sidebarSizer->Add(new wxStaticLine(m_sidebarPanel), 0, wxALL | wxEXPAND, 5);
-  
-  // Model selection
-  sidebarSizer->Add(new wxStaticText(m_sidebarPanel, wxID_ANY, "Model:"), 0, wxLEFT | wxRIGHT | wxTOP, 10);
-  m_modelChoice = new wxChoice(m_sidebarPanel, wxID_ANY);
-  sidebarSizer->Add(m_modelChoice, 0, wxALL | wxEXPAND, 10);
-  
-  sidebarSizer->Add(new wxStaticLine(m_sidebarPanel), 0, wxALL | wxEXPAND, 5);
-
-  auto* apiKeyButton = new wxButton(m_sidebarPanel, static_cast<int>(MenuID::SetApiKey),
-                                     "API Key...");
-  sidebarSizer->Add(apiKeyButton, 0, wxALL | wxEXPAND, 10);
-
-  sidebarSizer->AddStretchSpacer();
-
-  m_sidebarPanel->SetSizer(sidebarSizer);
-  
-  // Create inner splitter for chat vs debug (inside the right pane of main splitter)
-  m_chatSplitter = new wxSplitterWindow(m_mainSplitter);
-  m_chatSplitter->SetMinimumPaneSize(300);
-  
-  // Chat panel (left side of chat splitter)
-  m_mainPanel = new wxPanel(m_chatSplitter);
-  auto* mainPanelSizer = new wxBoxSizer(wxVERTICAL);
-  
-  // Chat display
-  m_chatDisplay = new StreamingTextCtrl(m_mainPanel, wxID_ANY);
+  // Chat display (main area)
+  m_chatDisplay = new StreamingTextCtrl(panel, wxID_ANY);
   m_chatDisplay->SetAutoScroll(true);
-  mainPanelSizer->Add(m_chatDisplay, 1, wxEXPAND);
+  mainSizer->Add(m_chatDisplay, 1, wxEXPAND | wxALL, 5);
   
   // Message input area
   auto* inputSizer = new wxBoxSizer(wxHORIZONTAL);
-  m_messageInput = new wxTextCtrl(m_mainPanel, wxID_ANY, wxEmptyString,
+  m_messageInput = new wxTextCtrl(panel, wxID_ANY, wxEmptyString,
                                    wxDefaultPosition, wxSize(-1, 60),
                                    wxTE_MULTILINE | wxTE_PROCESS_ENTER);
-  m_sendButton = new wxButton(m_mainPanel, static_cast<int>(MenuID::SendMessage), "Send");
+  m_sendButton = new wxButton(panel, static_cast<int>(MenuID::SendMessage), "Send");
   m_sendButton->SetDefault();
   
   inputSizer->Add(m_messageInput, 1, wxALL | wxEXPAND, 5);
   inputSizer->Add(m_sendButton, 0, wxALL, 5);
   
-  mainPanelSizer->Add(inputSizer, 0, wxALL | wxEXPAND, 5);
-  m_mainPanel->SetSizer(mainPanelSizer);
+  mainSizer->Add(inputSizer, 0, wxEXPAND);
   
-  // Debug panel (right side of chat splitter)
-  m_debugPanel = new wxPanel(m_chatSplitter);
-  auto* debugSizer = new wxBoxSizer(wxVERTICAL);
+  // Bottom control bar (model selector and API key)
+  auto* bottomSizer = new wxBoxSizer(wxHORIZONTAL);
   
-  debugSizer->Add(new wxStaticText(m_debugPanel, wxID_ANY, "JSON Traffic:"), 0, wxALL, 5);
+  // Model selection
+  bottomSizer->Add(new wxStaticText(panel, wxID_ANY, "Model:"), 0, wxALL | wxALIGN_CENTER_VERTICAL, 5);
+  m_modelChoice = new wxChoice(panel, wxID_ANY);
+  bottomSizer->Add(m_modelChoice, 0, wxALL, 5);
   
-  m_jsonLog = new wxTextCtrl(m_debugPanel, wxID_ANY, wxEmptyString,
-                              wxDefaultPosition, wxDefaultSize,
-                              wxTE_MULTILINE | wxTE_READONLY | wxTE_WORDWRAP);
-  m_jsonLog->SetFont(wxFont(9, wxFONTFAMILY_TELETYPE, wxFONTSTYLE_NORMAL, wxFONTWEIGHT_NORMAL));
-  debugSizer->Add(m_jsonLog, 1, wxEXPAND | wxALL, 5);
+  // Status label
+  m_statusLabel = new wxStaticText(panel, wxID_ANY, "Disconnected");
+  bottomSizer->Add(m_statusLabel, 0, wxALL | wxALIGN_CENTER_VERTICAL, 5);
   
-  m_debugPanel->SetSizer(debugSizer);
+  bottomSizer->AddStretchSpacer();
   
-  // Split chat and debug (chat on left, debug on right)
-  m_chatSplitter->SplitVertically(m_mainPanel, m_debugPanel, 600);
+  // API Key button
+  auto* apiKeyButton = new wxButton(panel, static_cast<int>(MenuID::SetApiKey), "API Key...");
+  bottomSizer->Add(apiKeyButton, 0, wxALL, 5);
   
-  // Split main (sidebar on left, chat+debug on right)
-  m_mainSplitter->SplitVertically(m_sidebarPanel, m_chatSplitter, 200);
+  mainSizer->Add(bottomSizer, 0, wxEXPAND);
   
-  mainSizer->Add(m_mainSplitter, 1, wxEXPAND);
-  SetSizer(mainSizer);
+  panel->SetSizer(mainSizer);
+  
+  // Force initial layout so sizer positions children correctly before first paint
+  panel->Layout();
 }
 
 void MainFrame::SetupEventHandlers() {

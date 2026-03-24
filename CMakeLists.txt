@@ -20,7 +20,9 @@ message(STATUS "Fetching wxWidgets...")
 FetchContent_Declare(
   wxWidgets
   GIT_REPOSITORY https://github.com/wxWidgets/wxWidgets.git
+  GIT_TAG v3.2.10
   GIT_SHALLOW ON
+  PATCH_COMMAND git apply --check "${CMAKE_CURRENT_SOURCE_DIR}/patches/wx-overlay-scrollbar-fix.patch" && git apply "${CMAKE_CURRENT_SOURCE_DIR}/patches/wx-overlay-scrollbar-fix.patch" || true
 )
 FetchContent_MakeAvailable(wxWidgets)
 

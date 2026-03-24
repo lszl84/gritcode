@@ -1,7 +1,6 @@
 #pragma once
 
 #include <wx/wx.h>
-#include <wx/splitter.h>
 #include <wx/textctrl.h>
 #include "zen_client.h"
 #include "mcp_server.h"
@@ -42,12 +41,6 @@ private:
   wxString LoadApiKeyFromKeychain();
   bool SaveApiKeyToKeychain(const wxString& key);
   bool ClearApiKeyFromKeychain();
-  
-  wxPanel* m_sidebarPanel = nullptr;
-  wxPanel* m_mainPanel = nullptr;
-  wxPanel* m_debugPanel = nullptr;
-  wxSplitterWindow* m_mainSplitter = nullptr;
-  wxSplitterWindow* m_chatSplitter = nullptr;
   
   // Chat UI elements
   StreamingTextCtrl* m_chatDisplay = nullptr;

@@ -1,0 +1,28 @@
+--- a/src/gtk/window.cpp
++++ b/src/gtk/window.cpp
+@@ -4226,6 +4226,16 @@
+         // if window is scrollable, account for scrollbars
+         if ( GTK_IS_SCROLLED_WINDOW(m_widget) )
+         {
++#if GTK_CHECK_VERSION(3,16,0)
++            // When overlay scrolling is enabled, scrollbars float on top of
++            // the content and do not consume any layout space. Skip the
++            // scrollbar size subtraction in this case.
++            if (!gtk_scrolled_window_get_overlay_scrolling(
++                    GTK_SCROLLED_WINDOW(m_widget)))
++#endif // GTK_CHECK_VERSION(3,16,0)
++            {
++            // Begin non-overlay scrollbar block
++
+             GtkPolicyType policy[ScrollDir_Max];
+             gtk_scrolled_window_get_policy(GTK_SCROLLED_WINDOW(m_widget),
+                                            &policy[ScrollDir_Horz],
+@@ -4295,6 +4305,8 @@
+                     w -= req.width + scrollbar_spacing;
+ #endif // !__WXGTK3__
+             }
++
++            } // end non-overlay scrollbar block
+         }
+ 
+         const wxSize sizeBorders = GetWindowBorderSize();
