@@ -87,11 +87,9 @@ void MainFrame::CreateUI() {
   // Create outer splitter for sidebar vs (chat+debug)
   m_mainSplitter = new wxSplitterWindow(this, wxID_ANY);
   m_mainSplitter->SetMinimumPaneSize(150);
-  m_mainSplitter->SetSashGravity(0.0); // Left pane keeps its size when window resizes
   
   // Sidebar panel
   m_sidebarPanel = new wxPanel(m_mainSplitter);
-  m_sidebarPanel->SetMinSize(wxSize(150, 200));
   auto* sidebarSizer = new wxBoxSizer(wxVERTICAL);
   
   // Connection status
@@ -118,16 +116,13 @@ void MainFrame::CreateUI() {
   // Create inner splitter for chat vs debug (inside the right pane of main splitter)
   m_chatSplitter = new wxSplitterWindow(m_mainSplitter);
   m_chatSplitter->SetMinimumPaneSize(300);
-  m_chatSplitter->SetSashGravity(1.0); // Left pane (chat) expands when window resizes
   
   // Chat panel (left side of chat splitter)
   m_mainPanel = new wxPanel(m_chatSplitter);
-  m_mainPanel->SetMinSize(wxSize(400, 200)); // Prevent layout shifts from scrollbar
   auto* mainPanelSizer = new wxBoxSizer(wxVERTICAL);
   
   // Chat display
   m_chatDisplay = new StreamingTextCtrl(m_mainPanel, wxID_ANY);
-  m_chatDisplay->SetMinSize(wxSize(300, 100)); // Prevent relayout from scrollbar changes
   m_chatDisplay->SetAutoScroll(true);
   mainPanelSizer->Add(m_chatDisplay, 1, wxEXPAND);
   
