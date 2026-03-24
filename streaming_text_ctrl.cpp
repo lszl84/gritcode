@@ -195,7 +195,43 @@ void StreamingTextCtrl::EnsureCaretX(WrappedLine& wl, wxDC& dc) const {
     int len = (int)wl.text.length();
     wl.caretX.resize(len + 1);
 
-    if (len > 0) {
+    if (len == 0) {
+        wl.caretX[0] = 0;
+        wl.caretXValid = true;
+        return;
+    }
+
+    if (!wl.styledRuns.empty()) {
+        // Styled line: measure each run with its own font
+        wl.caretX[0] = 0;
+        int charIdx = 0;
+        int xAccum = 0;
+        
+        for (size_t ri = 0; ri < wl.styledRuns.size(); ri++) {
+            const auto& run = wl.styledRuns[ri];
+            dc.SetFont(run.font);
+            
+            wxArrayInt offsets;
+            dc.GetPartialTextExtents(run.text, offsets);
+            
+            for (int i = 0; i < (int)run.text.length(); i++) {
+                charIdx++;
+                if (charIdx <= len) {
+                    wl.caretX[charIdx] = xAccum + offsets[i];
+                }
+            }
+            
+            if (!offsets.IsEmpty()) {
+                xAccum += offsets.Last();
+            }
+        }
+        
+        // Fill any remaining positions (shouldn't happen, but safety)
+        for (int i = charIdx + 1; i <= len; i++) {
+            wl.caretX[i] = xAccum;
+        }
+    } else {
+        // Plain line: single font measurement
         wxArrayInt offsets;
         dc.GetPartialTextExtents(wl.text, offsets);
 
@@ -208,8 +244,6 @@ void StreamingTextCtrl::EnsureCaretX(WrappedLine& wl, wxDC& dc) const {
             for (int i = 1; i <= len; ++i)
                 wl.caretX[i] = offsets[i - 1];
         }
-    } else {
-        wl.caretX[0] = 0;
     }
 
     wl.caretXValid = true;
@@ -574,19 +608,23 @@ void StreamingTextCtrl::LayoutFromSegments(size_t blockIdx, int textAreaWidth, i
 
         if (testWidth <= availableWidth || currentLine.IsEmpty()) {
             // Fits, or first segment on line
-            if (styled && seg.hasStyle && !seg.isSpace) {
-                // Try to merge with last run if same style
-                if (!currentRuns.empty() && 
-                    currentRuns.back().font == seg.font && 
-                    currentRuns.back().colour == seg.colour) {
-                    currentRuns.back().text += seg.text;
+            if (styled && seg.hasStyle) {
+                if (seg.isSpace) {
+                    // Append space to last run if exists, otherwise start new run
+                    if (!currentRuns.empty()) {
+                        currentRuns.back().text += seg.text;
+                    }
                 } else {
-                    currentRunXOffsets.push_back(currentWidth);
-                    currentRuns.emplace_back(seg.text, seg.font, seg.colour);
+                    // Try to merge with last run if same style
+                    if (!currentRuns.empty() && 
+                        currentRuns.back().font == seg.font && 
+                        currentRuns.back().colour == seg.colour) {
+                        currentRuns.back().text += seg.text;
+                    } else {
+                        currentRunXOffsets.push_back(currentWidth);
+                        currentRuns.emplace_back(seg.text, seg.font, seg.colour);
+                    }
                 }
-            } else if (styled && seg.isSpace && !currentRuns.empty()) {
-                // Append space to the last run
-                currentRuns.back().text += seg.text;
             }
             currentLine += seg.text;
             currentWidth += seg.width;
@@ -988,14 +1026,29 @@ void StreamingTextCtrl::DrawLineSelection(wxDC& dc, WrappedLine& wl,
     dc.SetPen(*wxTRANSPARENT_PEN);
     dc.DrawRectangle(selRect);
 
-    // Re-draw full line text clipped to selection rect in selection colour.
+    // Re-draw text clipped to selection rect in selection colour.
     // Preserves glyph shaping, ligatures, kerning.
     const TextBlock* block = blockManager.GetBlock(blockIdx);
     if (block) {
-        dc.SetFont(GetFontForType(block->type));
         dc.SetTextForeground(m_selTextColour);
         dc.SetClippingRegion(selRect);
-        dc.DrawText(wl.text, wl.x, absY);
+        
+        if (!wl.styledRuns.empty()) {
+            // Styled line: redraw each run at layout positions, selection text colour
+            for (size_t ri = 0; ri < wl.styledRuns.size(); ri++) {
+                const auto& run = wl.styledRuns[ri];
+                int runX = wl.x + (ri < wl.runXOffsets.size() ? wl.runXOffsets[ri] : 0);
+                dc.SetFont(run.font);
+                if (!run.text.IsEmpty()) {
+                    dc.DrawText(run.text, runX, absY);
+                }
+            }
+        } else {
+            // Plain line: single DrawText
+            dc.SetFont(GetFontForType(block->type));
+            dc.DrawText(wl.text, wl.x, absY);
+        }
+        
         dc.DestroyClippingRegion();
     }
 }
@@ -1373,6 +1426,7 @@ void StreamingTextCtrl::OnPaint(wxPaintEvent& event) {
 
             if (!wl.styledRuns.empty()) {
                 // Styled line: draw each run with its own font/colour
+                // Use runXOffsets from layout for positioning (no DC measurement needed)
                 for (size_t ri = 0; ri < wl.styledRuns.size(); ri++) {
                     const auto& run = wl.styledRuns[ri];
                     int runX = wl.x + (ri < wl.runXOffsets.size() ? wl.runXOffsets[ri] : 0);
@@ -1668,11 +1722,10 @@ void StreamingTextCtrl::RenderMarkdown(const std::string& markdown) {
     
     if (newBlocks.empty()) return;
     
-    // Add the rendered blocks
+    // Add the rendered blocks to the block manager.
+    // Don't resize caches here - let OnPaint's "new blocks appended" path
+    // handle them incrementally (only measures the new blocks, O(1) blockTopCache update).
     blockManager.AddBlocks(std::move(newBlocks));
-    
-    // Force full rebuild
-    needsFullRebuild = true;
     
     if (!inBatch) {
         if (autoScroll) scrollToBottomPending = true;
