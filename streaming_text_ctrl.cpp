@@ -141,6 +141,12 @@ StreamingTextCtrl::StreamingTextCtrl(wxWindow* parent, wxWindowID id,
     wxClientDC dc(this);
     dc.SetFont(normalFont);
     lineHeight = dc.GetCharHeight();
+    
+    // Cache space width (measured once, reused everywhere)
+    wxCoord sw, sh;
+    dc.GetTextExtent(wxS(" "), &sw, &sh);
+    cachedSpaceWidth = sw;
+    cachedSpaceHeight = sh;
 
     topMargin = lineHeight;
     blockSpacing = lineHeight / 2;
@@ -223,6 +229,7 @@ void StreamingTextCtrl::MeasureSegments(wxDC& dc, size_t blockIdx) {
         seg.isSpace = false;
         segs.push_back(std::move(seg));
         segmentCacheValid[blockIdx] = true;
+        segmentCachedTextLen[blockIdx] = 0;
         return;
     }
 
@@ -234,7 +241,6 @@ void StreamingTextCtrl::MeasureSegments(wxDC& dc, size_t blockIdx) {
         if (nlPos == wxString::npos) nlPos = fullText.length();
 
         if (nlPos == pos) {
-            // Empty line (hard newline)
             TextSegment seg;
             seg.text = wxEmptyString;
             seg.width = 0;
@@ -243,7 +249,6 @@ void StreamingTextCtrl::MeasureSegments(wxDC& dc, size_t blockIdx) {
             seg.isSpace = false;
             segs.push_back(std::move(seg));
         } else {
-            // Split this hard line into word segments separated by spaces
             wxString hardLine = fullText.Mid(pos, nlPos - pos);
             size_t wpos = 0;
             bool firstInLine = true;
@@ -260,14 +265,11 @@ void StreamingTextCtrl::MeasureSegments(wxDC& dc, size_t blockIdx) {
                     wpos = spPos + 1;
                 }
 
-                // Add space segment before word (except first word in line)
                 if (!firstInLine) {
-                    wxCoord sw, sh;
-                    dc.GetTextExtent(wxS(" "), &sw, &sh);
                     TextSegment spaceSeg;
                     spaceSeg.text = wxS(" ");
-                    spaceSeg.width = sw;
-                    spaceSeg.height = sh;
+                    spaceSeg.width = cachedSpaceWidth;
+                    spaceSeg.height = cachedSpaceHeight;
                     spaceSeg.isNewline = false;
                     spaceSeg.isSpace = true;
                     segs.push_back(std::move(spaceSeg));
@@ -288,7 +290,6 @@ void StreamingTextCtrl::MeasureSegments(wxDC& dc, size_t blockIdx) {
                 firstInLine = false;
             }
 
-            // Mark end of hard line (unless this is the very last position)
             if (nlPos < fullText.length()) {
                 TextSegment nlSeg;
                 nlSeg.text = wxEmptyString;
@@ -304,6 +305,117 @@ void StreamingTextCtrl::MeasureSegments(wxDC& dc, size_t blockIdx) {
     }
 
     segmentCacheValid[blockIdx] = true;
+    segmentCachedTextLen[blockIdx] = fullText.length();
+}
+
+// Phase 1b: Incremental segment measurement - only measure NEW text.
+// Finds the last newline boundary in previously cached text, pops segments
+// back to that boundary, and re-measures only from there.
+void StreamingTextCtrl::MeasureSegmentsIncremental(wxDC& dc, size_t blockIdx) {
+    const TextBlock* block = blockManager.GetBlock(blockIdx);
+    if (!block || block->text.IsEmpty()) {
+        MeasureSegments(dc, blockIdx);
+        return;
+    }
+    
+    auto& segs = segmentCache[blockIdx];
+    size_t prevLen = segmentCachedTextLen[blockIdx];
+    const wxString& fullText = block->text;
+    
+    // If no previous cache or text was modified (not just appended), do full measure
+    if (segs.empty() || prevLen == 0 || prevLen > fullText.length()) {
+        MeasureSegments(dc, blockIdx);
+        return;
+    }
+    
+    // Find the start of the last hard line in the previously cached text.
+    // We need to re-measure from there because new text may continue that line.
+    size_t lastNl = fullText.rfind('\n', prevLen > 0 ? prevLen - 1 : 0);
+    size_t remeasureFrom = (lastNl == wxString::npos) ? 0 : lastNl + 1;
+    
+    // Pop segments belonging to the last incomplete hard line.
+    // Walk backwards removing segments until we hit a newline segment or empty.
+    while (!segs.empty()) {
+        const auto& last = segs.back();
+        if (last.isNewline && remeasureFrom > 0) {
+            // Keep this newline segment - it belongs to a completed line
+            break;
+        }
+        segs.pop_back();
+    }
+    
+    // Now measure from remeasureFrom to end of text
+    size_t pos = remeasureFrom;
+    while (pos <= fullText.length()) {
+        size_t nlPos = fullText.find('\n', pos);
+        if (nlPos == wxString::npos) nlPos = fullText.length();
+
+        if (nlPos == pos) {
+            TextSegment seg;
+            seg.text = wxEmptyString;
+            seg.width = 0;
+            seg.height = dc.GetCharHeight();
+            seg.isNewline = true;
+            seg.isSpace = false;
+            segs.push_back(std::move(seg));
+        } else {
+            wxString hardLine = fullText.Mid(pos, nlPos - pos);
+            size_t wpos = 0;
+            bool firstInLine = true;
+
+            while (wpos < hardLine.length()) {
+                size_t spPos = hardLine.find(' ', wpos);
+
+                wxString word;
+                if (spPos == wxString::npos) {
+                    word = hardLine.Mid(wpos);
+                    wpos = hardLine.length();
+                } else {
+                    word = hardLine.Mid(wpos, spPos - wpos);
+                    wpos = spPos + 1;
+                }
+
+                if (!firstInLine) {
+                    TextSegment spaceSeg;
+                    spaceSeg.text = wxS(" ");
+                    spaceSeg.width = cachedSpaceWidth;
+                    spaceSeg.height = cachedSpaceHeight;
+                    spaceSeg.isNewline = false;
+                    spaceSeg.isSpace = true;
+                    segs.push_back(std::move(spaceSeg));
+                }
+
+                if (!word.IsEmpty()) {
+                    wxCoord tw, th;
+                    dc.GetTextExtent(word, &tw, &th);
+                    TextSegment seg;
+                    seg.text = word;
+                    seg.width = tw;
+                    seg.height = th;
+                    seg.isNewline = false;
+                    seg.isSpace = false;
+                    segs.push_back(std::move(seg));
+                }
+
+                firstInLine = false;
+            }
+
+            if (nlPos < fullText.length()) {
+                TextSegment nlSeg;
+                nlSeg.text = wxEmptyString;
+                nlSeg.width = 0;
+                nlSeg.height = dc.GetCharHeight();
+                nlSeg.isNewline = true;
+                nlSeg.isSpace = false;
+                segs.push_back(std::move(nlSeg));
+            }
+        }
+
+        pos = nlPos + 1;
+    }
+
+    segmentCacheValid[blockIdx] = true;
+    segmentCachedTextLen[blockIdx] = fullText.length();
 }
 
 // Phase 2: Line-breaking from cached segment widths. No DC needed.
@@ -328,7 +440,9 @@ void StreamingTextCtrl::LayoutFromSegments(size_t blockIdx, int textAreaWidth, i
     int yPos = 0;
 
     // Accumulate segments into lines
+    // Pre-reserve to reduce wxString reallocations
     wxString currentLine;
+    currentLine.reserve(256);
     int currentWidth = 0;
     int currentHeight = 0;
 
@@ -390,14 +504,20 @@ void StreamingTextCtrl::WrapBlock(wxDC& dc, const TextBlock* block, int textArea
                                    int& outCharHeight, size_t blockIdx) {
     outCharHeight = dc.GetCharHeight();
 
-    // Ensure segment cache is valid
+    // Ensure segment cache vectors are sized
     if (blockIdx >= segmentCache.size()) {
         segmentCache.resize(blockIdx + 1);
         segmentCacheValid.resize(blockIdx + 1, false);
+        segmentCachedTextLen.resize(blockIdx + 1, 0);
     }
     if (!segmentCacheValid[blockIdx]) {
         dc.SetFont(GetFontForType(block ? block->type : BlockType::NORMAL));
-        MeasureSegments(dc, blockIdx);
+        // Use incremental if we have a partial cache
+        if (segmentCachedTextLen[blockIdx] > 0 && !segmentCache[blockIdx].empty()) {
+            MeasureSegmentsIncremental(dc, blockIdx);
+        } else {
+            MeasureSegments(dc, blockIdx);
+        }
     }
 
     LayoutFromSegments(blockIdx, textAreaWidth, clientWidth, outLines, outHeight);
@@ -412,6 +532,18 @@ void StreamingTextCtrl::RebuildBlockTopCache() {
     blockTopCache.resize(n + 1);
     blockTopCache[0] = topMargin;
     for (size_t i = 0; i < n; i++) {
+        blockTopCache[i + 1] = blockTopCache[i] + blockHeightCache[i] + blockSpacing;
+    }
+}
+
+// O(1) update for when only blocks from fromIdx onwards changed
+void StreamingTextCtrl::UpdateBlockTopCacheTail(size_t fromIdx) {
+    size_t n = blockHeightCache.size();
+    blockTopCache.resize(n + 1);
+    if (fromIdx == 0) {
+        blockTopCache[0] = topMargin;
+    }
+    for (size_t i = fromIdx; i < n; i++) {
         blockTopCache[i + 1] = blockTopCache[i] + blockHeightCache[i] + blockSpacing;
     }
 }
@@ -964,6 +1096,7 @@ void StreamingTextCtrl::OnPaint(wxPaintEvent& event) {
         blockDirty.assign(blockCount, false);
         segmentCache.resize(blockCount);
         segmentCacheValid.assign(blockCount, false);  // Force re-measure
+        segmentCachedTextLen.assign(blockCount, 0);   // Reset incremental tracking
         cachedTotalHeight = topMargin * 2;
 
         for (size_t i = 0; i < blockCount; i++) {
@@ -1007,6 +1140,7 @@ void StreamingTextCtrl::OnPaint(wxPaintEvent& event) {
         blockDirty.resize(blockCount, false);
         segmentCache.resize(blockCount);
         segmentCacheValid.resize(blockCount, false);
+        segmentCachedTextLen.resize(blockCount, 0);
 
         for (size_t i = oldSize; i < blockCount; i++) {
             const TextBlock* block = blockManager.GetBlock(i);
@@ -1019,7 +1153,8 @@ void StreamingTextCtrl::OnPaint(wxPaintEvent& event) {
             cachedTotalHeight += h + blockSpacing;
         }
 
-        RebuildBlockTopCache();
+        // O(1) update: only rebuild from the first new block
+        UpdateBlockTopCacheTail(oldSize);
     }
 
     if (blockCount == 0) {
@@ -1302,12 +1437,20 @@ void StreamingTextCtrl::ContinueStream(const wxString& text) {
                 blockHeightCache.resize(lastIdx);
                 charHeightCache.resize(lastIdx);
             }
-            // Invalidate segment cache (text changed)
+            // Mark segment cache invalid but KEEP the cached segments + text length
+            // so MeasureSegmentsIncremental can do incremental measurement
             if (lastIdx < segmentCacheValid.size())
                 segmentCacheValid[lastIdx] = false;
+            // Note: segmentCachedTextLen[lastIdx] retains old value for incremental
+            
             if (!inBatch) {
                 if (autoScroll) scrollToBottomPending = true;
-                Refresh();
+                // Only repaint the bottom portion where streaming text appears
+                int clientHeight = GetClientSize().GetHeight();
+                int refreshHeight = std::min(clientHeight, clientHeight / 2);
+                wxRect refreshRect(0, clientHeight - refreshHeight, 
+                                   GetClientSize().GetWidth(), refreshHeight);
+                RefreshRect(refreshRect);
             }
         }
     } else {
@@ -1327,6 +1470,7 @@ void StreamingTextCtrl::Clear() {
     blockDirty.clear();
     segmentCache.clear();
     segmentCacheValid.clear();
+    segmentCachedTextLen.clear();
     blockTopCache.clear();
     cachedTotalHeight = topMargin * 2;
     needsFullRebuild = true;

@@ -183,6 +183,12 @@ private:
     std::vector<std::vector<TextSegment>> segmentCache;
     // segmentCacheValid[blockIdx] = true if segments are measured and cached
     std::vector<bool> segmentCacheValid;
+    // How many chars of block text were measured into segmentCache (for incremental append)
+    std::vector<size_t> segmentCachedTextLen;
+    
+    // Cached space width per font type (measured once, reused for all spaces)
+    int cachedSpaceWidth = 0;
+    int cachedSpaceHeight = 0;
 
     int cachedTotalHeight;
     int cachedWidth;
@@ -195,8 +201,12 @@ private:
 
     // Segment caching for fast re-layouts
     void MeasureSegments(wxDC& dc, size_t blockIdx);
+    void MeasureSegmentsIncremental(wxDC& dc, size_t blockIdx);
     void LayoutFromSegments(size_t blockIdx, int textAreaWidth, int clientWidth,
                             std::vector<WrappedLine>& outLines, int& outHeight);
+    
+    // Partial blockTopCache update (O(1) for last block)
+    void UpdateBlockTopCacheTail(size_t fromIdx);
 
     // Lazy caretX computation
     void EnsureCaretX(WrappedLine& wl, wxDC& dc) const;
