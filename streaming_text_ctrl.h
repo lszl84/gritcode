@@ -169,16 +169,17 @@ private:
 
     // Segment caching for O(1) re-layouts
     // Each segment represents a word or whitespace chunk with its pre-measured width.
-    struct Segment {
+    struct TextSegment {
         wxString text;
-        int width;
-        bool isWhitespace;
+        int width;       // pixel width of this segment
+        int height;      // pixel height (line height)
+        bool isNewline;  // true = hard newline (text is empty)
+        bool isSpace;    // true = space separator (text is " ")
         
-        Segment(const wxString& t, int w, bool ws) 
-            : text(t), width(w), isWhitespace(ws) {}
+        TextSegment() : width(0), height(0), isNewline(false), isSpace(false) {}
     };
     // segmentCache[blockIdx] = vector of segments for that block's text
-    std::vector<std::vector<Segment>> segmentCache;
+    std::vector<std::vector<TextSegment>> segmentCache;
     // segmentCacheValid[blockIdx] = true if segments are measured and cached
     std::vector<bool> segmentCacheValid;
 
@@ -192,7 +193,7 @@ private:
                                 int margin, int clientWidth, wxDC& dc);
 
     // Segment caching for fast re-layouts
-    void MeasureAndCacheSegments(wxDC& dc, const TextBlock* block, size_t blockIdx);
+    void MeasureSegments(wxDC& dc, size_t blockIdx);
     void LayoutFromSegments(size_t blockIdx, int textAreaWidth, int clientWidth,
                             std::vector<WrappedLine>& outLines, int& outHeight);
 
