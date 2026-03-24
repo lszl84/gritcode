@@ -1621,35 +1621,42 @@ void StreamingTextCtrl::ScrollToBottom() {
 }
 
 void StreamingTextCtrl::RemoveLastBlock() {
-    // Remove the last block from block manager
-    blockManager.RemoveLastBlock();
+    size_t count = blockManager.GetBlockCount();
+    if (count > 0) {
+        RemoveBlocksFrom(count - 1);
+    }
+}
+
+void StreamingTextCtrl::RemoveBlocksFrom(size_t fromIndex) {
+    size_t count = blockManager.GetBlockCount();
+    if (fromIndex >= count) return;
     
-    // Clear caches for the removed block
-    if (!wrappedLinesCache.empty()) {
-        wrappedLinesCache.pop_back();
+    // Remove blocks from block manager
+    blockManager.RemoveBlocksFrom(fromIndex);
+    
+    // Truncate all caches to fromIndex
+    if (wrappedLinesCache.size() > fromIndex)
+        wrappedLinesCache.resize(fromIndex);
+    if (blockHeightCache.size() > fromIndex) {
+        // Recalculate total height
+        cachedTotalHeight = topMargin * 2;
+        for (size_t i = 0; i < fromIndex; i++) {
+            cachedTotalHeight += blockHeightCache[i] + blockSpacing;
+        }
+        blockHeightCache.resize(fromIndex);
     }
-    if (!blockHeightCache.empty()) {
-        cachedTotalHeight -= blockHeightCache.back() + blockSpacing;
-        blockHeightCache.pop_back();
-    }
-    if (!charHeightCache.empty()) {
-        charHeightCache.pop_back();
-    }
-    if (!blockDirty.empty()) {
-        blockDirty.pop_back();
-    }
-    if (!segmentCache.empty()) {
-        segmentCache.pop_back();
-    }
-    if (!segmentCacheValid.empty()) {
-        segmentCacheValid.pop_back();
-    }
-    if (!segmentCachedTextLen.empty()) {
-        segmentCachedTextLen.pop_back();
-    }
-    if (!blockTopCache.empty()) {
-        blockTopCache.pop_back();
-    }
+    if (charHeightCache.size() > fromIndex)
+        charHeightCache.resize(fromIndex);
+    if (blockDirty.size() > fromIndex)
+        blockDirty.resize(fromIndex);
+    if (segmentCache.size() > fromIndex)
+        segmentCache.resize(fromIndex);
+    if (segmentCacheValid.size() > fromIndex)
+        segmentCacheValid.resize(fromIndex);
+    if (segmentCachedTextLen.size() > fromIndex)
+        segmentCachedTextLen.resize(fromIndex);
+    if (blockTopCache.size() > fromIndex + 1)
+        blockTopCache.resize(fromIndex + 1);
 }
 
 void StreamingTextCtrl::RenderMarkdown(const std::string& markdown) {
@@ -1659,18 +1666,10 @@ void StreamingTextCtrl::RenderMarkdown(const std::string& markdown) {
     // Render markdown to styled blocks
     auto newBlocks = renderer.Render(markdown, isDarkTheme);
     
-    wxLogMessage("RenderMarkdown: input length=%zu, produced %zu blocks", 
-                 markdown.size(), newBlocks.size());
-    for (size_t i = 0; i < newBlocks.size(); i++) {
-        wxLogMessage("  block[%zu]: type=%d, runs=%zu, text='%s'", 
-                     i, (int)newBlocks[i]->type, newBlocks[i]->runs.size(),
-                     newBlocks[i]->GetFullText().Left(80));
-    }
+    if (newBlocks.empty()) return;
     
     // Add the rendered blocks
     blockManager.AddBlocks(std::move(newBlocks));
-    
-    wxLogMessage("RenderMarkdown: total blocks in manager now: %zu", blockManager.GetBlockCount());
     
     // Force full rebuild
     needsFullRebuild = true;

@@ -116,6 +116,13 @@ void BlockManager::RemoveLastBlock() {
     }
 }
 
+void BlockManager::RemoveBlocksFrom(size_t fromIndex) {
+    if (fromIndex < blocks.size()) {
+        blocks.erase(blocks.begin() + fromIndex, blocks.end());
+        RecalculateLineCounts();
+    }
+}
+
 void BlockManager::AddBlocks(std::vector<std::unique_ptr<TextBlock>> newBlocks) {
     for (auto& block : newBlocks) {
         block->lineCount = CalculateBlockLines(*block);

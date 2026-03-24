@@ -62,6 +62,9 @@ public:
     // Remove the last block (for replacing streamed text with markdown)
     void RemoveLastBlock();
     
+    // Remove all blocks from index onwards
+    void RemoveBlocksFrom(size_t fromIndex);
+    
     // Add multiple blocks (for markdown rendering)
     void AddBlocks(std::vector<std::unique_ptr<TextBlock>> newBlocks);
     

@@ -82,8 +82,9 @@ public:
     void Clear();
     void ScrollToBottom();
     
-    // Markdown rendering - removes last block and renders markdown instead
+    // Markdown rendering
     void RemoveLastBlock();
+    void RemoveBlocksFrom(size_t fromIndex);  // Remove blocks from index onwards
     void RenderMarkdown(const std::string& markdown);
 
     void SetAutoScroll(bool enable) { autoScroll = enable; }

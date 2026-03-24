@@ -63,6 +63,17 @@ private:
   // Markdown rendering support
   wxString m_aiResponseBuffer;      // Full buffer of AI response for markdown parsing
   bool m_collectingAiResponse = false;  // Whether we're currently collecting an AI response
+  size_t m_aiResponseStartBlock = 0;   // Block index where the AI response starts
+  size_t m_lastMarkdownRenderLen = 0;  // Buffer length at last markdown render
+  
+  // Periodic markdown re-render during streaming
+  wxTimer m_markdownRenderTimer;
+  static constexpr int MARKDOWN_RENDER_TIMER_ID = 4002;
+  static constexpr int MARKDOWN_RENDER_INTERVAL_MS = 500; // Re-render every 500ms
+  void OnMarkdownRenderTimer(wxTimerEvent& event);
+  
+  // Replaces blocks from m_aiResponseStartBlock onwards with markdown-rendered blocks
+  void ReplaceAiResponseWithMarkdown();
   
   wxDECLARE_EVENT_TABLE();
 };
