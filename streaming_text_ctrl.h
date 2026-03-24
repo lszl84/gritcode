@@ -6,6 +6,7 @@
 #include "block_manager.h"
 #include <vector>
 #include <set>
+#include <string>
 
 class LoadingAnimator;
 
@@ -18,6 +19,13 @@ struct WrappedLine {
     int y;        // y position relative to block top
     int width;    // measured text width
     int height;   // line height
+
+    // Styled runs for this line (populated for markdown blocks, empty for plain text).
+    // When non-empty, drawing iterates these runs instead of using a single DrawText.
+    std::vector<StyledTextRun> styledRuns;
+    // Pixel x-offsets where each styled run starts (relative to line.x).
+    // Size matches styledRuns.size().
+    std::vector<int> runXOffsets;
 
     // Visual caret positions: computed lazily via EnsureCaretX().
     // caretX[i] is the visual x offset (relative to line.x) where a caret
@@ -73,6 +81,10 @@ public:
     void ContinueStream(const wxString& text);
     void Clear();
     void ScrollToBottom();
+    
+    // Markdown rendering - removes last block and renders markdown instead
+    void RemoveLastBlock();
+    void RenderMarkdown(const std::string& markdown);
 
     void SetAutoScroll(bool enable) { autoScroll = enable; }
     bool GetAutoScroll() const { return autoScroll; }
@@ -177,6 +189,11 @@ private:
         bool isNewline;  // true = hard newline (text is empty)
         bool isSpace;    // true = space separator (text is " ")
         
+        // For styled blocks: per-segment font and colour (empty font = use block default)
+        wxFont font;
+        wxColour colour;
+        bool hasStyle = false;  // true if font/colour are set
+        
         TextSegment() : width(0), height(0), isNewline(false), isSpace(false) {}
     };
     // segmentCache[blockIdx] = vector of segments for that block's text
@@ -202,6 +219,7 @@ private:
     // Segment caching for fast re-layouts
     void MeasureSegments(wxDC& dc, size_t blockIdx);
     void MeasureSegmentsIncremental(wxDC& dc, size_t blockIdx);
+    void MeasureStyledSegments(wxDC& dc, size_t blockIdx);
     void LayoutFromSegments(size_t blockIdx, int textAreaWidth, int clientWidth,
                             std::vector<WrappedLine>& outLines, int& outHeight);
     

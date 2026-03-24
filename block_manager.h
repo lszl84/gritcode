@@ -14,6 +14,17 @@ enum class BlockType {
     LOADING      // Animated loading indicator
 };
 
+// A styled run of text - for inline formatting (bold, italic, code, etc.)
+struct StyledTextRun {
+    wxString text;
+    wxFont font;
+    wxColour colour;
+    
+    StyledTextRun() = default;
+    StyledTextRun(const wxString& t, const wxFont& f, const wxColour& c)
+        : text(t), font(f), colour(c) {}
+};
+
 // Forward declaration
 struct TextBlock;
 
@@ -48,6 +59,12 @@ public:
     // Get the last block (for appending)
     TextBlock* GetLastBlock();
     
+    // Remove the last block (for replacing streamed text with markdown)
+    void RemoveLastBlock();
+    
+    // Add multiple blocks (for markdown rendering)
+    void AddBlocks(std::vector<std::unique_ptr<TextBlock>> newBlocks);
+    
 private:
     std::vector<std::unique_ptr<TextBlock>> blocks;
     int totalLines;
@@ -65,13 +82,30 @@ private:
 // Individual content block
 struct TextBlock {
     BlockType type;
-    wxString text;
+    wxString text;                    // Plain text (for plain text mode)
+    std::vector<StyledTextRun> runs;  // Styled runs for markdown rendering
     bool isLoading;
     bool rightToLeft;       // RTL text direction (Arabic, Hebrew, etc.)
     int lineCount;          // How many screen lines this block occupies
     int cachedLineHeight;
+    int leftIndent = 0;     // Left indent in pixels (for blockquotes, lists)
+    int topSpacing = 0;     // Extra spacing above
+    int bottomSpacing = 0;  // Extra spacing below
     
     TextBlock(BlockType t, const wxString& txt, bool rtl = false) 
         : type(t), text(txt), isLoading(false), rightToLeft(rtl),
           lineCount(0), cachedLineHeight(0) {}
+    
+    // Check if this block has styled runs (markdown mode)
+    bool HasStyledRuns() const { return !runs.empty(); }
+    
+    // Get the full text (either from runs or plain text)
+    wxString GetFullText() const {
+        if (runs.empty()) return text;
+        wxString result;
+        for (const auto& run : runs) {
+            result += run.text;
+        }
+        return result;
+    }
 };

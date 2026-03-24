@@ -90,11 +90,13 @@ void BlockManager::RecalculateLineCounts() {
 }
 
 int BlockManager::CalculateBlockLines(const TextBlock& block) {
-    // Simple line counting - in production, this would use actual text wrapping
-    // For now, assume each newline is a line break
+    // Use styled runs text if available, otherwise use plain text
+    wxString text = block.HasStyledRuns() ? block.GetFullText() : block.text;
+    
+    // Simple line counting - assume each newline is a line break
     int lines = 1;
-    for (size_t i = 0; i < block.text.length(); i++) {
-        if (block.text[i] == '\n') {
+    for (size_t i = 0; i < text.length(); i++) {
+        if (text[i] == '\n') {
             lines++;
         }
     }
@@ -105,4 +107,19 @@ int BlockManager::CalculateBlockLines(const TextBlock& block) {
     }
     
     return lines;
+}
+
+void BlockManager::RemoveLastBlock() {
+    if (!blocks.empty()) {
+        blocks.pop_back();
+        RecalculateLineCounts();
+    }
+}
+
+void BlockManager::AddBlocks(std::vector<std::unique_ptr<TextBlock>> newBlocks) {
+    for (auto& block : newBlocks) {
+        block->lineCount = CalculateBlockLines(*block);
+        blocks.push_back(std::move(block));
+    }
+    RecalculateLineCounts();
 }

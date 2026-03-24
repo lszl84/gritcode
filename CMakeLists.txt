@@ -36,6 +36,19 @@ FetchContent_Declare(
 
 FetchContent_MakeAvailable(json)
 
+# Fetch cmark for markdown parsing
+message(STATUS "Fetching cmark...")
+set(CMARK_TESTS OFF CACHE BOOL "" FORCE)
+set(CMARK_SHARED OFF CACHE BOOL "" FORCE) 
+set(CMARK_STATIC ON CACHE BOOL "" FORCE)
+FetchContent_Declare(
+    cmark
+    GIT_REPOSITORY https://github.com/commonmark/cmark.git
+    GIT_TAG 0.31.2
+    GIT_SHALLOW ON
+)
+FetchContent_MakeAvailable(cmark)
+
 # Source files - explicitly listed (no GLOB)
 set(SOURCES
   application.cpp
@@ -50,6 +63,8 @@ set(SOURCES
   block_manager.h
   streaming_text_ctrl.cpp
   streaming_text_ctrl.h
+  markdown_renderer.cpp
+  markdown_renderer.h
   mcp_server.cpp
   mcp_server.h
 )
@@ -57,11 +72,18 @@ set(SOURCES
 # Create executable
 add_executable(${PROJECT_NAME} ${SOURCES})
 
+# Include directories for cmark
+target_include_directories(${PROJECT_NAME} PRIVATE
+    ${cmark_SOURCE_DIR}/src
+    ${cmark_BINARY_DIR}/src
+)
+
 # Link wxWidgets and libraries
 target_link_libraries(${PROJECT_NAME} PRIVATE
   wxcore
   wxnet
   nlohmann_json::nlohmann_json
+  cmark
 )
 
 # Platform-specific settings

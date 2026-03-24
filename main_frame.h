@@ -60,6 +60,10 @@ private:
   static constexpr int CHUNK_FLUSH_INTERVAL_MS = 50; // ~20 FPS
   void OnChunkFlushTimer(wxTimerEvent& event);
   
+  // Markdown rendering support
+  wxString m_aiResponseBuffer;      // Full buffer of AI response for markdown parsing
+  bool m_collectingAiResponse = false;  // Whether we're currently collecting an AI response
+  
   wxDECLARE_EVENT_TABLE();
 };
 

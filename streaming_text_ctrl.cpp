@@ -1,4 +1,5 @@
 #include "streaming_text_ctrl.h"
+#include "markdown_renderer.h"
 #include <wx/dcclient.h>
 #include <wx/dcmemory.h>
 #include <wx/settings.h>
@@ -418,6 +419,97 @@ void StreamingTextCtrl::MeasureSegmentsIncremental(wxDC& dc, size_t blockIdx) {
     segmentCachedTextLen[blockIdx] = fullText.length();
 }
 
+// Phase 1c: Measure styled segments for blocks with StyledTextRuns.
+// Each run may have a different font, so we measure each word with its own font.
+// The segment cache stores font+colour per segment for use in layout and drawing.
+void StreamingTextCtrl::MeasureStyledSegments(wxDC& dc, size_t blockIdx) {
+    const TextBlock* block = blockManager.GetBlock(blockIdx);
+    auto& segs = segmentCache[blockIdx];
+    segs.clear();
+    
+    if (!block || block->runs.empty()) {
+        TextSegment seg;
+        seg.text = wxEmptyString;
+        seg.width = 0;
+        seg.height = dc.GetCharHeight();
+        seg.isNewline = true;
+        seg.isSpace = false;
+        segs.push_back(std::move(seg));
+        segmentCacheValid[blockIdx] = true;
+        segmentCachedTextLen[blockIdx] = 0;
+        return;
+    }
+    
+    // Walk each styled run, split into word/space/newline segments
+    for (const auto& run : block->runs) {
+        dc.SetFont(run.font);
+        
+        const wxString& runText = run.text;
+        size_t pos = 0;
+        
+        while (pos < runText.length()) {
+            wxUniChar ch = runText[pos];
+            
+            if (ch == '\n') {
+                TextSegment seg;
+                seg.text = wxEmptyString;
+                seg.width = 0;
+                seg.height = dc.GetCharHeight();
+                seg.isNewline = true;
+                seg.isSpace = false;
+                seg.font = run.font;
+                seg.colour = run.colour;
+                seg.hasStyle = true;
+                segs.push_back(std::move(seg));
+                pos++;
+                continue;
+            }
+            
+            if (ch == ' ') {
+                wxCoord sw, sh;
+                dc.GetTextExtent(wxS(" "), &sw, &sh);
+                TextSegment seg;
+                seg.text = wxS(" ");
+                seg.width = sw;
+                seg.height = sh;
+                seg.isNewline = false;
+                seg.isSpace = true;
+                seg.font = run.font;
+                seg.colour = run.colour;
+                seg.hasStyle = true;
+                segs.push_back(std::move(seg));
+                pos++;
+                continue;
+            }
+            
+            // Collect a word (non-space, non-newline)
+            size_t wordStart = pos;
+            while (pos < runText.length() && runText[pos] != ' ' && runText[pos] != '\n') {
+                pos++;
+            }
+            
+            wxString word = runText.Mid(wordStart, pos - wordStart);
+            wxCoord tw, th;
+            dc.GetTextExtent(word, &tw, &th);
+            
+            TextSegment seg;
+            seg.text = word;
+            seg.width = tw;
+            seg.height = th;
+            seg.isNewline = false;
+            seg.isSpace = false;
+            seg.font = run.font;
+            seg.colour = run.colour;
+            seg.hasStyle = true;
+            segs.push_back(std::move(seg));
+        }
+    }
+    
+    segmentCacheValid[blockIdx] = true;
+    // Mark as non-incremental (styled blocks don't use incremental append)
+    segmentCachedTextLen[blockIdx] = block->GetFullText().length();
+}
+
 // Phase 2: Line-breaking from cached segment widths. No DC needed.
 void StreamingTextCtrl::LayoutFromSegments(size_t blockIdx, int textAreaWidth, int clientWidth,
                                             std::vector<WrappedLine>& outLines, int& outHeight) {
@@ -426,31 +518,43 @@ void StreamingTextCtrl::LayoutFromSegments(size_t blockIdx, int textAreaWidth, i
 
     const TextBlock* block = blockManager.GetBlock(blockIdx);
     bool rtl = block ? block->rightToLeft : false;
+    bool styled = block && block->HasStyledRuns();
+    int indent = block ? block->leftIndent : 0;
+    int effectiveMargin = leftMargin + indent;
     const auto& segs = segmentCache[blockIdx];
 
     if (segs.empty()) {
-        WrappedLine wl = MakeLine(wxEmptyString, rtl, 0, lineHeight, leftMargin, clientWidth);
+        WrappedLine wl = MakeLine(wxEmptyString, rtl, 0, lineHeight, effectiveMargin, clientWidth);
         wl.y = 0;
         outLines.push_back(std::move(wl));
         outHeight = lineHeight;
         return;
     }
 
-    int availableWidth = (textAreaWidth > 0) ? textAreaWidth : 1;
+    int availableWidth = (textAreaWidth - indent > 0) ? (textAreaWidth - indent) : 1;
     int yPos = 0;
 
     // Accumulate segments into lines
-    // Pre-reserve to reduce wxString reallocations
     wxString currentLine;
     currentLine.reserve(256);
     int currentWidth = 0;
     int currentHeight = 0;
+    
+    // For styled blocks: collect runs per line
+    std::vector<StyledTextRun> currentRuns;
+    std::vector<int> currentRunXOffsets;
 
     auto flushLine = [&]() {
         if (currentHeight == 0) currentHeight = lineHeight;
         WrappedLine wl = MakeLine(currentLine, rtl, currentWidth, currentHeight,
-                                   leftMargin, clientWidth);
+                                   effectiveMargin, clientWidth);
         wl.y = yPos;
+        if (styled) {
+            wl.styledRuns = std::move(currentRuns);
+            wl.runXOffsets = std::move(currentRunXOffsets);
+            currentRuns.clear();
+            currentRunXOffsets.clear();
+        }
         outLines.push_back(std::move(wl));
         yPos += currentHeight;
         currentLine.clear();
@@ -462,32 +566,45 @@ void StreamingTextCtrl::LayoutFromSegments(size_t blockIdx, int textAreaWidth, i
         const auto& seg = segs[si];
 
         if (seg.isNewline) {
-            // Hard newline - flush current line and start new one
             flushLine();
             continue;
         }
 
-        // Would this segment fit on the current line?
         int testWidth = currentWidth + seg.width;
 
         if (testWidth <= availableWidth || currentLine.IsEmpty()) {
-            // Fits, or first segment on line (must take at least one)
+            // Fits, or first segment on line
+            if (styled && seg.hasStyle && !seg.isSpace) {
+                // Try to merge with last run if same style
+                if (!currentRuns.empty() && 
+                    currentRuns.back().font == seg.font && 
+                    currentRuns.back().colour == seg.colour) {
+                    currentRuns.back().text += seg.text;
+                } else {
+                    currentRunXOffsets.push_back(currentWidth);
+                    currentRuns.emplace_back(seg.text, seg.font, seg.colour);
+                }
+            } else if (styled && seg.isSpace && !currentRuns.empty()) {
+                // Append space to the last run
+                currentRuns.back().text += seg.text;
+            }
             currentLine += seg.text;
             currentWidth += seg.width;
             if (seg.height > currentHeight) currentHeight = seg.height;
         } else {
-            // Doesn't fit - flush and start new line with this segment
-            // But skip leading space on the new line
             flushLine();
             if (!seg.isSpace) {
                 currentLine = seg.text;
                 currentWidth = seg.width;
                 currentHeight = seg.height;
+                if (styled && seg.hasStyle) {
+                    currentRunXOffsets.push_back(0);
+                    currentRuns.emplace_back(seg.text, seg.font, seg.colour);
+                }
             }
         }
     }
 
-    // Flush any remaining content
     if (!currentLine.IsEmpty()) {
         flushLine();
     }
@@ -511,12 +628,17 @@ void StreamingTextCtrl::WrapBlock(wxDC& dc, const TextBlock* block, int textArea
         segmentCachedTextLen.resize(blockIdx + 1, 0);
     }
     if (!segmentCacheValid[blockIdx]) {
-        dc.SetFont(GetFontForType(block ? block->type : BlockType::NORMAL));
-        // Use incremental if we have a partial cache
-        if (segmentCachedTextLen[blockIdx] > 0 && !segmentCache[blockIdx].empty()) {
-            MeasureSegmentsIncremental(dc, blockIdx);
+        if (block && block->HasStyledRuns()) {
+            // Styled block: measure with per-run fonts
+            MeasureStyledSegments(dc, blockIdx);
         } else {
-            MeasureSegments(dc, blockIdx);
+            dc.SetFont(GetFontForType(block ? block->type : BlockType::NORMAL));
+            // Use incremental if we have a partial cache
+            if (segmentCachedTextLen[blockIdx] > 0 && !segmentCache[blockIdx].empty()) {
+                MeasureSegmentsIncremental(dc, blockIdx);
+            } else {
+                MeasureSegments(dc, blockIdx);
+            }
         }
     }
 
@@ -1249,9 +1371,23 @@ void StreamingTextCtrl::OnPaint(wxPaintEvent& event) {
             if (absY + wl.height < 0) continue;
             if (absY > clientHeight) break;
 
-            dc.SetTextForeground(GetColorForType(block->type));
-            if (!wl.text.IsEmpty()) {
-                dc.DrawText(wl.text, wl.x, absY);
+            if (!wl.styledRuns.empty()) {
+                // Styled line: draw each run with its own font/colour
+                for (size_t ri = 0; ri < wl.styledRuns.size(); ri++) {
+                    const auto& run = wl.styledRuns[ri];
+                    int runX = wl.x + (ri < wl.runXOffsets.size() ? wl.runXOffsets[ri] : 0);
+                    dc.SetFont(run.font);
+                    dc.SetTextForeground(run.colour);
+                    if (!run.text.IsEmpty()) {
+                        dc.DrawText(run.text, runX, absY);
+                    }
+                }
+            } else {
+                // Plain line: single DrawText
+                dc.SetTextForeground(GetColorForType(block->type));
+                if (!wl.text.IsEmpty()) {
+                    dc.DrawText(wl.text, wl.x, absY);
+                }
             }
 
             // Selection overlay (lazily computes caretX only for selected lines)
@@ -1482,6 +1618,67 @@ void StreamingTextCtrl::Clear() {
 void StreamingTextCtrl::ScrollToBottom() {
     scrollToBottomPending = true;
     Refresh();
+}
+
+void StreamingTextCtrl::RemoveLastBlock() {
+    // Remove the last block from block manager
+    blockManager.RemoveLastBlock();
+    
+    // Clear caches for the removed block
+    if (!wrappedLinesCache.empty()) {
+        wrappedLinesCache.pop_back();
+    }
+    if (!blockHeightCache.empty()) {
+        cachedTotalHeight -= blockHeightCache.back() + blockSpacing;
+        blockHeightCache.pop_back();
+    }
+    if (!charHeightCache.empty()) {
+        charHeightCache.pop_back();
+    }
+    if (!blockDirty.empty()) {
+        blockDirty.pop_back();
+    }
+    if (!segmentCache.empty()) {
+        segmentCache.pop_back();
+    }
+    if (!segmentCacheValid.empty()) {
+        segmentCacheValid.pop_back();
+    }
+    if (!segmentCachedTextLen.empty()) {
+        segmentCachedTextLen.pop_back();
+    }
+    if (!blockTopCache.empty()) {
+        blockTopCache.pop_back();
+    }
+}
+
+void StreamingTextCtrl::RenderMarkdown(const std::string& markdown) {
+    // Create markdown renderer with current normal font
+    MarkdownRenderer renderer(normalFont);
+    
+    // Render markdown to styled blocks
+    auto newBlocks = renderer.Render(markdown, isDarkTheme);
+    
+    wxLogMessage("RenderMarkdown: input length=%zu, produced %zu blocks", 
+                 markdown.size(), newBlocks.size());
+    for (size_t i = 0; i < newBlocks.size(); i++) {
+        wxLogMessage("  block[%zu]: type=%d, runs=%zu, text='%s'", 
+                     i, (int)newBlocks[i]->type, newBlocks[i]->runs.size(),
+                     newBlocks[i]->GetFullText().Left(80));
+    }
+    
+    // Add the rendered blocks
+    blockManager.AddBlocks(std::move(newBlocks));
+    
+    wxLogMessage("RenderMarkdown: total blocks in manager now: %zu", blockManager.GetBlockCount());
+    
+    // Force full rebuild
+    needsFullRebuild = true;
+    
+    if (!inBatch) {
+        if (autoScroll) scrollToBottomPending = true;
+        Refresh();
+    }
 }
 
 // ============================================================================

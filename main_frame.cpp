@@ -212,6 +212,10 @@ void MainFrame::OnSendMessage(wxCommandEvent& /*event*/) {
   // Create an empty AI block that streaming chunks will append to
   m_chatDisplay->AppendStream(BlockType::NORMAL, wxEmptyString);
   
+  // Start collecting AI response for markdown rendering
+  m_aiResponseBuffer.Clear();
+  m_collectingAiResponse = true;
+  
   m_messageInput->Clear();
   m_sendButton->Disable();
   
@@ -272,6 +276,27 @@ void MainFrame::OnZenMessageReceived(wxCommandEvent& event) {
   }
   m_chunkFlushTimer.Stop();
   
+  // Render markdown if we collected an AI response
+  if (m_collectingAiResponse && !m_aiResponseBuffer.IsEmpty()) {
+    m_collectingAiResponse = false;
+    
+    wxLogMessage("OnZenMessageReceived: AI response buffer length=%zu, blocks before=%zu",
+                 (size_t)m_aiResponseBuffer.length(), m_chatDisplay->GetBlockCount());
+    
+    // Always parse as markdown - agents always respond in markdown
+    m_chatDisplay->RemoveLastBlock();
+    
+    wxLogMessage("OnZenMessageReceived: blocks after RemoveLastBlock=%zu", m_chatDisplay->GetBlockCount());
+    
+    auto utf8Buf = m_aiResponseBuffer.ToUTF8();
+    std::string markdownStr(utf8Buf.data(), utf8Buf.length());
+    m_chatDisplay->RenderMarkdown(markdownStr);
+    
+    wxLogMessage("OnZenMessageReceived: blocks after RenderMarkdown=%zu", m_chatDisplay->GetBlockCount());
+    
+    m_aiResponseBuffer.Clear();
+  }
+  
   // Force full redraw to ensure final text layout is rendered
   m_chatDisplay->Refresh();
   
@@ -292,6 +317,12 @@ void MainFrame::OnZenStreamChunk(wxCommandEvent& event) {
   wxString chunk = event.GetString();
   if (!chunk.IsEmpty()) {
     m_pendingChunks += chunk;
+    
+    // Collect full response for markdown rendering
+    if (m_collectingAiResponse) {
+      m_aiResponseBuffer += chunk;
+    }
+    
     // Start timer if not running - will flush accumulated chunks at ~20 FPS
     if (!m_chunkFlushTimer.IsRunning()) {
       m_chunkFlushTimer.Start(CHUNK_FLUSH_INTERVAL_MS);
