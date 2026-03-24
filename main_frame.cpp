@@ -272,6 +272,9 @@ void MainFrame::OnZenMessageReceived(wxCommandEvent& event) {
   }
   m_chunkFlushTimer.Stop();
   
+  // Force full redraw to ensure final text layout is rendered
+  m_chatDisplay->Refresh();
+  
   long tokens = event.GetExtraLong();
   
   if (tokens > 0) {
