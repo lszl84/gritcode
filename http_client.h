@@ -65,7 +65,7 @@ public:
   
   void SendStreamingChatRequest(
     const ChatRequest& request,
-    std::function<void(const std::string& chunk)> onChunk,
+    std::function<void(const std::string& chunk, bool isThinking)> onChunk,
     std::function<void(const ChatResponse& response)> onComplete
   );
 
@@ -94,7 +94,7 @@ private:
   JsonLogCallback jsonLogCallback_;
   
   // Streaming support
-  std::function<void(const std::string& chunk)> streamingChunkCallback_;
+  std::function<void(const std::string& chunk, bool isThinking)> streamingChunkCallback_;
   std::function<void(const ChatResponse& response)> streamingCompleteCallback_;
   std::string sseBuffer_;
   std::string accumulatedContent_;

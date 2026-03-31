@@ -506,7 +506,7 @@ void HttpClient::SendChatRequest(const ChatRequest& request, ChatCallback callba
 
 void HttpClient::SendStreamingChatRequest(
   const ChatRequest& request,
-  std::function<void(const std::string& chunk)> onChunk,
+  std::function<void(const std::string& chunk, bool isThinking)> onChunk,
   std::function<void(const ChatResponse& response)> onComplete
 ) {
   wxLogMessage("HttpClient::SendStreamingChatRequest: Starting...");
@@ -667,21 +667,23 @@ void HttpClient::ProcessSSEChunk(const std::string& chunk) {
               std::string content;
               
               // Check for content (regular response) or reasoning_content (thinking)
+              bool isThinking = false;
               if (delta.contains("content")) {
                 content = delta["content"].get<std::string>();
               } else if (delta.contains("reasoning_content")) {
                 content = delta["reasoning_content"].get<std::string>();
+                isThinking = true;
               }
-              
+
               if (!content.empty()) {
-                wxLogMessage("HttpClient::ProcessSSEChunk: Content extracted: '%s'", 
-                             wxString::FromUTF8(content).c_str());
+                wxLogMessage("HttpClient::ProcessSSEChunk: Content extracted (thinking=%d): '%s'",
+                             isThinking, wxString::FromUTF8(content).c_str());
                 accumulatedContent_ += content;
-                wxLogMessage("HttpClient::ProcessSSEChunk: Accumulated content now %zu chars", 
+                wxLogMessage("HttpClient::ProcessSSEChunk: Accumulated content now %zu chars",
                              accumulatedContent_.length());
                 if (streamingChunkCallback_) {
                   wxLogMessage("HttpClient::ProcessSSEChunk: Calling chunk callback");
-                  streamingChunkCallback_(content);
+                  streamingChunkCallback_(content, isThinking);
                 } else {
                   wxLogWarning("HttpClient::ProcessSSEChunk: No chunk callback set!");
                 }

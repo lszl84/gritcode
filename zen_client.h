@@ -20,7 +20,8 @@ public:
   std::vector<network::ModelInfo> GetFreeModels() const;
   
   void SendMessage(const std::string& model, const std::string& message);
-  
+  void ClearConversation();
+
   void SetActiveModel(const std::string& modelId);
   std::string GetActiveModel() const;
   
@@ -41,8 +42,9 @@ private:
   std::unique_ptr<network::HttpClient> httpClient_;
   std::string activeModel_;
   bool connected_ = false;
-  
+
   std::vector<network::ModelInfo> cachedModels_;
+  std::vector<network::Message> conversationHistory_;
 };
 
 wxDECLARE_EVENT(ZEN_MESSAGE_RECEIVED, wxCommandEvent);

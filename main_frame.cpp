@@ -216,6 +216,10 @@ void MainFrame::OnSendMessage(wxCommandEvent& /*event*/) {
   // Track where the AI response blocks will start
   m_aiResponseStartBlock = m_chatDisplay->GetBlockCount();
   
+  // Reset thinking state
+  m_thinkingBuffer.Clear();
+  m_isReceivingThinking = false;
+
   // Start collecting AI response for markdown rendering
   // No plain text block created - markdown timer handles display
   m_aiResponseBuffer.Clear();
@@ -288,11 +292,20 @@ void MainFrame::OnZenMessageReceived(wxCommandEvent& event) {
   m_chunkFlushTimer.Stop();
   m_markdownRenderTimer.Stop();
   
+  // Finalize thinking state
+  m_isReceivingThinking = false;
+
   // Final markdown render of the complete response
   if (m_collectingAiResponse && !m_aiResponseBuffer.IsEmpty()) {
     m_collectingAiResponse = false;
+    // Ensure start block is after thinking block if present
+    if (!m_thinkingBuffer.IsEmpty() && m_aiResponseStartBlock <= m_thinkingBlockIndex) {
+      m_aiResponseStartBlock = m_thinkingBlockIndex + 1;
+    }
     ReplaceAiResponseWithMarkdown();
     m_aiResponseBuffer.Clear();
+  } else {
+    m_collectingAiResponse = false;
   }
   
   // Force full redraw to ensure final text layout is rendered
@@ -313,14 +326,38 @@ void MainFrame::OnZenMessageReceived(wxCommandEvent& event) {
 
 void MainFrame::OnZenStreamChunk(wxCommandEvent& event) {
   wxString chunk = event.GetString();
-  if (!chunk.IsEmpty()) {
-    // Always collect into markdown buffer during AI response
-    if (m_collectingAiResponse) {
-      m_aiResponseBuffer += chunk;
-      // Don't use ContinueStream - the markdown render timer handles display
+  bool isThinking = event.GetExtraLong() != 0;
+
+  if (!chunk.IsEmpty() && m_collectingAiResponse) {
+    if (isThinking) {
+      // Thinking chunk — accumulate into thinking block
+      if (!m_isReceivingThinking) {
+        // First thinking chunk: create a THINKING block
+        m_isReceivingThinking = true;
+        m_thinkingBuffer.Clear();
+        m_thinkingBlockIndex = m_chatDisplay->GetBlockCount();
+        m_chatDisplay->AppendStream(BlockType::THINKING, chunk);
+      } else {
+        // Continue appending to existing thinking block
+        m_chatDisplay->ContinueStream(chunk);
+      }
+      m_thinkingBuffer += chunk;
       return;
     }
-    
+
+    // Content chunk — finalize thinking block if transitioning
+    if (m_isReceivingThinking) {
+      m_isReceivingThinking = false;
+      // Update AI response start to after the thinking block
+      m_aiResponseStartBlock = m_chatDisplay->GetBlockCount();
+    }
+
+    m_aiResponseBuffer += chunk;
+    // Don't use ContinueStream - the markdown render timer handles display
+    return;
+  }
+
+  if (!chunk.IsEmpty()) {
     // Non-AI chunks (shouldn't happen, but fallback to plain text)
     m_pendingChunks += chunk;
     if (!m_chunkFlushTimer.IsRunning()) {

@@ -146,9 +146,9 @@ std::vector<network::ModelInfo> ZenClient::GetFreeModels() const {
 }
 
 void ZenClient::SendMessage(const std::string& model, const std::string& message) {
-  wxLogMessage("ZenClient::SendMessage: model='%s', message length=%zu", 
-               model.c_str(), message.length());
-  
+  wxLogMessage("ZenClient::SendMessage: model='%s', message length=%zu, history=%zu msgs",
+               model.c_str(), message.length(), conversationHistory_.size());
+
   if (!connected_) {
     wxLogError("ZenClient::SendMessage: Not connected!");
     wxCommandEvent event(ZEN_ERROR_OCCURRED);
@@ -156,45 +156,63 @@ void ZenClient::SendMessage(const std::string& model, const std::string& message
     wxPostEvent(this, event);
     return;
   }
-  
+
+  // Add the user message to conversation history
+  conversationHistory_.push_back({"user", message});
+
   network::ChatRequest request;
   request.model = model.empty() ? activeModel_ : model;
-  request.messages = {
-    {"user", message}
-  };
+  request.messages = conversationHistory_;
   request.stream = false;
-  
-  wxLogMessage("ZenClient::SendMessage: Using model='%s' (STREAMING MODE)", request.model.c_str());
-  
+
+  wxLogMessage("ZenClient::SendMessage: Using model='%s' (STREAMING MODE), sending %zu messages",
+               request.model.c_str(), request.messages.size());
+
   // Use streaming for better UX
-  httpClient_->SendStreamingChatRequest(request, 
-    [this](const std::string& chunk) {
+  httpClient_->SendStreamingChatRequest(request,
+    [this](const std::string& chunk, bool isThinking) {
       // Called for each chunk of text as it arrives
       // Send just the delta chunk for incremental UI append
       wxCommandEvent event(ZEN_STREAM_CHUNK);
       event.SetString(wxString::FromUTF8(chunk.c_str(), chunk.length()));
+      event.SetExtraLong(isThinking ? 1 : 0);
       wxPostEvent(this, event);
     },
     [this](const network::ChatResponse& response) {
       // Called when streaming is complete
-      wxLogMessage("ZenClient::SendMessage: Streaming complete, content length=%zu", 
+      wxLogMessage("ZenClient::SendMessage: Streaming complete, content length=%zu",
                    response.content.length());
       this->OnChatResponse(response);
     }
   );
 }
 
+void ZenClient::ClearConversation() {
+  conversationHistory_.clear();
+  wxLogMessage("ZenClient::ClearConversation: History cleared");
+}
+
 void ZenClient::OnChatResponse(const network::ChatResponse& response) {
-  wxLogMessage("ZenClient::OnChatResponse: error=%d, content length=%zu", 
+  wxLogMessage("ZenClient::OnChatResponse: error=%d, content length=%zu",
                response.error, response.content.length());
-  
+
   if (response.error) {
+    // Remove the user message that caused the error so it can be retried
+    if (!conversationHistory_.empty() && conversationHistory_.back().role == "user") {
+      conversationHistory_.pop_back();
+    }
     wxCommandEvent event(ZEN_ERROR_OCCURRED);
     event.SetString(wxString::FromUTF8(response.errorMessage));
     wxPostEvent(this, event);
   } else {
+    // Store assistant response in conversation history
+    if (!response.content.empty()) {
+      conversationHistory_.push_back({"assistant", response.content});
+      wxLogMessage("ZenClient::OnChatResponse: History now has %zu messages",
+                   conversationHistory_.size());
+    }
+
     wxCommandEvent event(ZEN_MESSAGE_RECEIVED);
-    // Explicitly convert std::string to wxString with proper UTF-8 handling
     wxString wxContent = wxString::FromUTF8(response.content.c_str(), response.content.length());
     event.SetString(wxContent);
     event.SetExtraLong(response.totalTokens);
