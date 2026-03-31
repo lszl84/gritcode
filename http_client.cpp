@@ -666,23 +666,36 @@ void HttpClient::ProcessSSEChunk(const std::string& chunk) {
               const auto& delta = choice["delta"];
               std::string content;
               
-              // Check for content (regular response) or reasoning_content (thinking)
+              // Extract reasoning (thinking) content — providers use different field names
               bool isThinking = false;
-              if (delta.contains("content")) {
+              std::string reasoning;
+              for (const auto& field : {"reasoning_content", "reasoning", "reasoning_text"}) {
+                if (delta.contains(field) && delta[field].is_string()) {
+                  reasoning = delta[field].get<std::string>();
+                  break;
+                }
+              }
+
+              // Extract regular content (only if it's a non-empty string)
+              if (delta.contains("content") && delta["content"].is_string()) {
                 content = delta["content"].get<std::string>();
-              } else if (delta.contains("reasoning_content")) {
-                content = delta["reasoning_content"].get<std::string>();
+              }
+
+              // Prefer reasoning over empty content during thinking phase
+              if (!reasoning.empty()) {
+                content = reasoning;
                 isThinking = true;
               }
 
               if (!content.empty()) {
                 wxLogMessage("HttpClient::ProcessSSEChunk: Content extracted (thinking=%d): '%s'",
                              isThinking, wxString::FromUTF8(content).c_str());
-                accumulatedContent_ += content;
-                wxLogMessage("HttpClient::ProcessSSEChunk: Accumulated content now %zu chars",
-                             accumulatedContent_.length());
+                if (!isThinking) {
+                  accumulatedContent_ += content;
+                  wxLogMessage("HttpClient::ProcessSSEChunk: Accumulated content now %zu chars",
+                               accumulatedContent_.length());
+                }
                 if (streamingChunkCallback_) {
-                  wxLogMessage("HttpClient::ProcessSSEChunk: Calling chunk callback");
                   streamingChunkCallback_(content, isThinking);
                 } else {
                   wxLogWarning("HttpClient::ProcessSSEChunk: No chunk callback set!");
