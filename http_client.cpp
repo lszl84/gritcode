@@ -13,6 +13,7 @@ HttpClient::HttpClient() : initialized_(false) {
   // Bind to web request events
   Bind(wxEVT_WEBREQUEST_STATE, &HttpClient::OnRequestStateChanged, this);
   Bind(wxEVT_WEBREQUEST_DATA, &HttpClient::OnRequestData, this);
+  retryTimer_.Bind(wxEVT_TIMER, [this](wxTimerEvent&) { RetryCurrentRequest(); });
 }
 
 HttpClient::~HttpClient() {
@@ -201,10 +202,21 @@ void HttpClient::OnRequestStateChanged(wxWebRequestEvent& event) {
       finalResponse.finishReason = "stop";
       
       if (response.GetStatus() != 200) {
+        // Retry on 429 rate limit
+        if (response.GetStatus() == 429 && retryCount_ < MAX_RETRIES) {
+          retryCount_++;
+          int delayMs = 1000 * retryCount_;  // 1s, 2s, 3s backoff
+          wxLogMessage("HttpClient: 429 rate limited, retry %d/%d in %dms",
+                       retryCount_, MAX_RETRIES, delayMs);
+          sseBuffer_.clear();
+          accumulatedContent_.clear();
+          retryTimer_.StartOnce(delayMs);
+          return;
+        }
         finalResponse.error = true;
         finalResponse.errorMessage = "HTTP Error " + std::to_string(response.GetStatus());
       }
-      
+
       if (streamingCompleteCallback_) {
         auto cb = streamingCompleteCallback_;
         streamingCompleteCallback_ = nullptr;
@@ -270,9 +282,10 @@ void HttpClient::OnRequestStateChanged(wxWebRequestEvent& event) {
       }
     } else {
       // Error response
-      std::string errorMsg = "HTTP Error " + std::to_string(response.GetStatus());
+      int status = response.GetStatus();
+      std::string errorMsg = "HTTP Error " + std::to_string(status);
       wxLogError("HttpClient: %s", errorMsg.c_str());
-      
+
       if (chatCallback_) {
         ChatResponse error;
         error.error = true;
@@ -504,6 +517,42 @@ void HttpClient::SendChatRequest(const ChatRequest& request, ChatCallback callba
   currentRequest_.Start();
 }
 
+void HttpClient::RetryCurrentRequest() {
+  wxLogMessage("HttpClient::RetryCurrentRequest: Attempt %d/%d", retryCount_, MAX_RETRIES);
+
+  std::string url = baseUrl_ + "/chat/completions";
+  currentRequest_ = wxWebSession::GetDefault().CreateRequest(this, wxString::FromUTF8(url));
+
+  if (!currentRequest_.IsOk()) {
+    wxLogError("HttpClient::RetryCurrentRequest: Failed to create request");
+    if (streamingCompleteCallback_) {
+      ChatResponse error;
+      error.error = true;
+      error.errorMessage = "Retry failed: could not create request";
+      auto cb = streamingCompleteCallback_;
+      streamingCompleteCallback_ = nullptr;
+      streamingChunkCallback_ = nullptr;
+      isStreaming_ = false;
+      cb(error);
+    }
+    return;
+  }
+
+  currentRequest_.SetStorage(wxWebRequest::Storage_None);
+  currentRequest_.SetHeader("Content-Type", "application/json");
+  currentRequest_.SetHeader("Accept", "text/event-stream");
+  if (!apiKey_.empty()) {
+    currentRequest_.SetHeader("Authorization", "Bearer " + wxString::FromUTF8(apiKey_));
+  }
+  currentRequest_.SetData(wxString::FromUTF8(pendingRequestBody_), "application/json");
+
+  sseBuffer_.clear();
+  accumulatedContent_.clear();
+
+  wxLogMessage("HttpClient::RetryCurrentRequest: Starting request...");
+  currentRequest_.Start();
+}
+
 void HttpClient::SendStreamingChatRequest(
   const ChatRequest& request,
   std::function<void(const std::string& chunk, bool isThinking)> onChunk,
@@ -565,12 +614,14 @@ void HttpClient::SendStreamingChatRequest(
   wxLogMessage("HttpClient::SendStreamingChatRequest: Setting POST data...");
   currentRequest_.SetData(wxString::FromUTF8(requestBody), "application/json");
   
-  // Store streaming callbacks
+  // Store streaming callbacks and request body for retries
   streamingChunkCallback_ = onChunk;
   streamingCompleteCallback_ = onComplete;
+  pendingRequestBody_ = requestBody;
   sseBuffer_.clear();
   accumulatedContent_.clear();
   isStreaming_ = true;
+  retryCount_ = 0;
   
   // Clear other callbacks
   modelsCallback_ = nullptr;

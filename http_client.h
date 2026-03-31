@@ -7,6 +7,7 @@
 #include <wx/string.h>
 #include <wx/webrequest.h>
 #include <wx/event.h>
+#include <wx/timer.h>
 
 namespace fcn::network {
 
@@ -74,31 +75,38 @@ public:
 private:
   void OnRequestStateChanged(wxWebRequestEvent& event);
   void OnRequestData(wxWebRequestEvent& event);
-  
+
   std::string BuildRequestJson(const ChatRequest& request);
   ChatResponse ParseResponse(const std::string& json);
   std::vector<ModelInfo> ParseModels(const std::string& json);
-  
+
   void ProcessSSEChunk(const std::string& chunk);
-  
+  void RetryCurrentRequest();
+
   wxWebRequest currentRequest_;
-  
+
   std::string baseUrl_ = "https://opencode.ai/zen/v1";
   std::string apiKey_;
   int timeout_ = 60;
   bool initialized_ = false;
-  
+
   // Callbacks for current operation
   ModelsCallback modelsCallback_;
   ChatCallback chatCallback_;
   JsonLogCallback jsonLogCallback_;
-  
+
   // Streaming support
   std::function<void(const std::string& chunk, bool isThinking)> streamingChunkCallback_;
   std::function<void(const ChatResponse& response)> streamingCompleteCallback_;
   std::string sseBuffer_;
   std::string accumulatedContent_;
   bool isStreaming_ = false;
+
+  // Retry support for 429 rate limiting
+  static constexpr int MAX_RETRIES = 3;
+  int retryCount_ = 0;
+  wxTimer retryTimer_;
+  std::string pendingRequestBody_;  // Saved for retries
 };
 
 } // namespace fcn::network
