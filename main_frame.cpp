@@ -350,13 +350,11 @@ void MainFrame::OnMarkdownRenderTimer(wxTimerEvent& /*event*/) {
 }
 
 void MainFrame::ReplaceAiResponseWithMarkdown() {
-  // Remove all blocks from the AI response start onwards
-  m_chatDisplay->RemoveBlocksFrom(m_aiResponseStartBlock);
-  
-  // Re-render the full buffer as markdown
+  // Incremental update: diffs new blocks against existing ones so only the
+  // changed tail (usually the last paragraph) is re-measured on paint.
   auto utf8Buf = m_aiResponseBuffer.ToUTF8();
   std::string markdownStr(utf8Buf.data(), utf8Buf.length());
-  m_chatDisplay->RenderMarkdown(markdownStr);
+  m_chatDisplay->UpdateMarkdown(m_aiResponseStartBlock, markdownStr);
 }
 
 void MainFrame::OnZenError(wxCommandEvent& event) {

@@ -1733,6 +1733,57 @@ void StreamingTextCtrl::RenderMarkdown(const std::string& markdown) {
     }
 }
 
+void StreamingTextCtrl::UpdateMarkdown(size_t fromBlock, const std::string& markdown) {
+    MarkdownRenderer renderer(normalFont);
+    auto newBlocks = renderer.Render(markdown, isDarkTheme);
+
+    if (newBlocks.empty()) {
+        // Nothing to show — remove any stale AI blocks
+        if (fromBlock < blockManager.GetBlockCount())
+            RemoveBlocksFrom(fromBlock);
+        return;
+    }
+
+    // --- Block-level diff against existing blocks from fromBlock onwards ---
+    size_t existingEnd = blockManager.GetBlockCount();
+    size_t aiBlockCount = (fromBlock < existingEnd) ? (existingEnd - fromBlock) : 0;
+    size_t newCount     = newBlocks.size();
+    size_t commonPrefix = 0;
+
+    size_t limit = std::min(aiBlockCount, newCount);
+    for (size_t i = 0; i < limit; ++i) {
+        const TextBlock* existing = blockManager.GetBlock(fromBlock + i);
+        const TextBlock* fresh    = newBlocks[i].get();
+        if (existing && fresh
+            && existing->type        == fresh->type
+            && existing->leftIndent  == fresh->leftIndent
+            && existing->runs.size() == fresh->runs.size()
+            && existing->GetFullText() == fresh->GetFullText()) {
+            ++commonPrefix;
+        } else {
+            break;
+        }
+    }
+
+    // Remove only the changed / extra tail
+    if (fromBlock + commonPrefix < existingEnd)
+        RemoveBlocksFrom(fromBlock + commonPrefix);
+
+    // Add only new / changed blocks
+    if (commonPrefix < newCount) {
+        std::vector<std::unique_ptr<TextBlock>> tail;
+        tail.reserve(newCount - commonPrefix);
+        for (size_t i = commonPrefix; i < newCount; ++i)
+            tail.push_back(std::move(newBlocks[i]));
+        blockManager.AddBlocks(std::move(tail));
+    }
+
+    if (!inBatch) {
+        if (autoScroll) scrollToBottomPending = true;
+        Refresh();
+    }
+}
+
 // ============================================================================
 // Thinking animation
 // ============================================================================

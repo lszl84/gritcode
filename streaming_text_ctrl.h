@@ -87,6 +87,11 @@ public:
     void RemoveBlocksFrom(size_t fromIndex);  // Remove blocks from index onwards
     void RenderMarkdown(const std::string& markdown);
 
+    // Incremental markdown update: re-parses the full markdown but diffs against
+    // existing blocks from fromBlock onwards, only replacing blocks that changed.
+    // Preserves segment caches for unchanged blocks → O(changed) not O(total).
+    void UpdateMarkdown(size_t fromBlock, const std::string& markdown);
+
     void SetAutoScroll(bool enable) { autoScroll = enable; }
     bool GetAutoScroll() const { return autoScroll; }
 
