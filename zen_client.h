@@ -1,48 +1,47 @@
 #pragma once
 
-#include "http_client.h"
+#include "claude_client.h"
 #include <wx/event.h>
 #include <memory>
 #include <vector>
 
 namespace fcn::zen {
 
+// Thin wrapper around ClaudeClient that preserves the event-based API used by MainFrame.
+// Emits the same ZEN_* events as before; internally communicates via ACP with the
+// system 'claude' binary instead of the OpenCode Zen HTTP API.
 class ZenClient : public wxEvtHandler {
 public:
   static ZenClient& Instance();
-  
-  bool Connect(const std::string& apiKey = "");
+
+  bool Connect(const std::string& /*apiKey*/ = "");
   void Disconnect();
   bool IsConnected() const;
-  
+
   void FetchModels();
-  std::vector<network::ModelInfo> GetModels() const;
-  std::vector<network::ModelInfo> GetFreeModels() const;
-  
+  std::vector<claude::ModelInfo> GetModels() const;
+
   void SendMessage(const std::string& model, const std::string& message);
-  
+
   void SetActiveModel(const std::string& modelId);
   std::string GetActiveModel() const;
-  
-  bool IsAnonymous() const;
-  
-  void SetJsonLogCallback(network::JsonLogCallback callback);
+
+  // Always false — auth is handled by the system claude binary
+  bool IsAnonymous() const { return false; }
+
+  void SetJsonLogCallback(claude::JsonLogCallback callback);
 
 private:
   ZenClient();
   ~ZenClient();
-  
+
   ZenClient(const ZenClient&) = delete;
   ZenClient& operator=(const ZenClient&) = delete;
-  
-  void OnModelsReceived(const std::vector<network::ModelInfo>& models);
-  void OnChatResponse(const network::ChatResponse& response);
-  
-  std::unique_ptr<network::HttpClient> httpClient_;
+
+  std::unique_ptr<claude::ClaudeClient> client_;
   std::string activeModel_;
   bool connected_ = false;
-  
-  std::vector<network::ModelInfo> cachedModels_;
+  std::vector<claude::ModelInfo> cachedModels_;
 };
 
 wxDECLARE_EVENT(ZEN_MESSAGE_RECEIVED, wxCommandEvent);

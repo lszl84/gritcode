@@ -53,8 +53,8 @@ FetchContent_MakeAvailable(cmark)
 set(SOURCES
   application.cpp
   application.h
-  http_client.cpp
-  http_client.h
+  claude_client.cpp
+  claude_client.h
   zen_client.cpp
   zen_client.h
   main_frame.cpp
@@ -81,7 +81,6 @@ target_include_directories(${PROJECT_NAME} PRIVATE
 # Link wxWidgets and libraries
 target_link_libraries(${PROJECT_NAME} PRIVATE
   wxcore
-  wxnet
   nlohmann_json::nlohmann_json
   cmark
 )

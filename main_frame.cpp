@@ -6,7 +6,6 @@
 #include <wx/choice.h>
 #include <wx/statline.h>
 #include <wx/log.h>
-#include <wx/secretstore.h>
 #include <wx/datetime.h>
 
 namespace fcn::ui {
@@ -39,16 +38,10 @@ MainFrame::MainFrame()
   // Start MCP server for programmatic control
   StartMCPServer();
   
-  // Auto-connect: use saved API key from keychain if available
-  wxString savedKey = LoadApiKeyFromKeychain();
+  // Connect via ACP to the system claude binary (no API key needed)
   auto& zen = zen::ZenClient::Instance();
-  if (!savedKey.IsEmpty()) {
-    AppendToChat("System", "Connecting with saved API key...");
-    zen.Connect(savedKey.ToStdString());
-  } else {
-    AppendToChat("System", "Connecting anonymously...");
-    zen.Connect("");
-  }
+  AppendToChat("System", "Connecting via claude binary (ACP)...");
+  zen.Connect();
 }
 
 void MainFrame::StartMCPServer() {
@@ -66,10 +59,10 @@ void MainFrame::CreateMenuBar() {
   
   // File menu
   auto* fileMenu = new wxMenu();
-  fileMenu->Append(static_cast<int>(MenuID::SetApiKey), "Set &API Key...\tCtrl+K", "Set or clear your OpenCode Zen API key");
+  fileMenu->Append(static_cast<int>(MenuID::SetApiKey), "Claude &Settings...\tCtrl+K", "Show claude binary connection info");
   fileMenu->AppendSeparator();
-  fileMenu->Append(static_cast<int>(MenuID::Connect), "&Reconnect\tCtrl+R", "Reconnect to OpenCode Zen");
-  fileMenu->Append(static_cast<int>(MenuID::Disconnect), "&Disconnect\tCtrl+D", "Disconnect from Zen");
+  fileMenu->Append(static_cast<int>(MenuID::Connect), "&Reconnect\tCtrl+R", "Reconnect via claude binary");
+  fileMenu->Append(static_cast<int>(MenuID::Disconnect), "&Disconnect\tCtrl+D", "Disconnect");
   fileMenu->AppendSeparator();
   fileMenu->Append(static_cast<int>(MenuID::Exit), "E&xit\tAlt+F4", "Quit the application");
   menuBar->Append(fileMenu, "&File");
@@ -105,7 +98,7 @@ void MainFrame::CreateUI() {
   
   mainSizer->Add(inputSizer, 0, wxEXPAND);
   
-  // Bottom control bar (model selector and API key)
+  // Bottom control bar (model selector)
   auto* bottomSizer = new wxBoxSizer(wxHORIZONTAL);
   
   // Model selection
@@ -118,10 +111,6 @@ void MainFrame::CreateUI() {
   bottomSizer->Add(m_statusLabel, 0, wxALL | wxALIGN_CENTER_VERTICAL, 5);
   
   bottomSizer->AddStretchSpacer();
-  
-  // API Key button
-  auto* apiKeyButton = new wxButton(panel, static_cast<int>(MenuID::SetApiKey), "API Key...");
-  bottomSizer->Add(apiKeyButton, 0, wxALL, 5);
   
   mainSizer->Add(bottomSizer, 0, wxEXPAND);
   
@@ -172,13 +161,10 @@ void MainFrame::OnExit(wxCommandEvent& /*event*/) {
 }
 
 void MainFrame::OnAbout(wxCommandEvent& /*event*/) {
-  wxMessageBox("FastCode Native - OpenCode Zen Agent Harness\n\n"
-               "A fast, native replacement for web-based TUIs\n\n"
-               "Free models available:\n"
-               "- Big Pickle\n"
-               "- MiMo V2 Flash Free\n"
-               "- Nemotron 3 Super Free\n"
-               "- MiniMax M2.5 Free\n\n"
+  wxMessageBox("FastCode Native - Claude ACP Harness\n\n"
+               "Communicates with the system 'claude' binary\n"
+               "via ACP (Agent Communication Protocol).\n\n"
+               "Models: Claude Opus 4.6, Sonnet 4.6, Haiku 4.5\n\n"
                "License: GPL v3",
                "About FastCode Native",
                wxOK | wxICON_INFORMATION);
@@ -190,14 +176,8 @@ void MainFrame::OnConnect(wxCommandEvent& /*event*/) {
   auto& zen = zen::ZenClient::Instance();
   zen.Disconnect();
 
-  wxString savedKey = LoadApiKeyFromKeychain();
-  AppendToChat("System", savedKey.IsEmpty()
-               ? "Reconnecting anonymously..."
-               : "Reconnecting with saved API key...");
-
-  if (!zen.Connect(savedKey.ToStdString())) {
-    AppendToChat("Error", "Failed to connect to OpenCode Zen");
-  }
+  AppendToChat("System", "Reconnecting via claude binary...");
+  zen.Connect();
 }
 
 void MainFrame::OnDisconnect(wxCommandEvent& /*event*/) {
@@ -274,7 +254,7 @@ void MainFrame::OnZenDisconnected(wxCommandEvent& /*event*/) {
   // Notify MCP server
   mcp::MCPServer::Instance().OnDisconnected();
   
-  AppendToChat("System", "Disconnected from Zen");
+  AppendToChat("System", "Disconnected");
 }
 
 void MainFrame::OnZenMessageReceived(wxCommandEvent& event) {
@@ -381,15 +361,7 @@ void MainFrame::OnZenModelsLoaded(wxCommandEvent& /*event*/) {
 
 void MainFrame::UpdateConnectionStatus() {
   auto& zen = zen::ZenClient::Instance();
-  if (zen.IsConnected()) {
-    if (zen.IsAnonymous()) {
-      m_statusLabel->SetLabel("Connected (Anonymous)");
-    } else {
-      m_statusLabel->SetLabel("Connected (API Key)");
-    }
-  } else {
-    m_statusLabel->SetLabel("Disconnected");
-  }
+  m_statusLabel->SetLabel(zen.IsConnected() ? "Connected (claude)" : "Disconnected");
 }
 
 void MainFrame::PopulateModelList() {
@@ -397,24 +369,20 @@ void MainFrame::PopulateModelList() {
   m_modelChoice->Clear();
 
   auto& zen = zen::ZenClient::Instance();
-  // Show all models when authenticated, only free models when anonymous
-  auto models = zen.IsAnonymous() ? zen.GetFreeModels() : zen.GetModels();
+  auto models = zen.GetModels();
 
-  wxLogMessage("MainFrame::PopulateModelList: Got %zu models (anonymous=%d)",
-               models.size(), zen.IsAnonymous());
-  
+  wxLogMessage("MainFrame::PopulateModelList: Got %zu models", models.size());
+
   for (const auto& model : models) {
-    wxLogMessage("MainFrame::PopulateModelList: Adding model '%s' (id='%s')",
-                 model.name.c_str(), model.id.c_str());
     m_modelChoice->Append(wxString::FromUTF8(model.name),
                           new wxStringClientData(wxString::FromUTF8(model.id)));
   }
-  
+
   if (!models.empty()) {
-    // Prefer kimi-k2.5 to save tokens, otherwise fall back to first model
+    // Default to claude-sonnet-4-6
     int defaultIdx = 0;
     for (size_t i = 0; i < models.size(); ++i) {
-      if (models[i].id == "kimi-k2.5") {
+      if (models[i].id == "claude-sonnet-4-6") {
         defaultIdx = static_cast<int>(i);
         break;
       }
@@ -454,109 +422,16 @@ void MainFrame::LogJsonTraffic(const wxString& direction, const wxString& json) 
   m_jsonLog->ShowPosition(m_jsonLog->GetLastPosition());
 }
 
-// --- API Key management via wxSecretStore ---
-
-static const wxString KEYCHAIN_SERVICE = "FastCodeNative/OpenCodeZen";
-
-wxString MainFrame::LoadApiKeyFromKeychain() {
-    auto store = wxSecretStore::GetDefault();
-    if (!store.IsOk()) {
-        wxLogWarning("MainFrame: Could not access system keychain");
-        return {};
-    }
-
-    wxString username;
-    wxSecretValue secret;
-    if (store.Load(KEYCHAIN_SERVICE, username, secret)) {
-        wxLogMessage("MainFrame: Loaded API key from keychain");
-        return secret.GetAsString();
-    }
-
-    return {};
-}
-
-bool MainFrame::SaveApiKeyToKeychain(const wxString& key) {
-    wxLogMessage("SaveApiKeyToKeychain: Starting...");
-    
-    try {
-        wxLogMessage("SaveApiKeyToKeychain: Getting store...");
-        auto store = wxSecretStore::GetDefault();
-        
-        wxLogMessage("SaveApiKeyToKeychain: Checking if store is OK...");
-        if (!store.IsOk()) {
-            wxLogError("MainFrame: Could not access system keychain");
-            return false;
-        }
-        
-        wxLogMessage("SaveApiKeyToKeychain: Creating secret value...");
-        wxSecretValue secret(key);
-        
-        wxLogMessage("SaveApiKeyToKeychain: Checking if secret is OK...");
-        if (!secret.IsOk()) {
-            wxLogError("MainFrame: Failed to create secret value");
-            return false;
-        }
-        
-        wxLogMessage("SaveApiKeyToKeychain: Calling store.Save()...");
-        if (!store.Save(KEYCHAIN_SERVICE, "apikey", secret)) {
-            wxLogError("MainFrame: Failed to save API key to keychain");
-            return false;
-        }
-
-        wxLogMessage("MainFrame: API key saved to keychain");
-        return true;
-    } catch (const std::exception& e) {
-        wxLogError("SaveApiKeyToKeychain: Exception: %s", e.what());
-        return false;
-    } catch (...) {
-        wxLogError("SaveApiKeyToKeychain: Unknown exception");
-        return false;
-    }
-}
-
-bool MainFrame::ClearApiKeyFromKeychain() {
-    auto store = wxSecretStore::GetDefault();
-    if (!store.IsOk()) return false;
-    return store.Delete(KEYCHAIN_SERVICE);
-}
 
 void MainFrame::OnSetApiKey(wxCommandEvent& /*event*/) {
-    wxString currentKey = LoadApiKeyFromKeychain();
-    bool hasKey = !currentKey.IsEmpty();
-
-    wxString prompt = hasKey
-        ? "An API key is currently saved in your keychain.\n\n"
-          "Enter a new key to replace it, or clear the field and\n"
-          "click OK to remove it and use anonymous access."
-        : "Enter your OpenCode Zen API key to unlock all models.\n\n"
-          "Get your key at https://opencode.ai\n"
-          "Leave empty for anonymous access (free models only).";
-
-    wxTextEntryDialog dlg(this, prompt, "API Key", hasKey ? "********" : "");
-
-    if (dlg.ShowModal() != wxID_OK) return;
-
-    wxString input = dlg.GetValue().Trim();
-
-    // User didn't change the placeholder
-    if (input == "********") return;
-
-    auto& zen = zen::ZenClient::Instance();
-    zen.Disconnect();
-
-    if (input.IsEmpty()) {
-        ClearApiKeyFromKeychain();
-        AppendToChat("System", "API key removed. Reconnecting anonymously...");
-        zen.Connect("");
-    } else {
-        if (!SaveApiKeyToKeychain(input)) {
-            wxMessageBox("Could not save the API key to your system keychain.",
-                         "Keychain Error", wxOK | wxICON_ERROR);
-            return;
-        }
-        AppendToChat("System", "API key saved to keychain. Reconnecting...");
-        zen.Connect(input.ToStdString());
-    }
+    wxMessageBox(
+        "This build communicates with the system 'claude' binary\n"
+        "via ACP (Agent Communication Protocol).\n\n"
+        "Authentication is handled by the claude binary itself\n"
+        "(run 'claude login' in a terminal to authenticate).\n\n"
+        "No API key is needed here.",
+        "Claude ACP Settings",
+        wxOK | wxICON_INFORMATION);
 }
 
 } // namespace fcn::ui

@@ -415,11 +415,11 @@ void MCPServer::OnError(const wxString& error) {
 
 void MCPServer::OnModelsLoaded() {
     auto& zen = zen::ZenClient::Instance();
-    auto models = zen.IsAnonymous() ? zen.GetFreeModels() : zen.GetModels();
+    auto models = zen.GetModels();
 
     availableModels_.clear();
     for (const auto& model : models) {
-        availableModels_.push_back({model.id, model.name});
+        availableModels_.push_back(std::pair<std::string,std::string>{model.id, model.name});
     }
 
     modelsLoaded_ = true;

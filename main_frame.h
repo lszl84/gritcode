@@ -39,9 +39,6 @@ private:
   void PopulateModelList();
   void AppendToChat(const wxString& sender, const wxString& message);
   void LogJsonTraffic(const wxString& direction, const wxString& json);
-  wxString LoadApiKeyFromKeychain();
-  bool SaveApiKeyToKeychain(const wxString& key);
-  bool ClearApiKeyFromKeychain();
   
   // Chat UI elements
   StreamingTextCtrl* m_chatDisplay = nullptr;
