@@ -659,6 +659,42 @@ void StreamingTextCtrl::WrapBlock(wxDC& dc, const TextBlock* block, int textArea
                                    int& outCharHeight, size_t blockIdx) {
     outCharHeight = dc.GetCharHeight();
 
+    // Collapsed thinking block: single summary line (bypass segment cache)
+    if (block && block->type == BlockType::THINKING && block->isCollapsed) {
+        dc.SetFont(GetFontForType(BlockType::THINKING));
+        int charH = dc.GetCharHeight();
+        outCharHeight = charH;
+
+        // Build summary: triangle + first sentence or "Thinking..."
+        wxString fullText = block->GetFullText();
+        wxString summary;
+        if (fullText.IsEmpty()) {
+            summary = wxS("\u25B6  Thinking\u2026");
+        } else {
+            // Extract first sentence (up to first period, newline, or 80 chars)
+            size_t end = fullText.find_first_of(wxS(".\n"));
+            if (end != wxString::npos && end < 80) {
+                summary = wxS("\u25B6  ") + fullText.substr(0, end + 1);
+            } else {
+                summary = wxS("\u25B6  ") + fullText.substr(0, 80);
+                if (fullText.length() > 80) summary += wxS("\u2026");
+            }
+        }
+
+        wxSize extent = dc.GetTextExtent(summary);
+        outLines.clear();
+        WrappedLine wl;
+        wl.text = summary;
+        wl.x = leftMargin;
+        wl.y = 0;
+        wl.width = extent.GetWidth();
+        wl.height = charH;
+        wl.caretXValid = false;
+        outLines.push_back(std::move(wl));
+        outHeight = charH;
+        return;
+    }
+
     // Ensure segment cache vectors are sized
     if (blockIdx >= segmentCache.size()) {
         segmentCache.resize(blockIdx + 1);
@@ -1062,6 +1098,18 @@ void StreamingTextCtrl::OnMouseLeftDown(wxMouseEvent& evt) {
 
     TextPosition pos = HitTest(evt.GetX(), evt.GetY());
 
+    // Toggle collapsed thinking blocks on single click
+    if (pos.IsValid()) {
+        const TextBlock* block = blockManager.GetBlock(pos.block);
+        if (block && block->type == BlockType::THINKING) {
+            // Collapsed: click anywhere to expand. Expanded: click first line to collapse.
+            if (block->isCollapsed || pos.line == 0) {
+                ToggleBlockCollapse(pos.block);
+                return;
+            }
+        }
+    }
+
     long now = wxGetLocalTimeMillis().GetLo();
     bool isMultiClick = (now - m_lastClickTime) < MULTI_CLICK_THRESHOLD_MS
                         && pos.block == m_lastClickPos.block
@@ -1407,6 +1455,12 @@ void StreamingTextCtrl::OnPaint(wxPaintEvent& event) {
             dc.SetBrush(wxBrush(thinkingBackground));
             dc.SetPen(*wxTRANSPARENT_PEN);
             dc.DrawRectangle(leftMargin - 5, blockTop, textAreaWidth + 10, blockHeight + 4);
+            // Draw expand triangle in left gutter for expanded thinking blocks
+            if (!block->isCollapsed && i < wrappedLinesCache.size() && !wrappedLinesCache[i].empty()) {
+                dc.SetFont(GetFontForType(BlockType::THINKING));
+                dc.SetTextForeground(thinkingColor);
+                dc.DrawText(wxS("\u25BC"), 0, blockTop + wrappedLinesCache[i][0].y);
+            }
         } else if (block->type == BlockType::USER_PROMPT) {
             dc.SetBrush(wxBrush(userPromptBackground));
             dc.SetPen(*wxTRANSPARENT_PEN);
@@ -1455,7 +1509,7 @@ void StreamingTextCtrl::OnPaint(wxPaintEvent& event) {
             }
         }
 
-        // Loading indicator
+        // Loading indicator (shown at end of last line, works for both collapsed and expanded)
         if (block->isLoading && !lines.empty()) {
             const auto& lastLine = lines.back();
             int ch = charHeightCache[i];
@@ -1804,6 +1858,31 @@ void StreamingTextCtrl::StopThinking(size_t blockIndex) {
 
 int StreamingTextCtrl::GetLoadingFrame() const {
     return animator ? animator->GetFrame() : 0;
+}
+
+void StreamingTextCtrl::ToggleBlockCollapse(size_t blockIndex) {
+    if (blockIndex >= blockManager.GetBlockCount()) return;
+    // Use const_cast since GetBlock returns const but we own the data
+    TextBlock* block = const_cast<TextBlock*>(blockManager.GetBlock(blockIndex));
+    if (!block || block->type != BlockType::THINKING) return;
+
+    block->isCollapsed = !block->isCollapsed;
+
+    // Invalidate layout caches for this block
+    if (blockIndex < wrappedLinesCache.size()) {
+        cachedTotalHeight -= blockHeightCache[blockIndex] + blockSpacing;
+        wrappedLinesCache.resize(blockIndex);
+        blockHeightCache.resize(blockIndex);
+        charHeightCache.resize(blockIndex);
+    }
+    if (blockIndex < segmentCacheValid.size()) {
+        segmentCacheValid[blockIndex] = false;
+        segmentCachedTextLen[blockIndex] = 0;
+        segmentCache[blockIndex].clear();
+    }
+
+    needsFullRebuild = true;
+    Refresh();
 }
 
 // ============================================================================

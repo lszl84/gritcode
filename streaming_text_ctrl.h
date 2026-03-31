@@ -107,6 +107,8 @@ public:
     void StopThinking(size_t blockIndex);
     bool HasAnimatedBlocks() const { return !animatedBlocks.empty(); }
 
+    void ToggleBlockCollapse(size_t blockIndex);
+
     void BeginBatch();
     void EndBatch();
 

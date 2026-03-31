@@ -293,7 +293,10 @@ void MainFrame::OnZenMessageReceived(wxCommandEvent& event) {
   m_markdownRenderTimer.Stop();
   
   // Finalize thinking state
-  m_isReceivingThinking = false;
+  if (m_isReceivingThinking) {
+    m_chatDisplay->StopThinking(m_thinkingBlockIndex);
+    m_isReceivingThinking = false;
+  }
 
   // Final markdown render of the complete response
   if (m_collectingAiResponse && !m_aiResponseBuffer.IsEmpty()) {
@@ -332,11 +335,12 @@ void MainFrame::OnZenStreamChunk(wxCommandEvent& event) {
     if (isThinking) {
       // Thinking chunk — accumulate into thinking block
       if (!m_isReceivingThinking) {
-        // First thinking chunk: create a THINKING block
+        // First thinking chunk: create a collapsed THINKING block with loading animation
         m_isReceivingThinking = true;
         m_thinkingBuffer.Clear();
         m_thinkingBlockIndex = m_chatDisplay->GetBlockCount();
         m_chatDisplay->AppendStream(BlockType::THINKING, chunk);
+        m_chatDisplay->StartThinking(m_thinkingBlockIndex);
       } else {
         // Continue appending to existing thinking block
         m_chatDisplay->ContinueStream(chunk);
@@ -348,6 +352,7 @@ void MainFrame::OnZenStreamChunk(wxCommandEvent& event) {
     // Content chunk — finalize thinking block if transitioning
     if (m_isReceivingThinking) {
       m_isReceivingThinking = false;
+      m_chatDisplay->StopThinking(m_thinkingBlockIndex);
       // Update AI response start to after the thinking block
       m_aiResponseStartBlock = m_chatDisplay->GetBlockCount();
     }

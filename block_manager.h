@@ -95,9 +95,11 @@ struct TextBlock {
     int topSpacing = 0;     // Extra spacing above
     int bottomSpacing = 0;  // Extra spacing below
     
-    TextBlock(BlockType t, const wxString& txt, bool rtl = false) 
+    bool isCollapsed = false;   // Collapsible blocks (thinking) start collapsed
+
+    TextBlock(BlockType t, const wxString& txt, bool rtl = false)
         : type(t), text(txt), isLoading(false), rightToLeft(rtl),
-          lineCount(0), cachedLineHeight(0) {}
+          lineCount(0), cachedLineHeight(0), isCollapsed(t == BlockType::THINKING) {}
     
     // Check if this block has styled runs (markdown mode)
     bool HasStyledRuns() const { return !runs.empty(); }
