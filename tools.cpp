@@ -77,6 +77,16 @@ static std::string RunCommand(const std::string& cmd, int maxBytes = 32768) {
   return result;
 }
 
+// Expand leading ~ to $HOME so paths work outside of a login shell.
+static std::string ExpandTilde(const std::string& path) {
+  if (path.empty() || path[0] != '~') return path;
+  const char* home = getenv("HOME");
+  if (!home) return path;
+  if (path.size() == 1) return home;            // just "~"
+  if (path[1] == '/') return home + path.substr(1);  // "~/..."
+  return path;  // "~user/..." — leave as-is
+}
+
 std::string ExecuteTool(const std::string& name, const std::string& argsJson) {
   json args = json::parse(argsJson, nullptr, false);
   if (args.is_discarded()) return "Error: invalid JSON arguments";
@@ -90,13 +100,13 @@ std::string ExecuteTool(const std::string& name, const std::string& argsJson) {
   }
 
   if (name == "read_file") {
-    std::string path = args.value("path", "");
+    std::string path = ExpandTilde(args.value("path", ""));
     if (path.empty()) return "Error: no path provided";
     return RunCommand("cat -- '" + path + "'");
   }
 
   if (name == "list_directory") {
-    std::string path = args.value("path", ".");
+    std::string path = ExpandTilde(args.value("path", "."));
     return RunCommand("ls -la -- '" + path + "'");
   }
 
