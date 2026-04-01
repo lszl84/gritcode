@@ -19,7 +19,8 @@ wxBEGIN_EVENT_TABLE(MainFrame, wxFrame)
   EVT_BUTTON(static_cast<int>(MenuID::SendMessage), MainFrame::OnSendMessage)
   EVT_BUTTON(static_cast<int>(MenuID::SetApiKey), MainFrame::OnSetApiKey)
   EVT_MENU(static_cast<int>(MenuID::SetApiKey), MainFrame::OnSetApiKey)
-  EVT_CHOICE(wxID_ANY, MainFrame::OnModelSelected)
+  EVT_CHOICE(static_cast<int>(MenuID::ProviderChoice), MainFrame::OnProviderSelected)
+  EVT_CHOICE(static_cast<int>(MenuID::ModelChoice), MainFrame::OnModelSelected)
 wxEND_EVENT_TABLE()
 
 MainFrame::MainFrame() 
@@ -105,23 +106,31 @@ void MainFrame::CreateUI() {
   
   mainSizer->Add(inputSizer, 0, wxEXPAND);
   
-  // Bottom control bar (model selector and API key)
+  // Bottom control bar
   auto* bottomSizer = new wxBoxSizer(wxHORIZONTAL);
-  
+
+  // Provider selection
+  bottomSizer->Add(new wxStaticText(panel, wxID_ANY, "Provider:"), 0, wxALL | wxALIGN_CENTER_VERTICAL, 5);
+  m_providerChoice = new wxChoice(panel, static_cast<int>(MenuID::ProviderChoice));
+  m_providerChoice->Append("OpenCode Zen");
+  m_providerChoice->Append("Claude (ACP)");
+  m_providerChoice->SetSelection(0);
+  bottomSizer->Add(m_providerChoice, 0, wxALL, 5);
+
   // Model selection
   bottomSizer->Add(new wxStaticText(panel, wxID_ANY, "Model:"), 0, wxALL | wxALIGN_CENTER_VERTICAL, 5);
-  m_modelChoice = new wxChoice(panel, wxID_ANY);
+  m_modelChoice = new wxChoice(panel, static_cast<int>(MenuID::ModelChoice));
   bottomSizer->Add(m_modelChoice, 0, wxALL, 5);
-  
+
   // Status label
   m_statusLabel = new wxStaticText(panel, wxID_ANY, "Disconnected");
   bottomSizer->Add(m_statusLabel, 0, wxALL | wxALIGN_CENTER_VERTICAL, 5);
-  
+
   bottomSizer->AddStretchSpacer();
-  
-  // API Key button
-  auto* apiKeyButton = new wxButton(panel, static_cast<int>(MenuID::SetApiKey), "API Key...");
-  bottomSizer->Add(apiKeyButton, 0, wxALL, 5);
+
+  // API Key button (only relevant for Zen provider)
+  m_apiKeyButton = new wxButton(panel, static_cast<int>(MenuID::SetApiKey), "API Key...");
+  bottomSizer->Add(m_apiKeyButton, 0, wxALL, 5);
   
   mainSizer->Add(bottomSizer, 0, wxEXPAND);
   
@@ -231,7 +240,8 @@ void MainFrame::OnSendMessage(wxCommandEvent& /*event*/) {
   
   m_messageInput->Clear();
   m_sendButton->Disable();
-  
+  m_providerChoice->Disable();
+
   // Send to Zen
   auto& zen = zen::ZenClient::Instance();
   if (zen.IsConnected()) {
@@ -325,6 +335,7 @@ void MainFrame::OnZenMessageReceived(wxCommandEvent& event) {
   mcp::MCPServer::Instance().OnMessageReceived(message, static_cast<int>(tokens));
   
   m_sendButton->Enable();
+  m_providerChoice->Enable();
 }
 
 void MainFrame::OnZenStreamChunk(wxCommandEvent& event) {
@@ -405,8 +416,9 @@ void MainFrame::OnZenError(wxCommandEvent& event) {
   
   // Notify MCP server
   mcp::MCPServer::Instance().OnError(error);
-  
+
   m_sendButton->Enable();
+  m_providerChoice->Enable();
 }
 
 void MainFrame::OnZenModelsLoaded(wxCommandEvent& /*event*/) {
@@ -422,48 +434,43 @@ void MainFrame::OnZenModelsLoaded(wxCommandEvent& /*event*/) {
 void MainFrame::UpdateConnectionStatus() {
   auto& zen = zen::ZenClient::Instance();
   if (zen.IsConnected()) {
-    if (zen.IsAnonymous()) {
-      m_statusLabel->SetLabel("Connected (Anonymous)");
-    } else {
-      m_statusLabel->SetLabel("Connected (API Key)");
-    }
+    wxString label = (zen.GetProviderType() == fcn::ProviderType::Claude)
+      ? "Claude (Connected)"
+      : (zen.IsAnonymous() ? "Zen (Anonymous)" : "Zen (API Key)");
+    m_statusLabel->SetLabel(label);
   } else {
     m_statusLabel->SetLabel("Disconnected");
   }
 }
 
 void MainFrame::PopulateModelList() {
-  wxLogMessage("MainFrame::PopulateModelList: Clearing choice control");
   m_modelChoice->Clear();
 
   auto& zen = zen::ZenClient::Instance();
-  // Show all models when authenticated, only free models when anonymous
-  auto models = zen.IsAnonymous() ? zen.GetFreeModels() : zen.GetModels();
+  auto models = (zen.GetProviderType() == fcn::ProviderType::Zen && zen.IsAnonymous())
+    ? zen.GetFreeModels() : zen.GetModels();
 
-  wxLogMessage("MainFrame::PopulateModelList: Got %zu models (anonymous=%d)",
-               models.size(), zen.IsAnonymous());
-  
+  wxLogMessage("MainFrame::PopulateModelList: %zu models", models.size());
+
   for (const auto& model : models) {
-    wxLogMessage("MainFrame::PopulateModelList: Adding model '%s' (id='%s')",
-                 model.name.c_str(), model.id.c_str());
     m_modelChoice->Append(wxString::FromUTF8(model.name),
                           new wxStringClientData(wxString::FromUTF8(model.id)));
   }
-  
+
   if (!models.empty()) {
-    // Prefer kimi-k2.5 to save tokens, otherwise fall back to first model
     int defaultIdx = 0;
-    for (size_t i = 0; i < models.size(); ++i) {
-      if (models[i].id == "kimi-k2.5") {
-        defaultIdx = static_cast<int>(i);
-        break;
+    if (zen.GetProviderType() == fcn::ProviderType::Zen) {
+      for (size_t i = 0; i < models.size(); ++i) {
+        if (models[i].id == "kimi-k2.5") { defaultIdx = static_cast<int>(i); break; }
+      }
+    } else {
+      for (size_t i = 0; i < models.size(); ++i) {
+        if (models[i].id == "claude-sonnet-4-6") { defaultIdx = static_cast<int>(i); break; }
       }
     }
     m_modelChoice->SetSelection(defaultIdx);
     zen.SetActiveModel(models[defaultIdx].id);
-    wxLogMessage("MainFrame::PopulateModelList: Set active model to '%s'", models[defaultIdx].id.c_str());
-  } else {
-    wxLogWarning("MainFrame::PopulateModelList: No models available!");
+    wxLogMessage("MainFrame::PopulateModelList: active model '%s'", models[defaultIdx].id.c_str());
   }
 }
 
@@ -558,6 +565,31 @@ bool MainFrame::ClearApiKeyFromKeychain() {
     auto store = wxSecretStore::GetDefault();
     if (!store.IsOk()) return false;
     return store.Delete(KEYCHAIN_SERVICE);
+}
+
+void MainFrame::OnProviderSelected(wxCommandEvent& /*event*/) {
+  int sel = m_providerChoice->GetSelection();
+  auto type = (sel == 0) ? fcn::ProviderType::Zen : fcn::ProviderType::Claude;
+
+  auto& zen = zen::ZenClient::Instance();
+  if (zen.GetProviderType() == type) return;
+
+  zen.SetProvider(type);
+
+  // Update UI for new provider
+  m_apiKeyButton->Show(type == fcn::ProviderType::Zen);
+  m_apiKeyButton->GetParent()->Layout();
+
+  if (type == fcn::ProviderType::Zen) {
+    wxString savedKey = LoadApiKeyFromKeychain();
+    AppendToChat("System", savedKey.IsEmpty()
+      ? "Switched to OpenCode Zen (anonymous)..."
+      : "Switched to OpenCode Zen...");
+    zen.Connect(savedKey.ToStdString());
+  } else {
+    AppendToChat("System", "Switched to Claude (ACP)...");
+    zen.Connect();
+  }
 }
 
 void MainFrame::OnSetApiKey(wxCommandEvent& /*event*/) {

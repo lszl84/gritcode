@@ -1,7 +1,6 @@
 #include "zen_client.h"
 #include <wx/wx.h>
 #include <wx/log.h>
-#include <algorithm>
 
 namespace fcn::zen {
 
@@ -13,7 +12,7 @@ wxDEFINE_EVENT(ZEN_DISCONNECTED, wxCommandEvent);
 wxDEFINE_EVENT(ZEN_MODELS_LOADED, wxCommandEvent);
 
 ZenClient::ZenClient() {
-  httpClient_ = std::make_unique<network::HttpClient>();
+  provider_ = CreateZenProvider();
 }
 
 ZenClient::~ZenClient() {
@@ -25,52 +24,59 @@ ZenClient& ZenClient::Instance() {
   return instance;
 }
 
+void ZenClient::SetProvider(ProviderType type) {
+  if (type == providerType_ && provider_) return;
+
+  if (connected_) Disconnect();
+
+  providerType_ = type;
+  provider_ = (type == ProviderType::Zen) ? CreateZenProvider() : CreateClaudeProvider();
+
+  if (jsonLogCallback_) provider_->SetJsonLogCallback(jsonLogCallback_);
+
+  // Keep conversation history across provider switches so context is preserved
+}
+
 bool ZenClient::Connect(const std::string& apiKey) {
-  wxLogMessage("ZenClient::Connect: Starting...");
-  
+  wxLogMessage("ZenClient::Connect: provider=%s", provider_->GetDisplayName().c_str());
+
   if (connected_) {
-    wxLogMessage("ZenClient::Connect: Already connected");
     wxCommandEvent event(ZEN_CONNECTED);
     event.SetString("Already connected");
     wxPostEvent(this, event);
     return true;
   }
-  
-  if (!httpClient_->Initialize()) {
-    wxLogError("ZenClient::Connect: Failed to initialize HTTP client");
+
+  if (!provider_->Initialize()) {
     wxCommandEvent event(ZEN_ERROR_OCCURRED);
-    event.SetString("Failed to initialize HTTP client - wxWebRequest not available");
+    event.SetString("Failed to initialize " + provider_->GetDisplayName());
     wxPostEvent(this, event);
     return false;
   }
-  
-  wxLogMessage("ZenClient::Connect: HTTP client initialized");
-  
-  httpClient_->SetApiKey(apiKey);
-  httpClient_->SetBaseUrl("https://opencode.ai/zen/v1");
-  
+
+  if (provider_->NeedsApiKey()) {
+    provider_->SetApiKey(apiKey);
+  }
+
   connected_ = true;
-  
-  wxLogMessage("ZenClient::Connect: Connected successfully (anonymous=%d)", IsAnonymous());
-  
+
   wxCommandEvent event(ZEN_CONNECTED);
-  event.SetString(IsAnonymous() ? "Connected anonymously (no API key)" : "Connected with API key");
+  wxString status = wxString::Format("Connected via %s", provider_->GetDisplayName().c_str());
+  if (provider_->NeedsApiKey() && provider_->IsAnonymous()) {
+    status += " (anonymous)";
+  }
+  event.SetString(status);
   wxPostEvent(this, event);
-  
-  // Fetch models after connecting
-  wxLogMessage("ZenClient::Connect: Fetching models...");
+
   FetchModels();
-  
   return true;
 }
 
 void ZenClient::Disconnect() {
-  if (httpClient_) {
-    httpClient_->Shutdown();
-  }
+  if (provider_) provider_->Shutdown();
   connected_ = false;
   cachedModels_.clear();
-  
+
   wxCommandEvent event(ZEN_DISCONNECTED);
   wxPostEvent(this, event);
 }
@@ -81,20 +87,21 @@ bool ZenClient::IsConnected() const {
 
 void ZenClient::FetchModels() {
   if (!connected_) return;
-  
-  httpClient_->FetchModels([this](const std::vector<network::ModelInfo>& models) {
+
+  provider_->FetchModels([this](const std::vector<ProviderModelInfo>& models) {
     this->OnModelsReceived(models);
   });
 }
 
-void ZenClient::OnModelsReceived(const std::vector<network::ModelInfo>& models) {
+void ZenClient::OnModelsReceived(const std::vector<ProviderModelInfo>& models) {
   cachedModels_ = models;
-  
-  wxLogMessage("ZenClient::OnModelsReceived: Received %zu models from API", models.size());
-  
-  // If we got no models from the API, use default free models
-  if (cachedModels_.empty()) {
-    wxLogWarning("ZenClient::OnModelsReceived: No models received, using fallback models");
+
+  wxLogMessage("ZenClient::OnModelsReceived: %zu models from %s",
+               models.size(), provider_->GetDisplayName().c_str());
+
+  // Fallback free models for Zen when API returns nothing
+  if (cachedModels_.empty() && providerType_ == ProviderType::Zen) {
+    wxLogWarning("ZenClient: No models received, using fallback models");
     cachedModels_ = {
       {"big-pickle", "Big Pickle", true, 100},
       {"mimo-v2-flash-free", "MiMo V2 Flash Free", true, 100},
@@ -102,122 +109,92 @@ void ZenClient::OnModelsReceived(const std::vector<network::ModelInfo>& models) 
       {"minimax-m2.5-free", "MiniMax M2.5 Free", true, 100}
     };
   }
-  
-  // Set default model to first free one if anonymous
-  if (httpClient_->IsAnonymous()) {
-    auto freeModels = GetFreeModels();
-    if (!freeModels.empty() && activeModel_.empty()) {
-      activeModel_ = freeModels[0].id;
-      wxLogMessage("ZenClient::OnModelsReceived: Set active model to '%s'", activeModel_.c_str());
+
+  // Pick default model
+  if (activeModel_.empty() && !cachedModels_.empty()) {
+    if (provider_->IsAnonymous()) {
+      auto free = GetFreeModels();
+      if (!free.empty()) activeModel_ = free[0].id;
     }
+    if (activeModel_.empty()) activeModel_ = cachedModels_[0].id;
   }
-  
-  // Notify UI that models are loaded
-  wxLogMessage("ZenClient::OnModelsReceived: Firing ZEN_MODELS_LOADED event");
+
   wxCommandEvent event(ZEN_MODELS_LOADED);
   wxPostEvent(this, event);
 }
 
-std::vector<network::ModelInfo> ZenClient::GetModels() const {
+std::vector<ProviderModelInfo> ZenClient::GetModels() const {
   return cachedModels_;
 }
 
-std::vector<network::ModelInfo> ZenClient::GetFreeModels() const {
-  std::vector<network::ModelInfo> freeModels;
-  
-  wxLogMessage("ZenClient::GetFreeModels: Checking %zu cached models", cachedModels_.size());
-  
+std::vector<ProviderModelInfo> ZenClient::GetFreeModels() const {
+  std::vector<ProviderModelInfo> freeModels;
   for (const auto& model : cachedModels_) {
-    bool isFree = model.allowAnonymous || 
-                  model.id.find("free") != std::string::npos ||
-                  model.id.find("big-pickle") != std::string::npos;
-    
-    wxLogMessage("ZenClient::GetFreeModels: Model '%s' (allowAnonymous=%d, isFree=%d)", 
-                 model.id.c_str(), model.allowAnonymous, isFree);
-    
-    if (isFree) {
+    if (model.allowAnonymous ||
+        model.id.find("free") != std::string::npos ||
+        model.id.find("big-pickle") != std::string::npos) {
       freeModels.push_back(model);
     }
   }
-  
-  wxLogMessage("ZenClient::GetFreeModels: Returning %zu free models", freeModels.size());
-  
   return freeModels;
 }
 
 void ZenClient::SendMessage(const std::string& model, const std::string& message) {
-  wxLogMessage("ZenClient::SendMessage: model='%s', message length=%zu, history=%zu msgs",
-               model.c_str(), message.length(), conversationHistory_.size());
-
   if (!connected_) {
-    wxLogError("ZenClient::SendMessage: Not connected!");
     wxCommandEvent event(ZEN_ERROR_OCCURRED);
-    event.SetString("Not connected to Zen");
+    event.SetString("Not connected");
     wxPostEvent(this, event);
     return;
   }
 
-  // Add the user message to conversation history
+  const std::string useModel = model.empty() ? activeModel_ : model;
+  wxLogMessage("ZenClient::SendMessage: model='%s', len=%zu, history=%zu",
+               useModel.c_str(), message.length(), conversationHistory_.size());
+
   conversationHistory_.push_back({"user", message});
 
-  network::ChatRequest request;
-  request.model = model.empty() ? activeModel_ : model;
-  request.messages = conversationHistory_;
-  request.stream = false;
-
-  wxLogMessage("ZenClient::SendMessage: Using model='%s' (STREAMING MODE), sending %zu messages",
-               request.model.c_str(), request.messages.size());
-
-  // Use streaming for better UX
-  httpClient_->SendStreamingChatRequest(request,
+  provider_->SendMessage(
+    useModel, message, conversationHistory_,
+    // onChunk
     [this](const std::string& chunk, bool isThinking) {
-      // Called for each chunk of text as it arrives
-      // Send just the delta chunk for incremental UI append
-      wxCommandEvent event(ZEN_STREAM_CHUNK);
-      event.SetString(wxString::FromUTF8(chunk.c_str(), chunk.length()));
-      event.SetExtraLong(isThinking ? 1 : 0);
-      wxPostEvent(this, event);
+      wxCommandEvent evt(ZEN_STREAM_CHUNK);
+      evt.SetString(wxString::FromUTF8(chunk.c_str(), chunk.length()));
+      evt.SetExtraLong(isThinking ? 1 : 0);
+      wxPostEvent(this, evt);
     },
-    [this](const network::ChatResponse& response) {
-      // Called when streaming is complete
-      wxLogMessage("ZenClient::SendMessage: Streaming complete, content length=%zu",
-                   response.content.length());
-      this->OnChatResponse(response);
+    // onComplete
+    [this](bool success, const std::string& content, const std::string& error,
+           int inputTokens, int outputTokens) {
+      if (!success) {
+        // Rollback history on error
+        if (!conversationHistory_.empty() &&
+            conversationHistory_.back().role == "user") {
+          conversationHistory_.pop_back();
+        }
+        wxCommandEvent evt(ZEN_ERROR_OCCURRED);
+        evt.SetString(wxString::FromUTF8(error));
+        wxPostEvent(this, evt);
+        return;
+      }
+
+      // Store assistant response in history
+      if (!content.empty()) {
+        conversationHistory_.push_back({"assistant", content});
+        wxLogMessage("ZenClient: History now has %zu messages", conversationHistory_.size());
+      }
+
+      wxCommandEvent evt(ZEN_MESSAGE_RECEIVED);
+      evt.SetString(wxString::FromUTF8(content.c_str(), content.length()));
+      evt.SetExtraLong(inputTokens + outputTokens);
+      wxPostEvent(this, evt);
     }
   );
 }
 
 void ZenClient::ClearConversation() {
   conversationHistory_.clear();
-  wxLogMessage("ZenClient::ClearConversation: History cleared");
-}
-
-void ZenClient::OnChatResponse(const network::ChatResponse& response) {
-  wxLogMessage("ZenClient::OnChatResponse: error=%d, content length=%zu",
-               response.error, response.content.length());
-
-  if (response.error) {
-    // Remove the user message that caused the error so it can be retried
-    if (!conversationHistory_.empty() && conversationHistory_.back().role == "user") {
-      conversationHistory_.pop_back();
-    }
-    wxCommandEvent event(ZEN_ERROR_OCCURRED);
-    event.SetString(wxString::FromUTF8(response.errorMessage));
-    wxPostEvent(this, event);
-  } else {
-    // Store assistant response in conversation history
-    if (!response.content.empty()) {
-      conversationHistory_.push_back({"assistant", response.content});
-      wxLogMessage("ZenClient::OnChatResponse: History now has %zu messages",
-                   conversationHistory_.size());
-    }
-
-    wxCommandEvent event(ZEN_MESSAGE_RECEIVED);
-    wxString wxContent = wxString::FromUTF8(response.content.c_str(), response.content.length());
-    event.SetString(wxContent);
-    event.SetExtraLong(response.totalTokens);
-    wxPostEvent(this, event);
-  }
+  if (provider_) provider_->ResetContext();
+  wxLogMessage("ZenClient::ClearConversation: Reset");
 }
 
 void ZenClient::SetActiveModel(const std::string& modelId) {
@@ -229,11 +206,16 @@ std::string ZenClient::GetActiveModel() const {
 }
 
 bool ZenClient::IsAnonymous() const {
-  return httpClient_->IsAnonymous();
+  return provider_ ? provider_->IsAnonymous() : true;
 }
 
-void ZenClient::SetJsonLogCallback(network::JsonLogCallback callback) {
-  httpClient_->SetJsonLogCallback(callback);
+bool ZenClient::NeedsApiKey() const {
+  return provider_ ? provider_->NeedsApiKey() : false;
+}
+
+void ZenClient::SetJsonLogCallback(JsonLogCallback callback) {
+  jsonLogCallback_ = callback;
+  if (provider_) provider_->SetJsonLogCallback(callback);
 }
 
 } // namespace fcn::zen

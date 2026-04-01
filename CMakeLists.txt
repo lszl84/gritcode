@@ -53,6 +53,11 @@ FetchContent_MakeAvailable(cmark)
 set(SOURCES
   application.cpp
   application.h
+  chat_provider.h
+  zen_provider.cpp
+  zen_provider.h
+  claude_provider.cpp
+  claude_provider.h
   http_client.cpp
   http_client.h
   zen_client.cpp

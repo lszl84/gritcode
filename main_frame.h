@@ -43,12 +43,16 @@ private:
   bool SaveApiKeyToKeychain(const wxString& key);
   bool ClearApiKeyFromKeychain();
   
+  void OnProviderSelected(wxCommandEvent& event);
+
   // Chat UI elements
   StreamingTextCtrl* m_chatDisplay = nullptr;
   wxTextCtrl* m_messageInput = nullptr;
   wxButton* m_sendButton = nullptr;
+  wxChoice* m_providerChoice = nullptr;
   wxChoice* m_modelChoice = nullptr;
   wxStaticText* m_statusLabel = nullptr;
+  wxButton* m_apiKeyButton = nullptr;
   
   // Debug UI elements
   wxTextCtrl* m_jsonLog = nullptr;
@@ -90,7 +94,9 @@ enum class MenuID : int {
   Disconnect,
   Settings,
   SendMessage = 2000,
-  SetApiKey = 3000
+  SetApiKey = 3000,
+  ProviderChoice = 4000,
+  ModelChoice = 4001
 };
 
 } // namespace fcn::ui
