@@ -1329,6 +1329,7 @@ void StreamingTextCtrl::OnPaint(wxPaintEvent& event) {
 
             int h = 0, ch = 0;
             WrapBlock(dc, block, textAreaWidth, clientWidth, wrappedLinesCache[i], h, ch, i);
+            if (block && block->isLoading && !block->isCollapsed) h += ch;
             blockHeightCache[i] = h;
             charHeightCache[i] = ch;
             cachedTotalHeight += h + blockSpacing;
@@ -1346,6 +1347,8 @@ void StreamingTextCtrl::OnPaint(wxPaintEvent& event) {
             if (i < segmentCacheValid.size() && segmentCacheValid[i]) {
                 int h = 0;
                 LayoutFromSegments(i, textAreaWidth, clientWidth, wrappedLinesCache[i], h);
+                const TextBlock* blk = blockManager.GetBlock(i);
+                if (blk && blk->isLoading && !blk->isCollapsed) h += charHeightCache[i];
                 blockHeightCache[i] = h;
             }
             cachedTotalHeight += blockHeightCache[i] + blockSpacing;
@@ -1372,6 +1375,7 @@ void StreamingTextCtrl::OnPaint(wxPaintEvent& event) {
 
             int h = 0, ch = 0;
             WrapBlock(dc, block, textAreaWidth, clientWidth, wrappedLinesCache[i], h, ch, i);
+            if (block && block->isLoading && !block->isCollapsed) h += ch;
             blockHeightCache[i] = h;
             charHeightCache[i] = ch;
             cachedTotalHeight += h + blockSpacing;
@@ -1511,15 +1515,22 @@ void StreamingTextCtrl::OnPaint(wxPaintEvent& event) {
             }
         }
 
-        // Loading indicator (shown at end of last line, works for both collapsed and expanded)
+        // Loading indicator
         if (block->isLoading && !lines.empty()) {
             const auto& lastLine = lines.back();
             int ch = charHeightCache[i];
-            int dotRadius = std::max(3, ch / 4);
-            int dw = dotRadius * 2;
-            int dotY = blockTop + lastLine.y + ch / 2;
 
-            DrawLoadingIndicator(dc, leftMargin + lastLine.width + dw, dotY, ch);
+            if (block->isCollapsed) {
+                // Collapsed: show at end of summary line
+                int dotRadius = std::max(3, ch / 4);
+                int dw = dotRadius * 2;
+                int dotY = blockTop + lastLine.y + ch / 2;
+                DrawLoadingIndicator(dc, leftMargin + lastLine.width + dw, dotY, ch);
+            } else {
+                // Expanded: show on a new line below the text so it doesn't jitter
+                int dotY = blockTop + lastLine.y + lastLine.height + ch / 2;
+                DrawLoadingIndicator(dc, leftMargin, dotY, ch);
+            }
         }
     }
 }
