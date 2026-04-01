@@ -179,8 +179,20 @@ void MCPServer::HandleToolsList(const json& id) {
     });
 
     tools.push_back({
+        {"name", "set_provider"},
+        {"description", "Switch the AI provider. 'zen' for OpenCode Zen API, 'claude' for Claude ACP."},
+        {"inputSchema", {
+            {"type", "object"},
+            {"properties", {
+                {"provider", {{"type", "string"}, {"description", "Provider name: 'zen' or 'claude'"}}}
+            }},
+            {"required", json::array({"provider"})}
+        }}
+    });
+
+    tools.push_back({
         {"name", "connect"},
-        {"description", "Connect to the OpenCode Zen API. Anonymous access by default."},
+        {"description", "Connect to the AI provider. For Zen: anonymous access by default. For Claude: uses system binary."},
         {"inputSchema", {
             {"type", "object"},
             {"properties", {
@@ -253,6 +265,8 @@ void MCPServer::HandleToolsCall(const json& id, const json& params) {
         result = ToolGetChatHistory();
     } else if (toolName == "set_model") {
         result = ToolSetModel(args);
+    } else if (toolName == "set_provider") {
+        result = ToolSetProvider(args);
     } else if (toolName == "connect") {
         result = ToolConnect(args);
     } else if (toolName == "disconnect") {
@@ -319,6 +333,23 @@ json MCPServer::ToolSetModel(const json& args) {
     auto& zen = zen::ZenClient::Instance();
     zen.SetActiveModel(modelId);
     return ToolResult("Active model set to: " + modelId);
+}
+
+json MCPServer::ToolSetProvider(const json& args) {
+    std::string provider = args.value("provider", "");
+    if (provider.empty()) {
+        return ToolResult("Error: 'provider' argument is required ('zen' or 'claude')", true);
+    }
+
+    auto& zen = zen::ZenClient::Instance();
+    if (provider == "zen") {
+        zen.SetProvider(fcn::ProviderType::Zen);
+        return ToolResult("Provider set to OpenCode Zen. Call 'connect' to connect.");
+    } else if (provider == "claude") {
+        zen.SetProvider(fcn::ProviderType::Claude);
+        return ToolResult("Provider set to Claude (ACP). Call 'connect' to connect.");
+    }
+    return ToolResult("Error: unknown provider '" + provider + "'. Use 'zen' or 'claude'.", true);
 }
 
 json MCPServer::ToolConnect(const json& args) {

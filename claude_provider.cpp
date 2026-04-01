@@ -68,7 +68,13 @@ void ClaudeProvider::SendMessage(
 
   // Build prompt: include conversation history so context survives
   // cross-provider switches. history includes the current user message
-  // as the last element.
+  // as the last element. The |message| param may be empty (tool loop),
+  // so always use the last history entry as the actual user message.
+  std::string currentMessage = message;
+  if (currentMessage.empty() && !history.empty() && history.back().role == "user") {
+    currentMessage = history.back().content;
+  }
+
   std::string prompt;
   if (history.size() > 1) {
     prompt = "<conversation_history>\n";
@@ -78,7 +84,7 @@ void ClaudeProvider::SendMessage(
     }
     prompt += "</conversation_history>\n\n";
   }
-  prompt += message;
+  prompt += currentMessage;
 
   // Build command — no --resume; full context is in the prompt
   wxString cmd = "claude --print --verbose --output-format stream-json --include-partial-messages";
@@ -239,9 +245,13 @@ void ClaudeProvider::ProcessLine(const std::string& line) {
     } else if (type == "result") {
       resultReceived_ = true;
       bool isError = j.value("is_error", false);
-      std::string result = isError
-        ? j.value("error", fullResponse_)
-        : j.value("result", fullResponse_);
+      std::string result;
+      if (isError) {
+        result = j.value("error", fullResponse_);
+      } else {
+        result = j.value("result", "");
+        if (result.empty()) result = fullResponse_;
+      }
 
       int inputTok = 0, outputTok = 0;
       if (j.contains("usage")) {

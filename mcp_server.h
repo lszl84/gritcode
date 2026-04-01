@@ -59,6 +59,7 @@ private:
     json ToolGetResponse();
     json ToolGetChatHistory();
     json ToolSetModel(const json& args);
+    json ToolSetProvider(const json& args);
     json ToolConnect(const json& args);
     json ToolDisconnect();
 
