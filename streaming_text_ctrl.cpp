@@ -665,18 +665,19 @@ void StreamingTextCtrl::WrapBlock(wxDC& dc, const TextBlock* block, int textArea
         int charH = dc.GetCharHeight();
         outCharHeight = charH;
 
-        // Build summary: triangle + first sentence or "Thinking..."
+        // Build summary: first sentence or "Thinking..."
+        // (the triangle indicator is drawn separately in OnPaint's gutter pass)
         wxString fullText = block->GetFullText();
         wxString summary;
         if (fullText.IsEmpty()) {
-            summary = wxS("\u25B6  Thinking\u2026");
+            summary = wxS("Thinking\u2026");
         } else {
             // Extract first sentence (up to first period, newline, or 80 chars)
             size_t end = fullText.find_first_of(wxS(".\n"));
             if (end != wxString::npos && end < 80) {
-                summary = wxS("\u25B6  ") + fullText.substr(0, end + 1);
+                summary = fullText.substr(0, end + 1);
             } else {
-                summary = wxS("\u25B6  ") + fullText.substr(0, 80);
+                summary = fullText.substr(0, 80);
                 if (fullText.length() > 80) summary += wxS("\u2026");
             }
         }
@@ -1455,11 +1456,12 @@ void StreamingTextCtrl::OnPaint(wxPaintEvent& event) {
             dc.SetBrush(wxBrush(thinkingBackground));
             dc.SetPen(*wxTRANSPARENT_PEN);
             dc.DrawRectangle(leftMargin - 5, blockTop, textAreaWidth + 10, blockHeight + 4);
-            // Draw expand triangle in left gutter for expanded thinking blocks
-            if (!block->isCollapsed && i < wrappedLinesCache.size() && !wrappedLinesCache[i].empty()) {
+            // Draw collapse/expand triangle in left gutter
+            if (i < wrappedLinesCache.size() && !wrappedLinesCache[i].empty()) {
                 dc.SetFont(GetFontForType(BlockType::THINKING));
                 dc.SetTextForeground(thinkingColor);
-                dc.DrawText(wxS("\u25BC"), 0, blockTop + wrappedLinesCache[i][0].y);
+                wxString arrow = block->isCollapsed ? wxS("\u25B6") : wxS("\u25BC");
+                dc.DrawText(arrow, 2, blockTop + wrappedLinesCache[i][0].y);
             }
         } else if (block->type == BlockType::USER_PROMPT) {
             dc.SetBrush(wxBrush(userPromptBackground));
