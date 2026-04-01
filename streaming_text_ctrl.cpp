@@ -778,17 +778,18 @@ int StreamingTextCtrl::CaretXForOffset(const WrappedLine& wl, int charOffset) co
 
 TextPosition StreamingTextCtrl::HitTest(int pixelX, int pixelY) const {
     size_t blockCount = blockManager.GetBlockCount();
-    if (blockCount == 0 || wrappedLinesCache.empty() || blockTopCache.size() <= 1)
+    size_t safeCount = std::min({blockCount, wrappedLinesCache.size(), blockHeightCache.size()});
+    if (safeCount == 0 || blockTopCache.size() <= 1)
         return {};
 
     int virtualY = pixelY + scrollPositionPx;
 
     // Binary search for block using prefix-sum cache
     size_t bi = FindFirstVisibleBlock(virtualY);
-    if (bi >= blockCount) bi = blockCount - 1;
+    if (bi >= safeCount) bi = safeCount - 1;
 
     // Walk forward to find exact block (virtualY might be in spacing between blocks)
-    while (bi < blockCount - 1) {
+    while (bi < safeCount - 1) {
         int blockTop = blockTopCache[bi];
         int blockBottom = blockTop + blockHeightCache[bi];
         if (virtualY < blockBottom) break;
@@ -1439,7 +1440,11 @@ void StreamingTextCtrl::OnPaint(wxPaintEvent& event) {
     size_t firstVisible = FindFirstVisibleBlock(scrollPositionPx);
 
     // Draw visible blocks
-    for (size_t i = firstVisible; i < blockCount; i++) {
+    size_t drawLimit = std::min({blockCount, wrappedLinesCache.size(),
+                                 blockHeightCache.size(), charHeightCache.size()});
+    if (blockTopCache.size() <= drawLimit) drawLimit = blockTopCache.size() > 0 ? blockTopCache.size() - 1 : 0;
+
+    for (size_t i = firstVisible; i < drawLimit; i++) {
         int blockHeight = blockHeightCache[i];
         int blockTop = blockTopCache[i] - scrollPositionPx;
 
