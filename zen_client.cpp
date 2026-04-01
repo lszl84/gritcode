@@ -1,6 +1,8 @@
 #include "zen_client.h"
+#include "tools.h"
 #include <wx/wx.h>
 #include <wx/log.h>
+#include <nlohmann/json.hpp>
 
 namespace fcn::zen {
 
@@ -57,6 +59,9 @@ bool ZenClient::Connect(const std::string& apiKey) {
   if (provider_->NeedsApiKey()) {
     provider_->SetApiKey(apiKey);
   }
+
+  // Register tools with the provider
+  provider_->SetTools(GetDefaultTools());
 
   connected_ = true;
 
@@ -151,22 +156,33 @@ void ZenClient::SendMessage(const std::string& model, const std::string& message
   wxLogMessage("ZenClient::SendMessage: model='%s', len=%zu, history=%zu",
                useModel.c_str(), message.length(), conversationHistory_.size());
 
-  conversationHistory_.push_back({"user", message});
+  conversationHistory_.push_back({"user", message, {}, {}});
+  totalInputTokens_ = 0;
+  totalOutputTokens_ = 0;
+  toolRound_ = 0;
 
+  DoSendToProvider(useModel);
+}
+
+void ZenClient::DoSendToProvider(const std::string& model) {
   provider_->SendMessage(
-    useModel, message, conversationHistory_,
-    // onChunk
+    model, "", conversationHistory_,
+    // onChunk — stream text/thinking to UI
     [this](const std::string& chunk, bool isThinking) {
       wxCommandEvent evt(ZEN_STREAM_CHUNK);
       evt.SetString(wxString::FromUTF8(chunk.c_str(), chunk.length()));
       evt.SetExtraLong(isThinking ? 1 : 0);
       wxPostEvent(this, evt);
     },
-    // onComplete
-    [this](bool success, const std::string& content, const std::string& error,
-           int inputTokens, int outputTokens) {
+    // onComplete — handle tool calls or finalize
+    [this, model](bool success, const std::string& content, const std::string& error,
+                  const std::vector<ToolCall>& toolCalls,
+                  int inputTokens, int outputTokens) {
+      totalInputTokens_ += inputTokens;
+      totalOutputTokens_ += outputTokens;
+
       if (!success) {
-        // Rollback history on error
+        // Rollback last user message on error
         if (!conversationHistory_.empty() &&
             conversationHistory_.back().role == "user") {
           conversationHistory_.pop_back();
@@ -177,15 +193,71 @@ void ZenClient::SendMessage(const std::string& model, const std::string& message
         return;
       }
 
-      // Store assistant response in history
+      // --- Tool call loop ---
+      if (!toolCalls.empty() && toolRound_ < MAX_TOOL_ROUNDS) {
+        toolRound_++;
+        wxLogMessage("ZenClient: Tool round %d, %zu tool calls", toolRound_, toolCalls.size());
+
+        // Add assistant message (with tool calls) to history
+        ChatMessage assistantMsg;
+        assistantMsg.role = "assistant";
+        assistantMsg.content = content;
+        assistantMsg.toolCalls = toolCalls;
+        conversationHistory_.push_back(assistantMsg);
+
+        // Execute each tool
+        for (const auto& tc : toolCalls) {
+          // Emit tool call info as markdown chunk for the UI
+          std::string info = "\n\n> **Tool: " + tc.name + "**\n";
+          try {
+            auto args = nlohmann::json::parse(tc.arguments);
+            for (auto& [key, val] : args.items()) {
+              info += "> `" + key + "`: " + val.dump() + "\n";
+            }
+          } catch (...) {
+            info += "> `" + tc.arguments + "`\n";
+          }
+          {
+            wxCommandEvent evt(ZEN_STREAM_CHUNK);
+            evt.SetString(wxString::FromUTF8(info));
+            evt.SetExtraLong(0);
+            wxPostEvent(this, evt);
+          }
+
+          // Execute
+          std::string result = ExecuteTool(tc.name, tc.arguments);
+
+          // Emit result as markdown code block
+          std::string resultMd = "\n```\n" + result + "\n```\n\n";
+          {
+            wxCommandEvent evt(ZEN_STREAM_CHUNK);
+            evt.SetString(wxString::FromUTF8(resultMd));
+            evt.SetExtraLong(0);
+            wxPostEvent(this, evt);
+          }
+
+          // Add tool result to history
+          ChatMessage toolResult;
+          toolResult.role = "tool";
+          toolResult.toolCallId = tc.id;
+          toolResult.content = result;
+          conversationHistory_.push_back(toolResult);
+        }
+
+        // Continue — send history (now including tool results) back to the model
+        DoSendToProvider(model);
+        return;
+      }
+
+      // --- Final response (no tool calls) ---
       if (!content.empty()) {
-        conversationHistory_.push_back({"assistant", content});
+        conversationHistory_.push_back({"assistant", content, {}, {}});
         wxLogMessage("ZenClient: History now has %zu messages", conversationHistory_.size());
       }
 
       wxCommandEvent evt(ZEN_MESSAGE_RECEIVED);
       evt.SetString(wxString::FromUTF8(content.c_str(), content.length()));
-      evt.SetExtraLong(inputTokens + outputTokens);
+      evt.SetExtraLong(totalInputTokens_ + totalOutputTokens_);
       wxPostEvent(this, evt);
     }
   );

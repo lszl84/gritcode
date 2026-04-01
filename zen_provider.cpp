@@ -32,6 +32,10 @@ void ZenProvider::FetchModels(
   });
 }
 
+void ZenProvider::SetTools(const std::vector<ToolDefinition>& tools) {
+  tools_ = tools;
+}
+
 void ZenProvider::SendMessage(
     const std::string& model,
     const std::string& /*message*/,
@@ -39,21 +43,39 @@ void ZenProvider::SendMessage(
     std::function<void(const std::string& chunk, bool isThinking)> onChunk,
     std::function<void(bool success, const std::string& content,
                        const std::string& error,
+                       const std::vector<ToolCall>& toolCalls,
                        int inputTokens, int outputTokens)> onComplete) {
 
   network::ChatRequest request;
   request.model = model;
   request.stream = true;
 
-  // history already includes the current user message
+  // Convert history (includes current user message)
   for (const auto& msg : history) {
-    request.messages.push_back({msg.role, msg.content});
+    network::Message netMsg;
+    netMsg.role = msg.role;
+    netMsg.content = msg.content;
+    netMsg.toolCallId = msg.toolCallId;
+    for (const auto& tc : msg.toolCalls) {
+      netMsg.toolCalls.push_back({tc.id, tc.name, tc.arguments});
+    }
+    request.messages.push_back(netMsg);
+  }
+
+  // Convert tool definitions
+  for (const auto& td : tools_) {
+    request.tools.push_back({td.name, td.description, td.parametersJson});
   }
 
   httpClient_->SendStreamingChatRequest(request, onChunk,
     [onComplete](const network::ChatResponse& response) {
+      // Convert tool calls from network to fcn types
+      std::vector<ToolCall> toolCalls;
+      for (const auto& tc : response.toolCalls) {
+        toolCalls.push_back({tc.id, tc.name, tc.arguments});
+      }
       onComplete(!response.error, response.content,
-                 response.errorMessage,
+                 response.errorMessage, toolCalls,
                  response.promptTokens, response.completionTokens);
     }
   );

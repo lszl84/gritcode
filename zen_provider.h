@@ -20,6 +20,8 @@ public:
   void FetchModels(
     std::function<void(const std::vector<ProviderModelInfo>&)> callback) override;
 
+  void SetTools(const std::vector<ToolDefinition>& tools) override;
+
   void SendMessage(
     const std::string& model,
     const std::string& message,
@@ -27,6 +29,7 @@ public:
     std::function<void(const std::string& chunk, bool isThinking)> onChunk,
     std::function<void(bool success, const std::string& content,
                        const std::string& error,
+                       const std::vector<ToolCall>& toolCalls,
                        int inputTokens, int outputTokens)> onComplete
   ) override;
 
@@ -41,6 +44,7 @@ public:
 
 private:
   std::unique_ptr<network::HttpClient> httpClient_;
+  std::vector<ToolDefinition> tools_;
 };
 
 } // namespace fcn

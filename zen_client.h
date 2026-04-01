@@ -42,6 +42,7 @@ private:
   ZenClient& operator=(const ZenClient&) = delete;
 
   void OnModelsReceived(const std::vector<ProviderModelInfo>& models);
+  void DoSendToProvider(const std::string& model);
 
   std::unique_ptr<ChatProvider> provider_;
   ProviderType providerType_ = ProviderType::Zen;
@@ -51,6 +52,12 @@ private:
   std::vector<ProviderModelInfo> cachedModels_;
   std::vector<ChatMessage> conversationHistory_;
   JsonLogCallback jsonLogCallback_;
+
+  // Tool use loop tracking
+  int totalInputTokens_ = 0;
+  int totalOutputTokens_ = 0;
+  int toolRound_ = 0;
+  static constexpr int MAX_TOOL_ROUNDS = 10;
 };
 
 wxDECLARE_EVENT(ZEN_MESSAGE_RECEIVED, wxCommandEvent);

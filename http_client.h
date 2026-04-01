@@ -11,9 +11,23 @@
 
 namespace fcn::network {
 
+struct ToolCall {
+  std::string id;
+  std::string name;
+  std::string arguments;
+};
+
+struct ToolFunction {
+  std::string name;
+  std::string description;
+  std::string parametersJson;  // JSON schema string
+};
+
 struct Message {
   std::string role;
   std::string content;
+  std::vector<ToolCall> toolCalls;  // For role="assistant" with tool calls
+  std::string toolCallId;           // For role="tool" responses
 };
 
 struct ChatRequest {
@@ -22,6 +36,7 @@ struct ChatRequest {
   bool stream = false;
   std::optional<float> temperature;
   std::optional<int> maxTokens;
+  std::vector<ToolFunction> tools;
 };
 
 struct ChatResponse {
@@ -33,6 +48,7 @@ struct ChatResponse {
   int totalTokens = 0;
   bool error = false;
   std::string errorMessage;
+  std::vector<ToolCall> toolCalls;
 };
 
 struct ModelInfo {
@@ -101,6 +117,10 @@ private:
   std::string sseBuffer_;
   std::string accumulatedContent_;
   bool isStreaming_ = false;
+
+  // Tool call accumulation during streaming
+  std::vector<ToolCall> pendingToolCalls_;
+  std::string streamFinishReason_;
 
   // Retry support for 429 rate limiting
   static constexpr int MAX_RETRIES = 3;

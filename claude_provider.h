@@ -33,6 +33,7 @@ public:
     std::function<void(const std::string& chunk, bool isThinking)> onChunk,
     std::function<void(bool success, const std::string& content,
                        const std::string& error,
+                       const std::vector<ToolCall>& toolCalls,
                        int inputTokens, int outputTokens)> onComplete
   ) override;
 
@@ -63,7 +64,7 @@ private:
   bool inThinkingBlock_ = false;
 
   std::function<void(const std::string&, bool)> chunkCallback_;
-  std::function<void(bool, const std::string&, const std::string&, int, int)> completeCallback_;
+  std::function<void(bool, const std::string&, const std::string&, const std::vector<ToolCall>&, int, int)> completeCallback_;
   JsonLogCallback logCallback_;
 };
 

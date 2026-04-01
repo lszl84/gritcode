@@ -47,6 +47,7 @@ void ClaudeProvider::SendMessage(
     std::function<void(const std::string& chunk, bool isThinking)> onChunk,
     std::function<void(bool success, const std::string& content,
                        const std::string& error,
+                       const std::vector<ToolCall>& toolCalls,
                        int inputTokens, int outputTokens)> onComplete) {
 
   if (process_) {
@@ -56,8 +57,9 @@ void ClaudeProvider::SendMessage(
 
   chunkCallback_ = std::move(onChunk);
   completeCallback_ = [onComplete](bool s, const std::string& c,
-                                    const std::string& e, int i, int o) {
-    onComplete(s, c, e, i, o);
+                                    const std::string& e, const std::vector<ToolCall>& tc,
+                                    int i, int o) {
+    onComplete(s, c, e, tc, i, o);
   };
   fullResponse_.clear();
   lineBuffer_.clear();
@@ -100,7 +102,7 @@ void ClaudeProvider::SendMessage(
     if (completeCallback_) {
       auto cb = std::move(completeCallback_);
       completeCallback_ = nullptr;
-      cb(false, "", "Failed to spawn claude binary — is it installed?", 0, 0);
+      cb(false, "", "Failed to spawn claude binary — is it installed?", {}, 0, 0);
     }
     return;
   }
@@ -260,7 +262,7 @@ void ClaudeProvider::FireComplete(bool success, const std::string& text,
   if (!completeCallback_) return;
   auto cb = std::move(completeCallback_);
   completeCallback_ = nullptr;
-  cb(success, text, error, inputTok, outputTok);
+  cb(success, text, error, {}, inputTok, outputTok);
 }
 
 void ClaudeProvider::Interrupt() {

@@ -58,6 +58,8 @@ set(SOURCES
   zen_provider.h
   claude_provider.cpp
   claude_provider.h
+  tools.cpp
+  tools.h
   http_client.cpp
   http_client.h
   zen_client.cpp

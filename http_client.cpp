@@ -76,13 +76,50 @@ std::string HttpClient::BuildRequestJson(const ChatRequest& request) {
   
   json messages = json::array();
   for (const auto& msg : request.messages) {
-    messages.push_back({
-      {"role", msg.role},
-      {"content", msg.content}
-    });
+    json m;
+    m["role"] = msg.role;
+
+    if (msg.role == "tool") {
+      // Tool result message
+      m["tool_call_id"] = msg.toolCallId;
+      m["content"] = msg.content;
+    } else if (msg.role == "assistant" && !msg.toolCalls.empty()) {
+      // Assistant message with tool calls
+      m["content"] = msg.content.empty() ? json(nullptr) : json(msg.content);
+      json tcArr = json::array();
+      for (const auto& tc : msg.toolCalls) {
+        tcArr.push_back({
+          {"id", tc.id},
+          {"type", "function"},
+          {"function", {{"name", tc.name}, {"arguments", tc.arguments}}}
+        });
+      }
+      m["tool_calls"] = tcArr;
+    } else {
+      m["content"] = msg.content;
+    }
+
+    messages.push_back(m);
   }
   j["messages"] = messages;
-  
+
+  // Tool definitions
+  if (!request.tools.empty()) {
+    json toolsArr = json::array();
+    for (const auto& t : request.tools) {
+      toolsArr.push_back({
+        {"type", "function"},
+        {"function", {
+          {"name", t.name},
+          {"description", t.description},
+          {"parameters", json::parse(t.parametersJson)}
+        }}
+      });
+    }
+    j["tools"] = toolsArr;
+    j["tool_choice"] = "auto";
+  }
+
   return j.dump();
 }
 
@@ -199,7 +236,8 @@ void HttpClient::OnRequestStateChanged(wxWebRequestEvent& event) {
       
       ChatResponse finalResponse;
       finalResponse.content = accumulatedContent_;
-      finalResponse.finishReason = "stop";
+      finalResponse.finishReason = streamFinishReason_.empty() ? "stop" : streamFinishReason_;
+      finalResponse.toolCalls = std::move(pendingToolCalls_);
       
       if (response.GetStatus() != 200) {
         // Retry on 429 rate limit
@@ -548,6 +586,8 @@ void HttpClient::RetryCurrentRequest() {
 
   sseBuffer_.clear();
   accumulatedContent_.clear();
+  pendingToolCalls_.clear();
+  streamFinishReason_.clear();
 
   wxLogMessage("HttpClient::RetryCurrentRequest: Starting request...");
   currentRequest_.Start();
@@ -620,6 +660,8 @@ void HttpClient::SendStreamingChatRequest(
   pendingRequestBody_ = requestBody;
   sseBuffer_.clear();
   accumulatedContent_.clear();
+  pendingToolCalls_.clear();
+  streamFinishReason_.clear();
   isStreaming_ = true;
   retryCount_ = 0;
   
@@ -713,10 +755,16 @@ void HttpClient::ProcessSSEChunk(const std::string& chunk) {
           // Extract delta content from choices
           if (j.contains("choices") && !j["choices"].empty()) {
             const auto& choice = j["choices"][0];
+
+            // Track finish_reason
+            if (choice.contains("finish_reason") && choice["finish_reason"].is_string()) {
+              streamFinishReason_ = choice["finish_reason"].get<std::string>();
+            }
+
             if (choice.contains("delta")) {
               const auto& delta = choice["delta"];
               std::string content;
-              
+
               // Extract reasoning (thinking) content — providers use different field names
               bool isThinking = false;
               std::string reasoning;
@@ -739,24 +787,36 @@ void HttpClient::ProcessSSEChunk(const std::string& chunk) {
               }
 
               if (!content.empty()) {
-                wxLogMessage("HttpClient::ProcessSSEChunk: Content extracted (thinking=%d): '%s'",
-                             isThinking, wxString::FromUTF8(content).c_str());
                 if (!isThinking) {
                   accumulatedContent_ += content;
-                  wxLogMessage("HttpClient::ProcessSSEChunk: Accumulated content now %zu chars",
-                               accumulatedContent_.length());
                 }
                 if (streamingChunkCallback_) {
                   streamingChunkCallback_(content, isThinking);
-                } else {
-                  wxLogWarning("HttpClient::ProcessSSEChunk: No chunk callback set!");
                 }
               }
-            } else {
-              wxLogMessage("HttpClient::ProcessSSEChunk: No delta in choice");
+
+              // Accumulate tool calls (arguments stream across multiple chunks)
+              if (delta.contains("tool_calls") && delta["tool_calls"].is_array()) {
+                for (const auto& tc : delta["tool_calls"]) {
+                  int idx = tc.value("index", 0);
+                  if (idx >= static_cast<int>(pendingToolCalls_.size())) {
+                    pendingToolCalls_.resize(idx + 1);
+                  }
+                  if (tc.contains("id") && tc["id"].is_string()) {
+                    pendingToolCalls_[idx].id = tc["id"].get<std::string>();
+                  }
+                  if (tc.contains("function") && tc["function"].is_object()) {
+                    const auto& fn = tc["function"];
+                    if (fn.contains("name") && fn["name"].is_string()) {
+                      pendingToolCalls_[idx].name = fn["name"].get<std::string>();
+                    }
+                    if (fn.contains("arguments") && fn["arguments"].is_string()) {
+                      pendingToolCalls_[idx].arguments += fn["arguments"].get<std::string>();
+                    }
+                  }
+                }
+              }
             }
-          } else {
-            wxLogMessage("HttpClient::ProcessSSEChunk: No choices in JSON");
           }
         } catch (const json::exception& e) {
           wxLogWarning("HttpClient::ProcessSSEChunk: Failed to parse JSON: %s", e.what());
