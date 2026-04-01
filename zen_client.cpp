@@ -182,8 +182,17 @@ void ZenClient::DoSendToProvider(const std::string& model) {
       totalInputTokens_ += inputTokens;
       totalOutputTokens_ += outputTokens;
 
+      if (aborted_) {
+        // Cancelled by user — keep user message and save partial response
+        // so the model has context if the user says "continue"
+        if (!content.empty()) {
+          conversationHistory_.push_back({"assistant", content + "\n[cancelled]", {}, {}});
+        }
+        return;  // MainFrame already handled UI reset
+      }
+
       if (!success) {
-        // Rollback last user message on error
+        // Real error — rollback the user message so they can retry
         if (!conversationHistory_.empty() &&
             conversationHistory_.back().role == "user") {
           conversationHistory_.pop_back();
@@ -195,7 +204,6 @@ void ZenClient::DoSendToProvider(const std::string& model) {
       }
 
       // --- Tool call loop ---
-      if (aborted_) return;  // User hit Escape
       if (!toolCalls.empty() && toolRound_ < MAX_TOOL_ROUNDS) {
         toolRound_++;
         wxLogMessage("ZenClient: Tool round %d, %zu tool calls", toolRound_, toolCalls.size());
