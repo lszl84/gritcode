@@ -87,7 +87,7 @@ void ClaudeProvider::SendMessage(
   prompt += currentMessage;
 
   // Build command — no --resume; full context is in the prompt
-  wxString cmd = "claude --print --verbose --output-format stream-json --include-partial-messages --permission-mode bypassPermissions";
+  wxString cmd = "claude --print --verbose --output-format stream-json --include-partial-messages --dangerously-skip-permissions";
   if (!model.empty() && model != "claude") {
     cmd += " --model " + wxString::FromUTF8(model);
   }
