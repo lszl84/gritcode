@@ -275,6 +275,10 @@ void ClaudeProvider::FireComplete(bool success, const std::string& text,
   cb(success, text, error, {}, inputTok, outputTok);
 }
 
+void ClaudeProvider::Abort() {
+  Interrupt();
+}
+
 void ClaudeProvider::Interrupt() {
   if (process_) {
     long pid = process_->GetPid();

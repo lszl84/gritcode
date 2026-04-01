@@ -13,6 +13,7 @@ public:
 
   bool Initialize() override;
   void Shutdown() override;
+  void Abort() override;
 
   ProviderType GetType() const override { return ProviderType::Zen; }
   std::string GetDisplayName() const override { return "OpenCode Zen"; }

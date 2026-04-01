@@ -50,6 +50,9 @@ MainFrame::MainFrame()
     AppendToChat("System", "Connecting anonymously...");
     zen.Connect("");
   }
+
+  // Focus the prompt so user can start typing immediately
+  m_messageInput->SetFocus();
 }
 
 void MainFrame::StartMCPServer() {
@@ -144,6 +147,40 @@ void MainFrame::SetupEventHandlers() {
   // Bind enter key in message input
   m_messageInput->Bind(wxEVT_TEXT_ENTER, [this](wxCommandEvent& evt) {
     OnSendMessage(evt);
+  });
+
+  // Escape key: cancel in-progress request
+  m_messageInput->Bind(wxEVT_KEY_DOWN, [this](wxKeyEvent& evt) {
+    if (evt.GetKeyCode() == WXK_ESCAPE && !m_sendButton->IsEnabled()) {
+      // Request is in progress — abort it
+      auto& zen = zen::ZenClient::Instance();
+      zen.Abort();
+
+      m_chunkFlushTimer.Stop();
+      m_markdownRenderTimer.Stop();
+
+      // Finalize thinking state
+      if (m_isReceivingThinking) {
+        m_chatDisplay->StopThinking(m_thinkingBlockIndex);
+        m_isReceivingThinking = false;
+      }
+
+      // Final markdown render of whatever we got so far
+      if (m_collectingAiResponse && !m_aiResponseBuffer.IsEmpty()) {
+        if (!m_thinkingBuffer.IsEmpty() && m_aiResponseStartBlock <= m_thinkingBlockIndex) {
+          m_aiResponseStartBlock = m_thinkingBlockIndex + 1;
+        }
+        ReplaceAiResponseWithMarkdown();
+      }
+      m_collectingAiResponse = false;
+      m_aiResponseBuffer.Clear();
+
+      AppendToChat("System", "Cancelled");
+      m_sendButton->Enable();
+      m_providerChoice->Enable();
+      return;
+    }
+    evt.Skip();
   });
   
   // Handle MCP send_message requests — simulate typing in the input box

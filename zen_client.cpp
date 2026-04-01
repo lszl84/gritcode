@@ -160,6 +160,7 @@ void ZenClient::SendMessage(const std::string& model, const std::string& message
   totalInputTokens_ = 0;
   totalOutputTokens_ = 0;
   toolRound_ = 0;
+  aborted_ = false;
 
   DoSendToProvider(useModel);
 }
@@ -194,6 +195,7 @@ void ZenClient::DoSendToProvider(const std::string& model) {
       }
 
       // --- Tool call loop ---
+      if (aborted_) return;  // User hit Escape
       if (!toolCalls.empty() && toolRound_ < MAX_TOOL_ROUNDS) {
         toolRound_++;
         wxLogMessage("ZenClient: Tool round %d, %zu tool calls", toolRound_, toolCalls.size());
@@ -261,6 +263,12 @@ void ZenClient::DoSendToProvider(const std::string& model) {
       wxPostEvent(this, evt);
     }
   );
+}
+
+void ZenClient::Abort() {
+  aborted_ = true;
+  if (provider_) provider_->Abort();
+  wxLogMessage("ZenClient::Abort: Request cancelled");
 }
 
 void ZenClient::ClearConversation() {

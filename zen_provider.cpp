@@ -20,6 +20,10 @@ void ZenProvider::Shutdown() {
   if (httpClient_) httpClient_->Shutdown();
 }
 
+void ZenProvider::Abort() {
+  if (httpClient_) httpClient_->Abort();
+}
+
 void ZenProvider::FetchModels(
     std::function<void(const std::vector<ProviderModelInfo>&)> callback) {
   httpClient_->FetchModels([callback](const std::vector<network::ModelInfo>& models) {

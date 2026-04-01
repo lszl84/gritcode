@@ -48,6 +48,7 @@ public:
 
   virtual bool Initialize() = 0;
   virtual void Shutdown() = 0;
+  virtual void Abort() = 0;  // Cancel in-progress request
 
   virtual ProviderType GetType() const = 0;
   virtual std::string GetDisplayName() const = 0;

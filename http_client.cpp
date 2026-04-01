@@ -61,6 +61,13 @@ void HttpClient::SetJsonLogCallback(JsonLogCallback callback) {
   jsonLogCallback_ = callback;
 }
 
+void HttpClient::Abort() {
+  retryTimer_.Stop();
+  if (currentRequest_.IsOk() && currentRequest_.GetState() == wxWebRequest::State_Active) {
+    currentRequest_.Cancel();
+  }
+}
+
 std::string HttpClient::BuildRequestJson(const ChatRequest& request) {
   json j;
   j["model"] = request.model;

@@ -76,6 +76,9 @@ public:
   void SetTimeout(int seconds);
   void SetJsonLogCallback(JsonLogCallback callback);
 
+  // Cancel the in-progress request (streaming or non-streaming).
+  void Abort();
+
   // Async methods - callbacks will be invoked when complete
   void FetchModels(ModelsCallback callback);
   void SendChatRequest(const ChatRequest& request, ChatCallback callback);

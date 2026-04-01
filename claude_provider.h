@@ -19,6 +19,7 @@ public:
 
   bool Initialize() override;
   void Shutdown() override;
+  void Abort() override;
 
   ProviderType GetType() const override { return ProviderType::Claude; }
   std::string GetDisplayName() const override { return "Claude (ACP)"; }

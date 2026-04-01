@@ -24,6 +24,7 @@ public:
   std::vector<ProviderModelInfo> GetFreeModels() const;
 
   void SendMessage(const std::string& model, const std::string& message);
+  void Abort();  // Cancel in-progress request and tool loop
   void ClearConversation();
 
   void SetActiveModel(const std::string& modelId);
@@ -57,6 +58,7 @@ private:
   int totalInputTokens_ = 0;
   int totalOutputTokens_ = 0;
   int toolRound_ = 0;
+  bool aborted_ = false;
   static constexpr int MAX_TOOL_ROUNDS = 10;
 };
 
