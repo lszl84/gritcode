@@ -56,6 +56,29 @@ std::vector<ToolDefinition> GetDefaultTools() {
   };
 }
 
+// Strip ANSI escape sequences (colors, cursor movement, etc.)
+// so tool output is clean text in thinking blocks and model context.
+static std::string StripAnsi(const std::string& s) {
+  std::string out;
+  out.reserve(s.size());
+  for (size_t i = 0; i < s.size(); ++i) {
+    if (s[i] == '\033' && i + 1 < s.size() && s[i + 1] == '[') {
+      // Skip CSI sequence: ESC [ ... <final byte>
+      i += 2;
+      while (i < s.size() && s[i] >= 0x20 && s[i] <= 0x3F) ++i;  // parameter bytes
+      // skip final byte (0x40-0x7E)
+      continue;
+    }
+    if (s[i] == '\033') {
+      // Skip other ESC sequences (2-char)
+      ++i;
+      continue;
+    }
+    out += s[i];
+  }
+  return out;
+}
+
 static std::string RunCommand(const std::string& cmd, int maxBytes = 32768) {
   std::string fullCmd = cmd + " 2>&1";
   FILE* pipe = popen(fullCmd.c_str(), "r");
@@ -74,7 +97,7 @@ static std::string RunCommand(const std::string& cmd, int maxBytes = 32768) {
   if (status != 0) {
     result += "\n[exit code: " + std::to_string(WEXITSTATUS(status)) + "]";
   }
-  return result;
+  return StripAnsi(result);
 }
 
 // Expand leading ~ to $HOME so paths work outside of a login shell.
