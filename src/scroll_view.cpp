@@ -1009,13 +1009,14 @@ void ScrollView::Paint(Renderer& renderer) {
             renderer.DrawRect(leftMargin_ - 5, blockTop, 3, blockH + 4, userPromptColor_);
         }
 
-        // Thinking collapse indicator
+        // Thinking collapse indicator (drawn triangle, not unicode)
         if (block.type == BlockType::THINKING && !wrappedCache_[i].empty()) {
-            std::string arrow = block.isCollapsed ? "\xe2\x96\xb6" : "\xe2\x96\xbc";
-            auto run = fonts_.Shape(arrow, FontStyle::ThinkingItalic, false);
-            float arrowAsc = fonts_.Ascent(FontStyle::ThinkingItalic);
-            renderer.DrawShapedRun(fonts_, run, 2, blockTop + wrappedCache_[i][0].y,
-                                   arrowAsc, thinkingColor_);
+            float triSize = fonts_.LineHeight(FontStyle::ThinkingItalic) * 0.4f;
+            float triY = blockTop + wrappedCache_[i][0].y + fonts_.LineHeight(FontStyle::ThinkingItalic) / 2;
+            if (block.isCollapsed)
+                renderer.DrawTriRight(4, triY, triSize, thinkingColor_);
+            else
+                renderer.DrawTriDown(4 + triSize/2, triY, triSize, thinkingColor_);
         }
 
         // Draw lines

@@ -69,6 +69,11 @@ private:
     bool requestInProgress_ = false;
     int toolRound_ = 0;
 
+    // Streaming state
+    std::string responseBuffer_;      // Accumulated markdown text
+    bool receivingThinking_ = false;
+    size_t responseStartBlock_ = 0;   // Where content blocks start
+
     // Layout
     float barHeight_ = 40;
     float inputHeight_ = 50;

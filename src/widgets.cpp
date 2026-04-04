@@ -240,15 +240,20 @@ void Dropdown::Paint(Renderer& r, FontManager& fm) const {
     Color bg = open ? hoverColor : hovered ? hoverColor : bgColor;
     r.DrawRect(bounds.x, bounds.y, bounds.w, bounds.h, bg);
 
-    // Selected text + dropdown arrow
+    // Selected text
     std::string display = SelectedLabel();
     if (display.empty()) display = "Select...";
-    display += " \xe2\x96\xbe";  // ▾
 
     auto run = fm.Shape(display, style);
     float tx = bounds.x + 8;
     float ty = bounds.y + (bounds.h - fm.LineHeight(style)) / 2;
     r.DrawShapedRun(fm, run, tx, ty, fm.Ascent(style), textColor);
+
+    // Dropdown arrow (drawn triangle)
+    float triSize = fm.LineHeight(style) * 0.3f;
+    float triX = bounds.x + bounds.w - 12;
+    float triY = bounds.y + bounds.h / 2;
+    r.DrawTriDown(triX, triY, triSize, textColor);
 
     // Popup
     if (open && !items.empty()) {

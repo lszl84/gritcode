@@ -9,6 +9,9 @@ public:
     void DrawGlyph(const GlyphInfo& gi, float x, float y, const Color& c, float ascent);
     void DrawShapedRun(const FontManager& fm, const ShapedRun& run,
                        float x, float y, float ascent, const Color& c);
+    // Filled triangles for collapse/expand indicators and dropdown arrows
+    void DrawTriRight(float cx, float cy, float size, const Color& c);  // ▶
+    void DrawTriDown(float cx, float cy, float size, const Color& c);   // ▼
 
 private:
     uint32_t* px_ = nullptr;

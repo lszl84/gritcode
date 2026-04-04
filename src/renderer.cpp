@@ -99,3 +99,29 @@ void Renderer::DrawShapedRun(const FontManager& fm, const ShapedRun& run,
         DrawGlyph(gi, x + g.xPos, y, color, ascent);
     }
 }
+
+void Renderer::DrawTriRight(float cx, float cy, float size, const Color& c) {
+    float half = size / 2;
+    uint32_t argb = ColorToARGB(c);
+    for (float row = -half; row <= half; row += 1.0f) {
+        float span = half - std::abs(row);
+        int x0 = std::max(0, (int)cx);
+        int x1 = std::min(w_, (int)(cx + span));
+        int y = (int)(cy + row);
+        if (y < 0 || y >= h_ || x0 >= x1) continue;
+        for (int x = x0; x < x1; x++) px_[y * w_ + x] = argb;
+    }
+}
+
+void Renderer::DrawTriDown(float cx, float cy, float size, const Color& c) {
+    float half = size / 2;
+    uint32_t argb = ColorToARGB(c);
+    for (float row = 0; row <= size; row += 1.0f) {
+        float span = half * (1.0f - row / size);
+        int x0 = std::max(0, (int)(cx - span));
+        int x1 = std::min(w_, (int)(cx + span));
+        int y = (int)(cy + row - half);
+        if (y < 0 || y >= h_ || x0 >= x1) continue;
+        for (int x = x0; x < x1; x++) px_[y * w_ + x] = argb;
+    }
+}

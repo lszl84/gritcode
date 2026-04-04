@@ -385,16 +385,39 @@ void App::DoSendToProvider() {
     // Zen provider: HTTP streaming
     std::string requestJson = BuildRequestJson();
 
+    responseBuffer_.clear();
+    receivingThinking_ = false;
+
     httpClient_.SendStreaming(requestJson,
         // onChunk (bg thread)
         [this](const std::string& chunk, bool isThinking) {
             events_.Push([this, chunk, isThinking]() {
                 if (isThinking) {
-                    scrollView_.AppendStream(BlockType::THINKING, chunk);
+                    // Thinking block
+                    if (!receivingThinking_) {
+                        receivingThinking_ = true;
+                        scrollView_.AppendStream(BlockType::THINKING, chunk);
+                        scrollView_.StartThinking(scrollView_.BlockCount() - 1);
+                    } else {
+                        scrollView_.ContinueStream(chunk);
+                    }
                 } else {
-                    // Accumulate markdown for later render
-                    // For simplicity, stream as plain text for now
-                    scrollView_.ContinueStream(chunk);
+                    // Content — finalize thinking if transitioning
+                    if (receivingThinking_) {
+                        receivingThinking_ = false;
+                        scrollView_.StopThinking(scrollView_.BlockCount() - 1);
+                        responseStartBlock_ = scrollView_.BlockCount();
+                        responseBuffer_.clear();
+                    }
+
+                    // First content chunk: create NORMAL block
+                    if (responseBuffer_.empty()) {
+                        responseStartBlock_ = scrollView_.BlockCount();
+                        scrollView_.AppendStream(BlockType::NORMAL, chunk);
+                    } else {
+                        scrollView_.ContinueStream(chunk);
+                    }
+                    responseBuffer_ += chunk;
                 }
                 MarkDirty();
             });
@@ -418,7 +441,26 @@ void App::DoSendToProvider() {
                     return;
                 }
 
-                // Final response
+                // Finalize thinking
+                if (receivingThinking_) {
+                    receivingThinking_ = false;
+                    scrollView_.StopThinking(scrollView_.BlockCount() - 1);
+                }
+
+                // Re-render accumulated content as markdown
+                if (!responseBuffer_.empty()) {
+                    // Remove plain-text blocks from responseStartBlock_ onwards
+                    scrollView_.RemoveBlocksFrom(responseStartBlock_);
+                    // Render markdown
+                    MarkdownRenderer mdRenderer(14);
+                    auto mdBlocks = mdRenderer.Render(responseBuffer_, true);
+                    scrollView_.BeginBatch();
+                    scrollView_.AddBlocks(std::move(mdBlocks));
+                    scrollView_.EndBatch();
+                    responseBuffer_.clear();
+                }
+
+                // Store in history
                 if (!content.empty())
                     history_.push_back({"assistant", content, {}, {}});
                 requestInProgress_ = false;
