@@ -92,7 +92,7 @@ void GlfwWindow::CursorPosCb(GLFWwindow* win, double x, double y) {
 
 void GlfwWindow::ScrollCallbackCb(GLFWwindow* win, double, double yoff) {
     auto* self = (GlfwWindow*)glfwGetWindowUserPointer(win);
-    if (self->scrollCb_) self->scrollCb_((float)(-yoff * 50));
+    if (self->scrollCb_) self->scrollCb_((float)(-yoff * 20));
 }
 
 void GlfwWindow::KeyCallbackCb(GLFWwindow* win, int key, int, int action, int mods) {
