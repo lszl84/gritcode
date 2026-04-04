@@ -56,9 +56,7 @@ std::vector<ToolDefinition> GetDefaultTools() {
   };
 }
 
-// Strip ANSI escape sequences (colors, cursor movement, etc.)
-// so tool output is clean text in thinking blocks and model context.
-static std::string StripAnsi(const std::string& s) {
+std::string StripAnsi(const std::string& s) {
   std::string out;
   out.reserve(s.size());
   for (size_t i = 0; i < s.size(); ++i) {
@@ -97,7 +95,7 @@ static std::string RunCommand(const std::string& cmd, int maxBytes = 32768) {
   if (status != 0) {
     result += "\n[exit code: " + std::to_string(WEXITSTATUS(status)) + "]";
   }
-  return StripAnsi(result);
+  return result;
 }
 
 // Expand leading ~ to $HOME so paths work outside of a login shell.

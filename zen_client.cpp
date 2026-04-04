@@ -250,10 +250,10 @@ void ZenClient::DoSendToProvider(const std::string& model) {
           CallAfter([this, model, gen, results, tcCopy]() {
             if (gen != requestGeneration_ || aborted_) return;
 
-            // Emit results as thinking chunk
+            // Emit results as thinking chunk (ANSI-stripped for display)
             std::string resultText;
             for (size_t i = 0; i < results.size(); ++i) {
-              resultText += "\n" + tcCopy[i].name + ":\n" + results[i].output + "\n";
+              resultText += "\n" + tcCopy[i].name + ":\n" + StripAnsi(results[i].output) + "\n";
             }
             {
               wxCommandEvent evt(ZEN_STREAM_CHUNK);
@@ -262,7 +262,7 @@ void ZenClient::DoSendToProvider(const std::string& model) {
               wxPostEvent(this, evt);
             }
 
-            // Add tool results to history
+            // Add raw tool results to history (model gets full output)
             for (size_t i = 0; i < results.size(); ++i) {
               ChatMessage toolResult;
               toolResult.role = "tool";

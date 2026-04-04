@@ -12,4 +12,7 @@ std::vector<ToolDefinition> GetDefaultTools();
 // Execute a tool by name with JSON arguments. Returns the output string.
 std::string ExecuteTool(const std::string& name, const std::string& argsJson);
 
+// Strip ANSI escape sequences for display in thinking blocks.
+std::string StripAnsi(const std::string& s);
+
 } // namespace fcn
