@@ -3,6 +3,7 @@
 #include <wx/wx.h>
 #include <wx/log.h>
 #include <nlohmann/json.hpp>
+#include <thread>
 
 namespace fcn::zen {
 
@@ -161,6 +162,7 @@ void ZenClient::SendMessage(const std::string& model, const std::string& message
   totalOutputTokens_ = 0;
   toolRound_ = 0;
   aborted_ = false;
+  requestGeneration_++;
 
   DoSendToProvider(useModel);
 }
@@ -203,7 +205,7 @@ void ZenClient::DoSendToProvider(const std::string& model) {
         return;
       }
 
-      // --- Tool call loop ---
+      // --- Tool call loop (async to avoid blocking UI) ---
       if (!toolCalls.empty() && toolRound_ < MAX_TOOL_ROUNDS) {
         toolRound_++;
         wxLogMessage("ZenClient: Tool round %d, %zu tool calls", toolRound_, toolCalls.size());
@@ -215,47 +217,64 @@ void ZenClient::DoSendToProvider(const std::string& model) {
         assistantMsg.toolCalls = toolCalls;
         conversationHistory_.push_back(assistantMsg);
 
-        // Execute each tool
+        // Emit tool call info as thinking chunk (shows in subdued style)
+        std::string info;
         for (const auto& tc : toolCalls) {
-          // Emit tool call info as markdown chunk for the UI
-          std::string info = "\n\n> **Tool: " + tc.name + "**\n";
+          info += "Tool: " + tc.name + "\n";
           try {
             auto args = nlohmann::json::parse(tc.arguments);
             for (auto& [key, val] : args.items()) {
-              info += "> `" + key + "`: " + val.dump() + "\n";
+              info += "  " + key + ": " + val.dump() + "\n";
             }
           } catch (...) {
-            info += "> `" + tc.arguments + "`\n";
+            info += "  " + tc.arguments + "\n";
           }
-          {
-            wxCommandEvent evt(ZEN_STREAM_CHUNK);
-            evt.SetString(wxString::FromUTF8(info));
-            evt.SetExtraLong(0);
-            wxPostEvent(this, evt);
-          }
-
-          // Execute
-          std::string result = ExecuteTool(tc.name, tc.arguments);
-
-          // Emit result as markdown code block
-          std::string resultMd = "\n```\n" + result + "\n```\n\n";
-          {
-            wxCommandEvent evt(ZEN_STREAM_CHUNK);
-            evt.SetString(wxString::FromUTF8(resultMd));
-            evt.SetExtraLong(0);
-            wxPostEvent(this, evt);
-          }
-
-          // Add tool result to history
-          ChatMessage toolResult;
-          toolResult.role = "tool";
-          toolResult.toolCallId = tc.id;
-          toolResult.content = result;
-          conversationHistory_.push_back(toolResult);
+        }
+        {
+          wxCommandEvent evt(ZEN_STREAM_CHUNK);
+          evt.SetString(wxString::FromUTF8(info));
+          evt.SetExtraLong(1);  // thinking style
+          wxPostEvent(this, evt);
         }
 
-        // Continue — send history (now including tool results) back to the model
-        DoSendToProvider(model);
+        // Execute tools in background thread so UI stays responsive
+        int gen = requestGeneration_;
+        std::vector<ToolCall> tcCopy = toolCalls;
+        std::thread([this, model, gen, tcCopy]() {
+          struct Result { std::string id; std::string output; };
+          std::vector<Result> results;
+          for (const auto& tc : tcCopy) {
+            results.push_back({tc.id, ExecuteTool(tc.name, tc.arguments)});
+          }
+
+          CallAfter([this, model, gen, results, tcCopy]() {
+            if (gen != requestGeneration_ || aborted_) return;
+
+            // Emit results as thinking chunk
+            std::string resultText;
+            for (size_t i = 0; i < results.size(); ++i) {
+              resultText += "\n" + tcCopy[i].name + ":\n" + results[i].output + "\n";
+            }
+            {
+              wxCommandEvent evt(ZEN_STREAM_CHUNK);
+              evt.SetString(wxString::FromUTF8(resultText));
+              evt.SetExtraLong(1);  // thinking style
+              wxPostEvent(this, evt);
+            }
+
+            // Add tool results to history
+            for (size_t i = 0; i < results.size(); ++i) {
+              ChatMessage toolResult;
+              toolResult.role = "tool";
+              toolResult.toolCallId = results[i].id;
+              toolResult.content = results[i].output;
+              conversationHistory_.push_back(toolResult);
+            }
+
+            DoSendToProvider(model);
+          });
+        }).detach();
+
         return;
       }
 

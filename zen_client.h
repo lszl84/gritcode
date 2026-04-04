@@ -58,6 +58,7 @@ private:
   int totalInputTokens_ = 0;
   int totalOutputTokens_ = 0;
   int toolRound_ = 0;
+  int requestGeneration_ = 0;
   bool aborted_ = false;
   static constexpr int MAX_TOOL_ROUNDS = 10;
 };

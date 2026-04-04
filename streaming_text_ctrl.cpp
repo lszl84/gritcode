@@ -1464,7 +1464,7 @@ void StreamingTextCtrl::OnPaint(wxPaintEvent& event) {
         } else if (block->type == BlockType::THINKING) {
             dc.SetBrush(wxBrush(thinkingBackground));
             dc.SetPen(*wxTRANSPARENT_PEN);
-            dc.DrawRectangle(leftMargin - 5, blockTop, textAreaWidth + 10, blockHeight + 4);
+            dc.DrawRectangle(0, blockTop, leftMargin + textAreaWidth + 5, blockHeight + 4);
             // Draw collapse/expand triangle in left gutter
             if (i < wrappedLinesCache.size() && !wrappedLinesCache[i].empty()) {
                 dc.SetFont(GetFontForType(BlockType::THINKING));
