@@ -4,10 +4,14 @@
 
 When running the GUI app for testing, always launch it on **your own Hyprland workspace** (not the user's), in **tiled mode**. This prevents the window from popping up on the user's active workspace.
 
-Find your workspace by looking for the "Claude Code" window title:
+Find your workspace by setting a temporary unique title on your terminal and matching it in Hyprland (works even with multiple Claude Code terminals):
 
 ```bash
-MY_WS=$(hyprctl clients -j | python3 -c "import sys,json;[print(c['workspace']['id']) for c in json.load(sys.stdin) if 'Claude' in c.get('title','')]" | head -1)
+_PTY=$(readlink /proc/$PPID/fd/0)
+_M="fcn-detect-$$"
+printf '\033]2;%s\007' "$_M" > "$_PTY"; sleep 0.2
+MY_WS=$(hyprctl clients -j | python3 -c "import sys,json;[print(c['workspace']['id']) for c in json.load(sys.stdin) if c.get('title','')=='"$_M"']" | head -1)
+printf '\033]2;Claude Code\007' > "$_PTY"
 ```
 
 Then launch:
