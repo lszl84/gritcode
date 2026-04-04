@@ -387,13 +387,14 @@ void App::DoSendToProvider() {
 
     responseBuffer_.clear();
     receivingThinking_ = false;
+    lastMarkdownLen_ = 0;
+    lastMarkdownTime_ = GetMonotonicTime();
 
     httpClient_.SendStreaming(requestJson,
         // onChunk (bg thread)
         [this](const std::string& chunk, bool isThinking) {
             events_.Push([this, chunk, isThinking]() {
                 if (isThinking) {
-                    // Thinking block
                     if (!receivingThinking_) {
                         receivingThinking_ = true;
                         scrollView_.AppendStream(BlockType::THINKING, chunk);
@@ -408,16 +409,24 @@ void App::DoSendToProvider() {
                         scrollView_.StopThinking(scrollView_.BlockCount() - 1);
                         responseStartBlock_ = scrollView_.BlockCount();
                         responseBuffer_.clear();
+                        lastMarkdownLen_ = 0;
                     }
 
-                    // First content chunk: create NORMAL block
+                    // Set start block on first content chunk
                     if (responseBuffer_.empty()) {
                         responseStartBlock_ = scrollView_.BlockCount();
-                        scrollView_.AppendStream(BlockType::NORMAL, chunk);
-                    } else {
-                        scrollView_.ContinueStream(chunk);
                     }
+
                     responseBuffer_ += chunk;
+
+                    // Progressive markdown: re-render every 500ms if enough new text
+                    double now = GetMonotonicTime();
+                    if (now - lastMarkdownTime_ > 0.5 &&
+                        responseBuffer_.size() > lastMarkdownLen_ + 20) {
+                        RenderMarkdownToBlocks();
+                        lastMarkdownTime_ = now;
+                        lastMarkdownLen_ = responseBuffer_.size();
+                    }
                 }
                 MarkDirty();
             });
@@ -447,20 +456,12 @@ void App::DoSendToProvider() {
                     scrollView_.StopThinking(scrollView_.BlockCount() - 1);
                 }
 
-                // Re-render accumulated content as markdown
+                // Final markdown render
                 if (!responseBuffer_.empty()) {
-                    // Remove plain-text blocks from responseStartBlock_ onwards
-                    scrollView_.RemoveBlocksFrom(responseStartBlock_);
-                    // Render markdown
-                    MarkdownRenderer mdRenderer(14);
-                    auto mdBlocks = mdRenderer.Render(responseBuffer_, true);
-                    scrollView_.BeginBatch();
-                    scrollView_.AddBlocks(std::move(mdBlocks));
-                    scrollView_.EndBatch();
+                    RenderMarkdownToBlocks();
                     responseBuffer_.clear();
                 }
 
-                // Store in history
                 if (!content.empty())
                     history_.push_back({"assistant", content, {}, {}});
                 requestInProgress_ = false;
@@ -470,6 +471,21 @@ void App::DoSendToProvider() {
             });
         }
     );
+}
+
+void App::RenderMarkdownToBlocks() {
+    if (responseBuffer_.empty()) return;
+
+    // Remove old content blocks from responseStartBlock_ onwards
+    scrollView_.RemoveBlocksFrom(responseStartBlock_);
+
+    // Render markdown
+    MarkdownRenderer mdRenderer(14);
+    auto mdBlocks = mdRenderer.Render(responseBuffer_, true);
+
+    scrollView_.BeginBatch();
+    scrollView_.AddBlocks(std::move(mdBlocks));
+    scrollView_.EndBatch();
 }
 
 void App::ExecuteToolCalls(const std::vector<json>& toolCalls, const std::string& content) {

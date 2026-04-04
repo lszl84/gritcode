@@ -73,6 +73,8 @@ private:
     std::string responseBuffer_;      // Accumulated markdown text
     bool receivingThinking_ = false;
     size_t responseStartBlock_ = 0;   // Where content blocks start
+    size_t lastMarkdownLen_ = 0;      // Buffer length at last markdown render
+    double lastMarkdownTime_ = 0;     // Time of last markdown render
 
     // Layout
     float barHeight_ = 40;
@@ -92,6 +94,7 @@ private:
 
     // Tool execution
     void ExecuteToolCalls(const std::vector<json>& toolCalls, const std::string& content);
+    void RenderMarkdownToBlocks();
     std::string BuildRequestJson();
 
     // Input handling
