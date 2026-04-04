@@ -1028,13 +1028,18 @@ void ScrollView::Paint(Renderer& renderer) {
             if (absY + wl.height < 0) continue;
             if (absY > clientH) break;
 
-            // Check selection for this line
-            int lineCharLen = utf8_codepoint_count(wl.text);
-            TextPosition lineStart = {(int)i, (int)li, 0};
-            TextPosition lineEnd = {(int)i, (int)li, lineCharLen};
-            bool lineSelected = hasSel && selStart <= lineEnd && selEnd >= lineStart;
-
+            // Check selection for this line (skip utf8 counting when no selection)
+            bool lineSelected = false;
+            int lineCharLen = 0;
             int selFromChar = 0, selToChar = 0;
+            TextPosition lineStart = {(int)i, (int)li, 0};
+            TextPosition lineEnd = lineStart;
+            if (hasSel) {
+                lineCharLen = utf8_codepoint_count(wl.text);
+                lineEnd = {(int)i, (int)li, lineCharLen};
+                lineSelected = selStart <= lineEnd && selEnd >= lineStart;
+            }
+
             if (lineSelected) {
                 // Compute character range of selection on this line
                 if (selStart <= lineStart && lineEnd <= selEnd) {

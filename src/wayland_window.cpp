@@ -173,6 +173,7 @@ WaylandWindow::Buffer* WaylandWindow::GetFreeBuffer() {
 }
 
 uint32_t* WaylandWindow::BeginFrame() {
+    if (!frameReady_) return nullptr;  // Wait for compositor to be ready
     Buffer* buf = GetFreeBuffer();
     if (!buf) return nullptr;
     return buf->pixels;

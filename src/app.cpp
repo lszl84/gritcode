@@ -649,6 +649,9 @@ void App::Run() {
         uint32_t* pixels = window_.BeginFrame();
         if (!pixels) continue;
 
+        struct timespec t0, t1;
+        clock_gettime(CLOCK_MONOTONIC, &t0);
+
         renderer_.BeginFrame(pixels, window_.Width(), window_.Height(), scrollView_.Fonts());
 
         // Background
@@ -662,5 +665,26 @@ void App::Run() {
         PaintBottomBar();
 
         window_.EndFrame();
+
+        // Perf tracking
+        clock_gettime(CLOCK_MONOTONIC, &t1);
+        static int frameCount = 0;
+        static long totalUs = 0;
+        static double perfStart = now;
+        long frameUs = (t1.tv_sec - t0.tv_sec) * 1000000L + (t1.tv_nsec - t0.tv_nsec) / 1000L;
+        totalUs += frameUs;
+        frameCount++;
+        if (now - perfStart > 2.0 && frameCount > 0) {
+            FILE* pf = fopen("/tmp/fcn-native-perf.log", "a");
+            if (pf) {
+                fprintf(pf, "PERF: %d frames in %.1fs (%.0f/s) | avg %.0fus (%.2fms)\n",
+                        frameCount, now - perfStart,
+                        frameCount / (now - perfStart),
+                        (double)totalUs / frameCount,
+                        (double)totalUs / frameCount / 1000.0);
+                fclose(pf);
+            }
+            frameCount = 0; totalUs = 0; perfStart = now;
+        }
     }
 }
