@@ -20,6 +20,7 @@ public:
     void Push(std::function<void()> fn) {
         std::lock_guard<std::mutex> lock(mu_);
         q_.push(std::move(fn));
+        glfwPostEmptyEvent();  // Wake up WaitEvents
     }
     void Drain() {
         std::lock_guard<std::mutex> lock(mu_);
