@@ -66,24 +66,14 @@ void MainFrame::StartMCPServer() {
 }
 
 void MainFrame::CreateMenuBar() {
-  auto* menuBar = new wxMenuBar();
-  
-  // File menu
-  auto* fileMenu = new wxMenu();
-  fileMenu->Append(static_cast<int>(MenuID::SetApiKey), "Set &API Key...\tCtrl+K", "Set or clear your OpenCode Zen API key");
-  fileMenu->AppendSeparator();
-  fileMenu->Append(static_cast<int>(MenuID::Connect), "&Reconnect\tCtrl+R", "Reconnect to OpenCode Zen");
-  fileMenu->Append(static_cast<int>(MenuID::Disconnect), "&Disconnect\tCtrl+D", "Disconnect from Zen");
-  fileMenu->AppendSeparator();
-  fileMenu->Append(static_cast<int>(MenuID::Exit), "E&xit\tAlt+F4", "Quit the application");
-  menuBar->Append(fileMenu, "&File");
-  
-  // Help menu
-  auto* helpMenu = new wxMenu();
-  helpMenu->Append(static_cast<int>(MenuID::About), "&About\tF1", "Show about dialog");
-  menuBar->Append(helpMenu, "&Help");
-  
-  SetMenuBar(menuBar);
+  // No visible menu bar — keyboard shortcuts via accelerator table
+  wxAcceleratorEntry entries[] = {
+    {wxACCEL_CTRL, 'K', static_cast<int>(MenuID::SetApiKey)},
+    {wxACCEL_CTRL, 'R', static_cast<int>(MenuID::Connect)},
+    {wxACCEL_CTRL, 'D', static_cast<int>(MenuID::Disconnect)},
+    {wxACCEL_ALT, WXK_F4, static_cast<int>(MenuID::Exit)},
+  };
+  SetAcceleratorTable(wxAcceleratorTable(4, entries));
 }
 
 void MainFrame::CreateUI() {
