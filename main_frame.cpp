@@ -393,6 +393,10 @@ void MainFrame::OnZenStreamChunk(wxCommandEvent& event) {
       m_chatDisplay->StopThinking(m_thinkingBlockIndex);
       // Update AI response start to after the thinking block
       m_aiResponseStartBlock = m_chatDisplay->GetBlockCount();
+      // Clear buffer so old content from before the thinking block
+      // doesn't get re-rendered after it (tool loop rounds)
+      m_aiResponseBuffer.Clear();
+      m_lastMarkdownRenderLen = 0;
     }
 
     m_aiResponseBuffer += chunk;
