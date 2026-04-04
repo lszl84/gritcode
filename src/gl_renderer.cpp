@@ -118,6 +118,8 @@ void GLRenderer::BeginFrame(int viewportW, int viewportH, const FontManager& fm)
 }
 
 void GLRenderer::EndFrame() {
+    // Re-upload atlas if new glyphs were rasterized during Paint
+    UpdateAtlasTexture();
     FlushBatch();
 }
 
