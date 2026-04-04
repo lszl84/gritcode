@@ -255,6 +255,10 @@ void StreamingTextCtrl::MeasureSegments(wxDC& dc, size_t blockIdx) {
     auto& segs = segmentCache[blockIdx];
     segs.clear();
 
+    // Measure space width with the CURRENT font (code blocks use monospace)
+    wxCoord spW, spH;
+    dc.GetTextExtent(wxS(" "), &spW, &spH);
+
     if (!block || block->text.IsEmpty()) {
         TextSegment seg;
         seg.text = wxEmptyString;
@@ -303,8 +307,8 @@ void StreamingTextCtrl::MeasureSegments(wxDC& dc, size_t blockIdx) {
                 if (!firstInLine) {
                     TextSegment spaceSeg;
                     spaceSeg.text = wxS(" ");
-                    spaceSeg.width = cachedSpaceWidth;
-                    spaceSeg.height = cachedSpaceHeight;
+                    spaceSeg.width = spW;
+                    spaceSeg.height = spH;
                     spaceSeg.isNewline = false;
                     spaceSeg.isSpace = true;
                     segs.push_back(std::move(spaceSeg));
@@ -363,6 +367,10 @@ void StreamingTextCtrl::MeasureSegmentsIncremental(wxDC& dc, size_t blockIdx) {
         return;
     }
     
+    // Measure space width with the CURRENT font
+    wxCoord spW, spH;
+    dc.GetTextExtent(wxS(" "), &spW, &spH);
+
     // Find the start of the last hard line in the previously cached text.
     // We need to re-measure from there because new text may continue that line.
     size_t lastNl = fullText.rfind('\n', prevLen > 0 ? prevLen - 1 : 0);
@@ -413,8 +421,8 @@ void StreamingTextCtrl::MeasureSegmentsIncremental(wxDC& dc, size_t blockIdx) {
                 if (!firstInLine) {
                     TextSegment spaceSeg;
                     spaceSeg.text = wxS(" ");
-                    spaceSeg.width = cachedSpaceWidth;
-                    spaceSeg.height = cachedSpaceHeight;
+                    spaceSeg.width = spW;
+                    spaceSeg.height = spH;
                     spaceSeg.isNewline = false;
                     spaceSeg.isSpace = true;
                     segs.push_back(std::move(spaceSeg));
@@ -1304,6 +1312,24 @@ void StreamingTextCtrl::OnAutoScrollTimer(wxTimerEvent& evt) {
 // ============================================================================
 
 void StreamingTextCtrl::OnPaint(wxPaintEvent& event) {
+    // Performance diagnostic: log repaint rate
+    static int paintCount = 0;
+    static wxStopWatch paintWatch;
+    static bool started = false;
+    paintCount++;
+    if (!started) { paintWatch.Start(); started = true; }
+    if (paintWatch.Time() > 5000) {
+        float rate = paintCount / 5.0f;
+        if (rate > 2.0f) {
+            wxLogMessage("PERF: %d paints in 5s (%.1f/s), animBlocks=%zu, animator=%d, rebuild=%d, blocks=%zu",
+                         paintCount, rate,
+                         animatedBlocks.size(), animator ? animator->IsRunning() : 0,
+                         needsFullRebuild, blockManager.GetBlockCount());
+        }
+        paintCount = 0;
+        paintWatch.Start();
+    }
+
     wxPaintDC dc(this);
     wxSize clientSize = GetClientSize();
     int clientWidth = clientSize.GetWidth();
@@ -1411,15 +1437,23 @@ void StreamingTextCtrl::OnPaint(wxPaintEvent& event) {
     if (scrollPositionPx < 0) scrollPositionPx = 0;
 
     // Update scrollbar — hide it entirely when content fits in viewport
-    // to avoid the GTK3 overlay scrollbar bulge
+    // to avoid the GTK3 overlay scrollbar bulge.
+    // Only call SetScrollbar when values actually change to avoid GTK
+    // repaint loops.
     if (!updatingScrollbar) {
-        updatingScrollbar = true;
+        int wantPos, wantThumb, wantRange;
         if (totalHeight <= clientHeight) {
-            SetScrollbar(wxVERTICAL, 0, 0, 0);
+            wantPos = 0; wantThumb = 0; wantRange = 0;
         } else {
-            SetScrollbar(wxVERTICAL, scrollPositionPx, clientHeight, totalHeight);
+            wantPos = scrollPositionPx; wantThumb = clientHeight; wantRange = totalHeight;
         }
-        updatingScrollbar = false;
+        if (wantPos != GetScrollPos(wxVERTICAL) ||
+            wantThumb != GetScrollThumb(wxVERTICAL) ||
+            wantRange != GetScrollRange(wxVERTICAL)) {
+            updatingScrollbar = true;
+            SetScrollbar(wxVERTICAL, wantPos, wantThumb, wantRange);
+            updatingScrollbar = false;
+        }
     }
 
     // Selection state
