@@ -1410,17 +1410,16 @@ void StreamingTextCtrl::OnPaint(wxPaintEvent& event) {
     if (scrollPositionPx > maxScroll) scrollPositionPx = maxScroll;
     if (scrollPositionPx < 0) scrollPositionPx = 0;
 
-    // Update scrollbar
+    // Update scrollbar — hide it entirely when content fits in viewport
+    // to avoid the GTK3 overlay scrollbar bulge
     if (!updatingScrollbar) {
-        int currentPos = GetScrollPos(wxVERTICAL);
-        int currentRange = GetScrollRange(wxVERTICAL);
-        int currentPage = GetScrollThumb(wxVERTICAL);
-
-        if (scrollPositionPx != currentPos || totalHeight != currentRange || clientHeight != currentPage) {
-            updatingScrollbar = true;
+        updatingScrollbar = true;
+        if (totalHeight <= clientHeight) {
+            SetScrollbar(wxVERTICAL, 0, 0, 0);
+        } else {
             SetScrollbar(wxVERTICAL, scrollPositionPx, clientHeight, totalHeight);
-            updatingScrollbar = false;
         }
+        updatingScrollbar = false;
     }
 
     // Selection state
