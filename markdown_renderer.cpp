@@ -47,7 +47,7 @@ wxColour MarkdownRenderer::GetHeadingColour(bool isDarkTheme) const
 
 wxColour MarkdownRenderer::GetCodeColour(bool isDarkTheme) const
 {
-    return isDarkTheme ? wxColour(255, 120, 120) : wxColour(180, 50, 30);
+    return isDarkTheme ? wxColour(200, 180, 140) : wxColour(120, 80, 30);
 }
 
 wxColour MarkdownRenderer::GetBlockquoteColour(bool isDarkTheme) const
