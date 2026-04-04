@@ -112,8 +112,9 @@ bool App::Init() {
 
     // Window callbacks
     float currentScale = window_.Scale();
-    window_.OnResize([&](int w, int h, float scale) {
+    window_.OnResize([&, currentScale](int w, int h, float scale) mutable {
         int viewH = h - (int)((barHeight_ + inputHeight_) * scale);
+        if (viewH < 1) viewH = 1;
         if (scale != currentScale) {
             currentScale = scale;
             scrollView_.Init(w, viewH, scale);
@@ -131,6 +132,9 @@ bool App::Init() {
     window_.OnScrollEvent([&](float delta) { OnScroll(delta); });
     window_.OnKeyEvent([&](int key, int mods, bool pressed) {
         if (pressed) OnKey(key, mods, pressed);
+    });
+    window_.OnCharEvent([&](uint32_t cp) {
+        OnChar(cp);
     });
 
     LayoutWidgets();
@@ -153,22 +157,25 @@ bool App::Init() {
 // ============================================================================
 
 void App::LayoutWidgets() {
+    // All coordinates in physical pixels (matching WaylandWindow and ScrollView)
+    float w = window_.Width();
+    float h = window_.Height();
     float s = window_.Scale();
-    float w = window_.Width() / s;
-    float h = window_.Height() / s;
+    float bar = barHeight_ * s;
+    float inp = inputHeight_ * s;
 
-    float barY = h - barHeight_;
-    float inputY = barY - inputHeight_;
+    float barY = h - bar;
+    float inputY = barY - inp;
 
-    messageInput_.bounds = {8, inputY + 5, w - 80, inputHeight_ - 10};
-    sendButton_.bounds = {w - 68, inputY + 5, 60, inputHeight_ - 10};
+    messageInput_.bounds = {8, inputY + 5, w - 80, inp - 10};
+    sendButton_.bounds = {w - 68, inputY + 5, 60, inp - 10};
 
     float bx = 8;
-    providerDropdown_.bounds = {bx, barY + 5, 150, barHeight_ - 10}; bx += 158;
-    modelDropdown_.bounds = {bx, barY + 5, 160, barHeight_ - 10}; bx += 168;
-    statusLabel_.bounds = {bx, barY + 5, 200, barHeight_ - 10}; bx += 208;
+    providerDropdown_.bounds = {bx, barY + 5, 170 * s, bar - 10}; bx += 178 * s;
+    modelDropdown_.bounds = {bx, barY + 5, 180 * s, bar - 10}; bx += 188 * s;
+    statusLabel_.bounds = {bx, barY + 5, 220 * s, bar - 10}; bx += 228 * s;
 
-    apiKeyButton_.bounds = {w - 100, barY + 5, 90, barHeight_ - 10};
+    apiKeyButton_.bounds = {w - 110 * s, barY + 5, 100 * s, bar - 10};
     apiKeyButton_.visible = (activeProvider_ == "zen");
 }
 
@@ -178,18 +185,20 @@ void App::LayoutWidgets() {
 
 void App::PaintBottomBar() {
     float s = window_.Scale();
-    float w = window_.Width() / s;
-    float h = window_.Height() / s;
+    float w = window_.Width();
+    float h = window_.Height();
     auto& fm = scrollView_.Fonts();
 
     Color barBg{0.10f, 0.10f, 0.11f};
     Color inputAreaBg{0.13f, 0.13f, 0.14f};
 
-    float barY = h - barHeight_;
-    float inputY = barY - inputHeight_;
+    float bar = barHeight_ * s;
+    float inp = inputHeight_ * s;
+    float barY = h - bar;
+    float inputY = barY - inp;
 
-    renderer_.DrawRect(0, inputY * s, w * s, inputHeight_ * s, inputAreaBg);
-    renderer_.DrawRect(0, barY * s, w * s, barHeight_ * s, barBg);
+    renderer_.DrawRect(0, inputY, w, inp, inputAreaBg);
+    renderer_.DrawRect(0, barY, w, bar, barBg);
 
     // Scale transform: widgets use logical coords, renderer uses physical
     // For now, widgets draw at 1:1 since renderer works in physical pixels
@@ -477,22 +486,22 @@ void App::ExecuteToolCalls(const std::vector<json>& toolCalls, const std::string
 // ============================================================================
 
 void App::OnMouseDown(float x, float y, bool shift) {
-    float s = window_.Scale();
-    float lx = x / s, ly = y / s;
+    // All coords are physical pixels from WaylandWindow
 
     // Check dropdowns first (they have popups)
-    if (providerDropdown_.OnMouseDown(lx, ly)) { MarkDirty(); return; }
-    if (modelDropdown_.OnMouseDown(lx, ly)) { MarkDirty(); return; }
+    if (providerDropdown_.OnMouseDown(x, y)) { MarkDirty(); return; }
+    if (modelDropdown_.OnMouseDown(x, y)) { MarkDirty(); return; }
 
     // Close any open dropdowns
     providerDropdown_.Close();
     modelDropdown_.Close();
 
-    if (sendButton_.OnMouseDown(lx, ly)) { MarkDirty(); return; }
-    if (apiKeyButton_.OnMouseDown(lx, ly)) { MarkDirty(); return; }
-    if (messageInput_.OnMouseDown(lx, ly)) { MarkDirty(); return; }
+    if (sendButton_.OnMouseDown(x, y)) { MarkDirty(); return; }
+    if (apiKeyButton_.OnMouseDown(x, y)) { MarkDirty(); return; }
+    if (messageInput_.OnMouseDown(x, y)) { MarkDirty(); return; }
 
-    // Scroll view gets physical coords
+    // Scroll view
+    float s = window_.Scale();
     float viewH = window_.Height() - (barHeight_ + inputHeight_) * s;
     if (y < viewH) {
         scrollView_.OnMouseDown(x, y, shift);
@@ -502,24 +511,19 @@ void App::OnMouseDown(float x, float y, bool shift) {
 }
 
 void App::OnMouseUp(float x, float y) {
-    float s = window_.Scale();
-    float lx = x / s, ly = y / s;
-
-    sendButton_.OnMouseUp(lx, ly);
-    apiKeyButton_.OnMouseUp(lx, ly);
+    sendButton_.OnMouseUp(x, y);
+    apiKeyButton_.OnMouseUp(x, y);
     scrollView_.OnMouseUp(x, y);
     MarkDirty();
 }
 
 void App::OnMouseMove(float x, float y, bool leftDown) {
+    sendButton_.OnMouseMove(x, y);
+    apiKeyButton_.OnMouseMove(x, y);
+    providerDropdown_.OnMouseMove(x, y);
+    modelDropdown_.OnMouseMove(x, y);
+
     float s = window_.Scale();
-    float lx = x / s, ly = y / s;
-
-    sendButton_.OnMouseMove(lx, ly);
-    apiKeyButton_.OnMouseMove(lx, ly);
-    providerDropdown_.OnMouseMove(lx, ly);
-    modelDropdown_.OnMouseMove(lx, ly);
-
     float viewH = window_.Height() - (barHeight_ + inputHeight_) * s;
     if (y < viewH) {
         scrollView_.OnMouseMove(x, y, leftDown);

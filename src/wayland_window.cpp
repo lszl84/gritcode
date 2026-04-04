@@ -360,27 +360,40 @@ void WaylandWindow::KbLeave(void*, wl_keyboard*, uint32_t, wl_surface*) {}
 void WaylandWindow::KbKey(void* data, wl_keyboard*, uint32_t, uint32_t,
                            uint32_t keycode, uint32_t state) {
     auto* w = (WaylandWindow*)data;
-    if (!w->xkbState_ || !w->keyCb_) return;
+    if (!w->xkbState_) return;
     bool pressed = (state == WL_KEYBOARD_KEY_STATE_PRESSED);
 
     xkb_keysym_t sym = xkb_state_key_get_one_sym(w->xkbState_, keycode + 8);
 
-    int key = 0;
-    switch (sym) {
-    case XKB_KEY_Escape: key = Key::Escape; break;
-    case XKB_KEY_space: key = Key::Space; break;
-    case XKB_KEY_Up: key = Key::Up; break;
-    case XKB_KEY_Down: key = Key::Down; break;
-    case XKB_KEY_Prior: key = Key::PageUp; break;  // Page_Up
-    case XKB_KEY_Next: key = Key::PageDown; break;  // Page_Down
-    case XKB_KEY_Home: key = Key::Home; break;
-    case XKB_KEY_End: key = Key::End; break;
-    case XKB_KEY_a: case XKB_KEY_A: key = Key::A; break;
-    case XKB_KEY_c: case XKB_KEY_C: key = Key::C; break;
-    default: break;
+    // Pass raw keysym for special keys (backspace, enter, arrows, etc.)
+    if (w->keyCb_ && pressed) {
+        int key = 0;
+        switch (sym) {
+        case XKB_KEY_Escape: key = Key::Escape; break;
+        case XKB_KEY_space: key = Key::Space; break;
+        case XKB_KEY_Up: key = Key::Up; break;
+        case XKB_KEY_Down: key = Key::Down; break;
+        case XKB_KEY_Prior: key = Key::PageUp; break;
+        case XKB_KEY_Next: key = Key::PageDown; break;
+        case XKB_KEY_Home: key = Key::Home; break;
+        case XKB_KEY_End: key = Key::End; break;
+        case XKB_KEY_a: case XKB_KEY_A: key = Key::A; break;
+        case XKB_KEY_c: case XKB_KEY_C: key = Key::C; break;
+        default: break;
+        }
+        if (key) w->keyCb_(key, w->mods_, pressed);
+
+        // Also pass raw keysym for text input (backspace, delete, enter, arrows)
+        w->keyCb_(sym, w->mods_, pressed);
     }
 
-    if (key && pressed) w->keyCb_(key, w->mods_, pressed);
+    // Character input: get UTF-32 codepoint for printable characters
+    if (pressed && w->charCb_) {
+        uint32_t cp = xkb_state_key_get_utf32(w->xkbState_, keycode + 8);
+        if (cp >= 32 && cp != 127) {  // printable, not DEL
+            w->charCb_(cp);
+        }
+    }
 }
 
 void WaylandWindow::KbModifiers(void* data, wl_keyboard*, uint32_t,

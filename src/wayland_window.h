@@ -38,12 +38,14 @@ public:
     using MouseMoveCb = std::function<void(float, float, bool)>;
     using ScrollCb = std::function<void(float)>;
     using KeyCb = std::function<void(int key, int mods, bool pressed)>;
+    using CharCb = std::function<void(uint32_t codepoint)>;
 
     void OnResize(ResizeCb cb) { resizeCb_ = cb; }
     void OnMouseButton(MouseBtnCb cb) { mouseBtnCb_ = cb; }
     void OnMouseMove(MouseMoveCb cb) { mouseMoveCb_ = cb; }
     void OnScrollEvent(ScrollCb cb) { scrollCb_ = cb; }
     void OnKeyEvent(KeyCb cb) { keyCb_ = cb; }
+    void OnCharEvent(CharCb cb) { charCb_ = cb; }
 
     void SetClipboard(const std::string& text);
 
@@ -98,6 +100,7 @@ private:
     MouseMoveCb mouseMoveCb_;
     ScrollCb scrollCb_;
     KeyCb keyCb_;
+    CharCb charCb_;
 
     void CreateBuffers();
     void DestroyBuffers();
