@@ -1,11 +1,15 @@
 #include "app.h"
+#include "imgui.h"
+#include "imgui_impl_glfw.h"
+#include "imgui_impl_opengl3.h"
+#define GL_GLEXT_PROTOTYPES
+#include <GL/gl.h>
 #include <cstdio>
 #include <cstring>
 #include <thread>
 #include <array>
-#include <xkbcommon/xkbcommon-keysyms.h>
 
-// Tool execution (same as before)
+// Tool execution (unchanged)
 static std::string RunCommand(const std::string& cmd) {
     std::string fullCmd = cmd + " 2>&1";
     FILE* pipe = popen(fullCmd.c_str(), "r");
@@ -55,7 +59,6 @@ static std::string StripAnsi(const std::string& s) {
     return out;
 }
 
-// Tool definitions JSON
 static std::string ToolDefsJson() {
     json tools = json::array();
     tools.push_back({{"type","function"},{"function",{
@@ -80,45 +83,40 @@ static std::string ToolDefsJson() {
 bool App::Init() {
     if (!window_.Init(1000, 750, "FastCode Native")) return false;
 
-    if (!scrollView_.Init(window_.Width(), window_.Height() - (int)(barHeight_ + inputHeight_) * window_.Scale(),
-                          window_.Scale()))
+    // Init ImGui
+    IMGUI_CHECKVERSION();
+    ImGui::CreateContext();
+    ImGuiIO& io = ImGui::GetIO();
+    io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;
+    ImGui::StyleColorsDark();
+
+    // Customize style
+    ImGuiStyle& style = ImGui::GetStyle();
+    style.WindowRounding = 0;
+    style.FrameRounding = 4;
+    style.WindowBorderSize = 0;
+    style.FramePadding = ImVec2(8, 6);
+    style.ItemSpacing = ImVec2(8, 4);
+
+    ImGui_ImplGlfw_InitForOpenGL(window_.Handle(), true);
+    ImGui_ImplOpenGL3_Init("#version 330");
+
+    // Init scroll view (upper portion)
+    int barH = 90;  // ImGui bottom bar height in pixels
+    if (!scrollView_.Init(window_.Width(), window_.Height() - barH, window_.Scale()))
         return false;
 
     scrollView_.SetAutoScroll(true);
     scrollView_.SetClipboardFunc([&](const std::string& t) { window_.SetClipboard(t); });
 
-    if (!renderer_.Init()) {
-        fprintf(stderr, "GL renderer init failed\n");
-        return false;
-    }
+    if (!renderer_.Init()) return false;
 
-    // Provider dropdown
-    providerDropdown_.items = {{"zen", "OpenCode Zen"}, {"claude", "Claude (ACP)"}};
-    providerDropdown_.selectedIndex = 0;
-    providerDropdown_.onSelect = [&](int i, const std::string& id) { OnProviderChanged(i, id); };
-
-    // Model dropdown (populated after connect)
-    modelDropdown_.items = {};
-    modelDropdown_.onSelect = [&](int i, const std::string& id) { OnModelChanged(i, id); };
-
-    // Send button
-    sendButton_.text = "Send";
-    sendButton_.onClick = [&]() { SendMessage(); };
-
-    // API Key button
-    apiKeyButton_.text = "API Key...";
-    apiKeyButton_.onClick = [&]() { ShowApiKeyDialog(); };
-
-    // Message input
-    messageInput_.placeholder = "Type a message...";
-    messageInput_.onSubmit = [&](const std::string&) { SendMessage(); };
-
-    statusLabel_.text = "Disconnected";
-
-    // Window callbacks
+    // Window callbacks — ImGui handles input via its own GLFW callbacks
+    // We only need to forward scroll view events for the chat area
     float currentScale = window_.Scale();
     window_.OnResize([&, currentScale](int w, int h, float scale) mutable {
-        int viewH = h - (int)((barHeight_ + inputHeight_) * scale);
+        int barH = 90;
+        int viewH = h - barH;
         if (viewH < 1) viewH = 1;
         if (scale != currentScale) {
             currentScale = scale;
@@ -126,23 +124,8 @@ bool App::Init() {
         } else {
             scrollView_.OnResize(w, viewH);
         }
-        LayoutWidgets();
         MarkDirty();
     });
-    window_.OnMouseButton([&](float x, float y, bool pressed, bool shift) {
-        if (pressed) OnMouseDown(x, y, shift);
-        else OnMouseUp(x, y);
-    });
-    window_.OnMouseMove([&](float x, float y, bool left) { OnMouseMove(x, y, left); });
-    window_.OnScrollEvent([&](float delta) { OnScroll(delta); });
-    window_.OnKeyEvent([&](int key, int mods, bool pressed) {
-        if (pressed) OnKey(key, mods, pressed);
-    });
-    window_.OnCharEvent([&](uint32_t cp) {
-        OnChar(cp);
-    });
-
-    LayoutWidgets();
 
     // Auto-connect
     std::string savedKey = keychain::LoadApiKey();
@@ -158,149 +141,174 @@ bool App::Init() {
 }
 
 // ============================================================================
-// Layout
+// ImGui UI
 // ============================================================================
 
-void App::LayoutWidgets() {
-    // All coordinates in physical pixels (matching WaylandWindow and ScrollView)
-    float w = window_.Width();
-    float h = window_.Height();
-    float s = window_.Scale();
-    float bar = barHeight_ * s;
-    float inp = inputHeight_ * s;
+void App::DrawImGui() {
+    ImGui_ImplOpenGL3_NewFrame();
+    ImGui_ImplGlfw_NewFrame();
+    ImGui::NewFrame();
 
-    float barY = h - bar;
-    float inputY = barY - inp;
+    ImGuiIO& io = ImGui::GetIO();
+    float w = io.DisplaySize.x;
+    float h = io.DisplaySize.y;
+    float barH = 90;
 
-    messageInput_.bounds = {8, inputY + 5, w - 80, inp - 10};
-    sendButton_.bounds = {w - 68, inputY + 5, 60, inp - 10};
+    // Bottom panel
+    ImGui::SetNextWindowPos(ImVec2(0, h - barH));
+    ImGui::SetNextWindowSize(ImVec2(w, barH));
+    ImGui::Begin("##bottombar", nullptr,
+        ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize |
+        ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoScrollbar |
+        ImGuiWindowFlags_NoCollapse);
 
-    float bx = 8;
-    providerDropdown_.bounds = {bx, barY + 5, 170 * s, bar - 10}; bx += 178 * s;
-    modelDropdown_.bounds = {bx, barY + 5, 180 * s, bar - 10}; bx += 188 * s;
-    statusLabel_.bounds = {bx, barY + 5, 220 * s, bar - 10}; bx += 228 * s;
+    // Message input
+    float sendW = 70;
+    ImGui::PushItemWidth(w - sendW - 24);
+    bool submitted = ImGui::InputText("##msg", msgBuf_, sizeof(msgBuf_),
+        ImGuiInputTextFlags_EnterReturnsTrue);
+    ImGui::PopItemWidth();
+    ImGui::SameLine();
 
-    apiKeyButton_.bounds = {w - 110 * s, barY + 5, 100 * s, bar - 10};
-    apiKeyButton_.visible = (activeProvider_ == "zen");
+    bool canSend = !requestInProgress_ && connected_ && msgBuf_[0] != '\0';
+    if (!canSend) ImGui::BeginDisabled();
+    if (ImGui::Button("Send", ImVec2(sendW, 0)) || (submitted && canSend)) {
+        SendMessage();
+    }
+    if (!canSend) ImGui::EndDisabled();
+
+    // Provider selector
+    const char* providers[] = {"OpenCode Zen", "Claude (ACP)"};
+    if (ImGui::Combo("##provider", &providerIdx_, providers, 2)) {
+        activeProvider_ = (providerIdx_ == 0) ? "zen" : "claude";
+        if (providerIdx_ == 0) {
+            Connect(keychain::LoadApiKey());
+        } else {
+            statusText_ = "Claude (ACP)";
+            connected_ = true;
+            models_.clear();
+            models_.push_back({"claude-opus-4-6", "Claude Opus 4.6"});
+            models_.push_back({"claude-sonnet-4-6", "Claude Sonnet 4.6"});
+            models_.push_back({"claude-haiku-4-5", "Claude Haiku 4.5"});
+            modelIdx_ = 1;
+            activeModel_ = "claude-sonnet-4-6";
+        }
+    }
+
+    ImGui::SameLine();
+
+    // Model selector
+    if (!models_.empty()) {
+        // Build combo items
+        std::string preview = (modelIdx_ >= 0 && modelIdx_ < (int)models_.size())
+            ? models_[modelIdx_].name : "Select...";
+        if (ImGui::BeginCombo("##model", preview.c_str())) {
+            for (int i = 0; i < (int)models_.size(); i++) {
+                bool selected = (i == modelIdx_);
+                if (ImGui::Selectable(models_[i].name.c_str(), selected)) {
+                    modelIdx_ = i;
+                    activeModel_ = models_[i].id;
+                }
+                if (selected) ImGui::SetItemDefaultFocus();
+            }
+            ImGui::EndCombo();
+        }
+    }
+
+    ImGui::SameLine();
+    ImGui::TextDisabled("%s", statusText_.c_str());
+
+    // API Key button (only for Zen)
+    if (providerIdx_ == 0) {
+        ImGui::SameLine(w - 100);
+        if (ImGui::Button("API Key...")) {
+            AppendSystem("API key management not yet implemented in this build.");
+        }
+    }
+
+    ImGui::End();
+
+    // Forward mouse events to scroll view when not over ImGui
+    if (!io.WantCaptureMouse) {
+        float mx = io.MousePos.x * window_.Scale();
+        float my = io.MousePos.y * window_.Scale();
+
+        if (ImGui::IsMouseClicked(0)) {
+            scrollView_.OnMouseDown(mx, my, io.KeyShift);
+        }
+        if (ImGui::IsMouseReleased(0)) {
+            scrollView_.OnMouseUp(mx, my);
+        }
+        if (io.MouseDelta.x != 0 || io.MouseDelta.y != 0) {
+            scrollView_.OnMouseMove(mx, my, ImGui::IsMouseDown(0));
+        }
+        if (io.MouseWheel != 0) {
+            scrollView_.OnScroll(io.MouseWheel);
+        }
+    }
+
+    // Keyboard to scroll view when ImGui doesn't want it
+    if (!io.WantCaptureKeyboard) {
+        // Escape cancels request
+        if (ImGui::IsKeyPressed(ImGuiKey_Escape) && requestInProgress_) {
+            httpClient_.Abort();
+            requestInProgress_ = false;
+            if (!history_.empty() && history_.back().role == "user")
+                history_.push_back({"assistant", "[cancelled]", {}, {}});
+            scrollView_.StopAllAnimations();
+            AppendSystem("Cancelled");
+        }
+        // Ctrl+A / Ctrl+C
+        if (io.KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_A))
+            scrollView_.OnKey(0x61, 4);  // 'a' + ctrl
+        if (io.KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_C))
+            scrollView_.OnKey(0x63, 4);  // 'c' + ctrl
+    }
+
+    ImGui::Render();
+    ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
 }
 
 // ============================================================================
-// Paint
-// ============================================================================
-
-void App::PaintBottomBar() {
-    float s = window_.Scale();
-    float w = window_.Width();
-    float h = window_.Height();
-    auto& fm = scrollView_.Fonts();
-
-    Color barBg{0.10f, 0.10f, 0.11f};
-    Color inputAreaBg{0.13f, 0.13f, 0.14f};
-
-    float bar = barHeight_ * s;
-    float inp = inputHeight_ * s;
-    float barY = h - bar;
-    float inputY = barY - inp;
-
-    renderer_.DrawRect(0, inputY, w, inp, inputAreaBg);
-    renderer_.DrawRect(0, barY, w, bar, barBg);
-
-    // Scale transform: widgets use logical coords, renderer uses physical
-    // For now, widgets draw at 1:1 since renderer works in physical pixels
-    // and fonts are already scaled. Just offset coordinates.
-    // TODO: proper scaling
-    providerDropdown_.Paint(renderer_, fm);
-    modelDropdown_.Paint(renderer_, fm);
-    statusLabel_.Paint(renderer_, fm);
-    apiKeyButton_.Paint(renderer_, fm);
-    messageInput_.Paint(renderer_, fm, 0);  // TODO: pass real time for cursor blink
-    sendButton_.Paint(renderer_, fm);
-}
-
-// ============================================================================
-// Connection & Chat
+// Connection & Chat (same as glfw branch)
 // ============================================================================
 
 void App::Connect(const std::string& apiKey) {
     httpClient_.SetBaseUrl("https://opencode.ai/zen/v1");
     httpClient_.SetApiKey(apiKey);
     connected_ = true;
-    statusLabel_.text = apiKey.empty() ? "Zen (Anonymous)" : "Zen (API Key)";
-    MarkDirty();
+    statusText_ = apiKey.empty() ? "Zen (Anonymous)" : "Zen (API Key)";
 
-    httpClient_.FetchModels([this](std::vector<net::ModelInfo> models) {
-        events_.Push([this, models]() { OnModelsReceived(models); });
+    httpClient_.FetchModels([this](std::vector<net::ModelInfo> m) {
+        events_.Push([this, m]() { OnModelsReceived(m); });
     });
 }
 
-void App::OnModelsReceived(std::vector<net::ModelInfo> models) {
-    modelDropdown_.items.clear();
-    int defaultIdx = 0;
+void App::OnModelsReceived(std::vector<net::ModelInfo> fetchedModels) {
+    models_.clear();
+    modelIdx_ = 0;
 
-    for (size_t i = 0; i < models.size(); i++) {
-        bool isFree = models[i].allowAnonymous ||
-                      models[i].id.find("free") != std::string::npos ||
-                      models[i].id.find("big-pickle") != std::string::npos;
+    for (auto& m : fetchedModels) {
+        bool isFree = m.allowAnonymous || m.id.find("free") != std::string::npos
+                      || m.id.find("big-pickle") != std::string::npos;
         if (httpClient_.IsAnonymous() && !isFree) continue;
-        modelDropdown_.items.push_back({models[i].id, models[i].name});
-        if (models[i].id == "kimi-k2.5") defaultIdx = modelDropdown_.items.size() - 1;
+        models_.push_back(m);
+        if (m.id == "kimi-k2.5") modelIdx_ = models_.size() - 1;
     }
 
-    if (modelDropdown_.items.empty()) {
-        modelDropdown_.items = {
-            {"big-pickle", "Big Pickle"},
-            {"kimi-k2.5", "Kimi K2.5"},
-        };
+    if (models_.empty()) {
+        models_.push_back({"big-pickle", "Big Pickle"});
+        models_.push_back({"kimi-k2.5", "Kimi K2.5"});
     }
 
-    modelDropdown_.selectedIndex = defaultIdx;
-    activeModel_ = modelDropdown_.SelectedId();
+    activeModel_ = models_[modelIdx_].id;
     AppendSystem("Models loaded. Active: " + activeModel_);
-    MarkDirty();
-}
-
-void App::OnProviderChanged(int, const std::string& id) {
-    activeProvider_ = id;
-    apiKeyButton_.visible = (id == "zen");
-    AppendSystem("Switched to " + id);
-    LayoutWidgets();
-
-    if (id == "zen") {
-        std::string key = keychain::LoadApiKey();
-        Connect(key);
-    } else {
-        statusLabel_.text = "Claude (ACP)";
-        connected_ = true;
-        modelDropdown_.items = {
-            {"claude-opus-4-6", "Claude Opus 4.6"},
-            {"claude-sonnet-4-6", "Claude Sonnet 4.6"},
-            {"claude-haiku-4-5", "Claude Haiku 4.5"},
-        };
-        modelDropdown_.selectedIndex = 1;
-        activeModel_ = "claude-sonnet-4-6";
-    }
-    MarkDirty();
-}
-
-void App::OnModelChanged(int, const std::string& id) {
-    activeModel_ = id;
-    MarkDirty();
-}
-
-void App::ShowApiKeyDialog() {
-    // For now just toggle — full dialog needs text input popup
-    // TODO: modal dialog
-    AppendSystem("Use the message input to type your API key, then click API Key button again to save.");
 }
 
 void App::AppendSystem(const std::string& text) {
     scrollView_.AppendStream(BlockType::THINKING, text);
     MarkDirty();
 }
-
-// ============================================================================
-// Sending messages
-// ============================================================================
 
 std::string App::BuildRequestJson() {
     json j;
@@ -317,10 +325,9 @@ std::string App::BuildRequestJson() {
         } else if (m.role == "assistant" && !m.toolCalls.empty()) {
             msg["content"] = m.content.empty() ? json(nullptr) : json(m.content);
             json tcs = json::array();
-            for (auto& tc : m.toolCalls) {
+            for (auto& tc : m.toolCalls)
                 tcs.push_back({{"id", tc["id"]}, {"type", "function"},
                                {"function", {{"name", tc["name"]}, {"arguments", tc["arguments"]}}}});
-            }
             msg["tool_calls"] = tcs;
         } else {
             msg["content"] = m.content;
@@ -328,26 +335,25 @@ std::string App::BuildRequestJson() {
         msgs.push_back(msg);
     }
     j["messages"] = msgs;
-
-    // Tools
     j["tools"] = json::parse(ToolDefsJson());
     j["tool_choice"] = "auto";
-
     return j.dump();
 }
 
 void App::SendMessage() {
-    std::string msg = messageInput_.text;
+    std::string msg = msgBuf_;
     if (msg.empty() || !connected_ || requestInProgress_) return;
 
-    // Show in UI
     scrollView_.AppendStream(BlockType::USER_PROMPT, msg);
-    messageInput_.Clear();
+    msgBuf_[0] = '\0';
 
     history_.push_back({"user", msg, {}, {}});
     requestInProgress_ = true;
-    sendButton_.enabled = false;
     toolRound_ = 0;
+    responseBuffer_.clear();
+    receivingThinking_ = false;
+    lastMarkdownLen_ = 0;
+    lastMarkdownTime_ = GetMonotonicTime();
     MarkDirty();
 
     DoSendToProvider();
@@ -355,48 +361,15 @@ void App::SendMessage() {
 
 void App::DoSendToProvider() {
     if (activeProvider_ == "claude") {
-        // Claude ACP: spawn claude binary
-        // Build prompt with history
-        std::string prompt;
-        if (history_.size() > 1) {
-            prompt = "<conversation_history>\n";
-            for (size_t i = 0; i < history_.size() - 1; i++) {
-                prompt += "<" + history_[i].role + ">\n" + history_[i].content + "\n</" + history_[i].role + ">\n";
-            }
-            prompt += "</conversation_history>\n\n";
-        }
-        if (!history_.empty() && history_.back().role == "user")
-            prompt += history_.back().content;
-
-        std::string cmd = "claude --print --verbose --output-format stream-json --dangerously-skip-permissions --model " + activeModel_;
-
-        std::thread([this, cmd, prompt]() {
-            FILE* pipe = popen(cmd.c_str(), "w");
-            // TODO: proper ACP streaming. For now, use simple print mode
-            // This is a placeholder — real ACP needs process management
-            if (pipe) {
-                fwrite(prompt.c_str(), 1, prompt.size(), pipe);
-                pclose(pipe);
-            }
-            events_.Push([this]() {
-                requestInProgress_ = false;
-                sendButton_.enabled = true;
-                MarkDirty();
-            });
-        }).detach();
+        // TODO: proper ACP
+        AppendSystem("Claude ACP not yet implemented in this build.");
+        requestInProgress_ = false;
         return;
     }
 
-    // Zen provider: HTTP streaming
     std::string requestJson = BuildRequestJson();
 
-    responseBuffer_.clear();
-    receivingThinking_ = false;
-    lastMarkdownLen_ = 0;
-    lastMarkdownTime_ = GetMonotonicTime();
-
     httpClient_.SendStreaming(requestJson,
-        // onChunk (bg thread)
         [this](const std::string& chunk, bool isThinking) {
             events_.Push([this, chunk, isThinking]() {
                 if (isThinking) {
@@ -408,7 +381,6 @@ void App::DoSendToProvider() {
                         scrollView_.ContinueStream(chunk);
                     }
                 } else {
-                    // Content — finalize thinking if transitioning
                     if (receivingThinking_) {
                         receivingThinking_ = false;
                         scrollView_.StopThinking(scrollView_.BlockCount() - 1);
@@ -416,15 +388,10 @@ void App::DoSendToProvider() {
                         responseBuffer_.clear();
                         lastMarkdownLen_ = 0;
                     }
-
-                    // Set start block on first content chunk
-                    if (responseBuffer_.empty()) {
+                    if (responseBuffer_.empty())
                         responseStartBlock_ = scrollView_.BlockCount();
-                    }
-
                     responseBuffer_ += chunk;
 
-                    // Progressive markdown: re-render every 500ms if enough new text
                     double now = GetMonotonicTime();
                     if (now - lastMarkdownTime_ > 0.5 &&
                         responseBuffer_.size() > lastMarkdownLen_ + 20) {
@@ -436,7 +403,6 @@ void App::DoSendToProvider() {
                 MarkDirty();
             });
         },
-        // onComplete (bg thread)
         [this](bool ok, const std::string& content, const std::string& error,
                const std::vector<json>& toolCalls, int, int) {
             events_.Push([this, ok, content, error, toolCalls]() {
@@ -445,32 +411,24 @@ void App::DoSendToProvider() {
                         history_.pop_back();
                     AppendSystem("Error: " + error);
                     requestInProgress_ = false;
-                    sendButton_.enabled = true;
                     MarkDirty();
                     return;
                 }
-
                 if (!toolCalls.empty() && toolRound_ < 10) {
                     ExecuteToolCalls(toolCalls, content);
                     return;
                 }
-
-                // Finalize thinking
                 if (receivingThinking_) {
                     receivingThinking_ = false;
                     scrollView_.StopThinking(scrollView_.BlockCount() - 1);
                 }
-
-                // Final markdown render (complete buffer, no truncation)
                 if (!responseBuffer_.empty()) {
                     RenderMarkdownToBlocks(true);
                     responseBuffer_.clear();
                 }
-
                 if (!content.empty())
                     history_.push_back({"assistant", content, {}, {}});
                 requestInProgress_ = false;
-                sendButton_.enabled = true;
                 scrollView_.StopAllAnimations();
                 MarkDirty();
             });
@@ -480,26 +438,15 @@ void App::DoSendToProvider() {
 
 void App::RenderMarkdownToBlocks(bool isFinal) {
     if (responseBuffer_.empty()) return;
-
-    // During streaming: only render up to the last paragraph boundary
-    // to avoid cutting off incomplete markdown constructs (headings, fences)
     std::string toRender = responseBuffer_;
     if (!isFinal) {
         size_t lastBoundary = toRender.rfind("\n\n");
-        if (lastBoundary == std::string::npos || lastBoundary < 10) {
-            // Not enough complete paragraphs yet — skip this render
-            return;
-        }
+        if (lastBoundary == std::string::npos || lastBoundary < 10) return;
         toRender = toRender.substr(0, lastBoundary);
     }
-
-    // Remove old content blocks from responseStartBlock_ onwards
     scrollView_.RemoveBlocksFrom(responseStartBlock_);
-
-    // Render markdown
     MarkdownRenderer mdRenderer(14);
     auto mdBlocks = mdRenderer.Render(toRender, true);
-
     scrollView_.BeginBatch();
     scrollView_.AddBlocks(std::move(mdBlocks));
     scrollView_.EndBatch();
@@ -507,11 +454,8 @@ void App::RenderMarkdownToBlocks(bool isFinal) {
 
 void App::ExecuteToolCalls(const std::vector<json>& toolCalls, const std::string& content) {
     toolRound_++;
-
-    // Add assistant message with tool calls
     history_.push_back({"assistant", content, toolCalls, {}});
 
-    // Show tool info in thinking block
     std::string info;
     for (auto& tc : toolCalls) {
         info += "Tool: " + tc.value("name", "") + "\n";
@@ -524,128 +468,27 @@ void App::ExecuteToolCalls(const std::vector<json>& toolCalls, const std::string
     scrollView_.StartThinking(scrollView_.BlockCount() - 1);
     MarkDirty();
 
-    // Execute in background
     auto tcCopy = toolCalls;
     std::thread([this, tcCopy]() {
         struct Result { std::string id, output; };
         std::vector<Result> results;
-        for (auto& tc : tcCopy) {
-            results.push_back({
-                tc.value("id", ""),
-                ExecuteTool(tc.value("name", ""), tc.value("arguments", "{}"))
-            });
-        }
+        for (auto& tc : tcCopy)
+            results.push_back({tc.value("id", ""), ExecuteTool(tc.value("name", ""), tc.value("arguments", "{}"))});
 
         events_.Push([this, results, tcCopy]() {
-            // Show results
             std::string resultText;
-            for (size_t i = 0; i < results.size(); i++) {
+            for (size_t i = 0; i < results.size(); i++)
                 resultText += "\n" + tcCopy[i].value("name", "") + ":\n" + StripAnsi(results[i].output) + "\n";
-            }
             scrollView_.ContinueStream(resultText);
 
-            // Add to history
-            for (size_t i = 0; i < results.size(); i++) {
+            for (size_t i = 0; i < results.size(); i++)
                 history_.push_back({"tool", results[i].output, {}, results[i].id});
-            }
 
             scrollView_.StopThinking(scrollView_.BlockCount() - 1);
-            DoSendToProvider();  // Continue the loop
+            DoSendToProvider();
             MarkDirty();
         });
     }).detach();
-}
-
-// ============================================================================
-// Input handling
-// ============================================================================
-
-void App::OnMouseDown(float x, float y, bool shift) {
-    // All coords are physical pixels from WaylandWindow
-
-    // Check dropdowns first (they have popups)
-    if (providerDropdown_.OnMouseDown(x, y)) { MarkDirty(); return; }
-    if (modelDropdown_.OnMouseDown(x, y)) { MarkDirty(); return; }
-
-    // Close any open dropdowns
-    providerDropdown_.Close();
-    modelDropdown_.Close();
-
-    if (sendButton_.OnMouseDown(x, y)) { MarkDirty(); return; }
-    if (apiKeyButton_.OnMouseDown(x, y)) { MarkDirty(); return; }
-    if (messageInput_.OnMouseDown(x, y)) { MarkDirty(); return; }
-
-    // Scroll view
-    float s = window_.Scale();
-    float viewH = window_.Height() - (barHeight_ + inputHeight_) * s;
-    if (y < viewH) {
-        scrollView_.OnMouseDown(x, y, shift);
-        messageInput_.focused = false;
-        MarkDirty();
-    }
-}
-
-void App::OnMouseUp(float x, float y) {
-    sendButton_.OnMouseUp(x, y);
-    apiKeyButton_.OnMouseUp(x, y);
-    scrollView_.OnMouseUp(x, y);
-    MarkDirty();
-}
-
-void App::OnMouseMove(float x, float y, bool leftDown) {
-    sendButton_.OnMouseMove(x, y);
-    apiKeyButton_.OnMouseMove(x, y);
-    providerDropdown_.OnMouseMove(x, y);
-    modelDropdown_.OnMouseMove(x, y);
-
-    float s = window_.Scale();
-    float viewH = window_.Height() - (barHeight_ + inputHeight_) * s;
-    if (y < viewH) {
-        scrollView_.OnMouseMove(x, y, leftDown);
-    }
-    MarkDirty();
-}
-
-void App::OnScroll(float delta) {
-    scrollView_.OnScroll(delta);
-    MarkDirty();
-}
-
-void App::OnKey(int key, int mods, bool pressed) {
-    if (!pressed) return;
-
-    // Escape cancels request
-    if (key == XKB_KEY_Escape && requestInProgress_) {
-        httpClient_.Abort();
-        requestInProgress_ = false;
-        sendButton_.enabled = true;
-        if (!history_.empty() && history_.back().role == "user") {
-            // Keep message but mark as cancelled
-            history_.push_back({"assistant", "[cancelled]", {}, {}});
-        }
-        scrollView_.StopAllAnimations();
-        AppendSystem("Cancelled");
-        MarkDirty();
-        return;
-    }
-
-    // Forward to text input if focused
-    if (messageInput_.focused) {
-        messageInput_.OnKey(key, mods);
-        MarkDirty();
-        return;
-    }
-
-    // Scroll view keyboard
-    scrollView_.OnKey(key, mods);
-    MarkDirty();
-}
-
-void App::OnChar(uint32_t codepoint) {
-    if (messageInput_.focused) {
-        messageInput_.OnChar(codepoint);
-        MarkDirty();
-    }
 }
 
 // ============================================================================
@@ -653,65 +496,34 @@ void App::OnChar(uint32_t codepoint) {
 // ============================================================================
 
 void App::Run() {
-    double lastTime = GetMonotonicTime();
-
     while (!window_.ShouldClose()) {
-        // Process events
-        if (dirty_ || !events_.Empty()) {
-            window_.PollEvents();
-        } else {
-            window_.WaitEvents();
-        }
-
-        // Drain bg thread events
+        window_.PollEvents();
         events_.Drain();
 
-        double now = GetMonotonicTime();
-        float dt = (float)(now - lastTime);
-        lastTime = now;
+        scrollView_.Update(0.016f);
 
-        // Update
-        messageInput_.Update(dt);
-        scrollView_.Update(dt);
+        // GL render
+        int fbW = window_.Width(), fbH = window_.Height();
+        glViewport(0, 0, fbW, fbH);
+        glClearColor(0.12f, 0.12f, 0.13f, 1.0f);
+        glClear(GL_COLOR_BUFFER_BIT);
 
-        if (!dirty_ && !scrollView_.NeedsRedraw()) continue;
-        dirty_ = false;
-        scrollView_.ClearDirty();
-
-        // Render
-        struct timespec t0, t1;
-        clock_gettime(CLOCK_MONOTONIC, &t0);
-
-        renderer_.BeginFrame(window_.Width(), window_.Height(), scrollView_.Fonts());
-
-        // Scroll view (top portion)
+        // Render scroll view via our GL renderer
+        int barH = 90;
+        int viewH = fbH - barH;
+        glViewport(0, barH, fbW, viewH);
+        renderer_.BeginFrame(fbW, viewH, scrollView_.Fonts());
         scrollView_.Paint(renderer_);
-
-        // Bottom bar + input
-        PaintBottomBar();
-
         renderer_.EndFrame();
-        window_.SwapBuffers();
 
-        // Perf tracking
-        clock_gettime(CLOCK_MONOTONIC, &t1);
-        static int frameCount = 0;
-        static long totalUs = 0;
-        static double perfStart = now;
-        long frameUs = (t1.tv_sec - t0.tv_sec) * 1000000L + (t1.tv_nsec - t0.tv_nsec) / 1000L;
-        totalUs += frameUs;
-        frameCount++;
-        if (now - perfStart > 2.0 && frameCount > 0) {
-            FILE* pf = fopen("/tmp/fcn-native-perf.log", "a");
-            if (pf) {
-                fprintf(pf, "PERF: %d frames in %.1fs (%.0f/s) | avg %.0fus (%.2fms)\n",
-                        frameCount, now - perfStart,
-                        frameCount / (now - perfStart),
-                        (double)totalUs / frameCount,
-                        (double)totalUs / frameCount / 1000.0);
-                fclose(pf);
-            }
-            frameCount = 0; totalUs = 0; perfStart = now;
-        }
+        // Render ImGui (bottom bar)
+        glViewport(0, 0, fbW, fbH);
+        DrawImGui();
+
+        window_.SwapBuffers();
     }
+
+    ImGui_ImplOpenGL3_Shutdown();
+    ImGui_ImplGlfw_Shutdown();
+    ImGui::DestroyContext();
 }

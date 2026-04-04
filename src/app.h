@@ -1,7 +1,7 @@
 #pragma once
 #include "glfw_window.h"
 #include "scroll_view.h"
-#include "widgets.h"
+#include "gl_renderer.h"
 #include "curl_http.h"
 #include "keychain.h"
 #include "markdown_renderer.h"
@@ -14,7 +14,6 @@
 
 using json = nlohmann::json;
 
-// Thread-safe event queue for bg→main thread communication
 class EventQueue {
 public:
     void Push(std::function<void()> fn) {
@@ -52,17 +51,9 @@ private:
     GLRenderer renderer_;
     EventQueue events_;
 
-    // Widgets
-    Dropdown providerDropdown_;
-    Dropdown modelDropdown_;
-    TextInput messageInput_;
-    Button sendButton_;
-    Button apiKeyButton_;
-    Label statusLabel_;
-
     // Backend state
     net::CurlHttpClient httpClient_;
-    std::string activeProvider_ = "zen";  // "zen" or "claude"
+    std::string activeProvider_ = "zen";
     std::string activeModel_;
     std::vector<ChatMessage> history_;
     bool connected_ = false;
@@ -70,40 +61,33 @@ private:
     int toolRound_ = 0;
 
     // Streaming state
-    std::string responseBuffer_;      // Accumulated markdown text
+    std::string responseBuffer_;
     bool receivingThinking_ = false;
-    size_t responseStartBlock_ = 0;   // Where content blocks start
-    size_t lastMarkdownLen_ = 0;      // Buffer length at last markdown render
-    double lastMarkdownTime_ = 0;     // Time of last markdown render
+    size_t responseStartBlock_ = 0;
+    size_t lastMarkdownLen_ = 0;
+    double lastMarkdownTime_ = 0;
 
-    // Layout
-    float barHeight_ = 40;
-    float inputHeight_ = 50;
-    void LayoutWidgets();
-    void PaintBottomBar();
+    // ImGui state
+    char msgBuf_[4096] = {};
+    int providerIdx_ = 0;
+    int modelIdx_ = 0;
+    std::vector<net::ModelInfo> models_;
+    std::string statusText_ = "Disconnected";
+
+    // ImGui UI
+    void DrawImGui();
 
     // Actions
     void Connect(const std::string& apiKey = "");
     void SendMessage();
     void DoSendToProvider();
     void OnModelsReceived(std::vector<net::ModelInfo> models);
-    void OnProviderChanged(int idx, const std::string& id);
-    void OnModelChanged(int idx, const std::string& id);
-    void ShowApiKeyDialog();
     void AppendSystem(const std::string& text);
 
     // Tool execution
     void ExecuteToolCalls(const std::vector<json>& toolCalls, const std::string& content);
     void RenderMarkdownToBlocks(bool isFinal = false);
     std::string BuildRequestJson();
-
-    // Input handling
-    void OnMouseDown(float x, float y, bool shift);
-    void OnMouseUp(float x, float y);
-    void OnMouseMove(float x, float y, bool leftDown);
-    void OnScroll(float delta);
-    void OnKey(int key, int mods, bool pressed);
-    void OnChar(uint32_t codepoint);
 
     bool dirty_ = true;
     void MarkDirty() { dirty_ = true; }

@@ -25,6 +25,31 @@ FetchContent_Declare(json
 )
 FetchContent_MakeAvailable(json)
 
+# --- Dear ImGui ---
+FetchContent_Declare(imgui
+    GIT_REPOSITORY https://github.com/ocornut/imgui.git
+    GIT_TAG v1.91.8
+    GIT_SHALLOW ON
+)
+FetchContent_MakeAvailable(imgui)
+
+# Build ImGui as a library
+add_library(imgui_lib STATIC
+    ${imgui_SOURCE_DIR}/imgui.cpp
+    ${imgui_SOURCE_DIR}/imgui_draw.cpp
+    ${imgui_SOURCE_DIR}/imgui_tables.cpp
+    ${imgui_SOURCE_DIR}/imgui_widgets.cpp
+    ${imgui_SOURCE_DIR}/imgui_demo.cpp
+    ${imgui_SOURCE_DIR}/backends/imgui_impl_glfw.cpp
+    ${imgui_SOURCE_DIR}/backends/imgui_impl_opengl3.cpp
+)
+target_include_directories(imgui_lib PUBLIC
+    ${imgui_SOURCE_DIR}
+    ${imgui_SOURCE_DIR}/backends
+)
+# ImGui needs GL function declarations
+target_compile_definitions(imgui_lib PUBLIC GL_GLEXT_PROTOTYPES)
+
 # --- System libraries ---
 find_package(PkgConfig REQUIRED)
 find_package(OpenGL REQUIRED)
@@ -35,6 +60,8 @@ pkg_check_modules(FONTCONFIG REQUIRED IMPORTED_TARGET fontconfig)
 pkg_check_modules(LIBCURL REQUIRED IMPORTED_TARGET libcurl)
 pkg_check_modules(LIBSECRET REQUIRED IMPORTED_TARGET libsecret-1)
 
+target_link_libraries(imgui_lib PUBLIC PkgConfig::GLFW OpenGL::GL)
+
 # --- Executable ---
 add_executable(fastcode-native
     src/main.cpp
@@ -44,7 +71,6 @@ add_executable(fastcode-native
     src/font.cpp
     src/scroll_view.cpp
     src/markdown_renderer.cpp
-    src/widgets.cpp
     src/curl_http.cpp
     src/keychain.cpp
     src/fake_data.cpp
@@ -57,6 +83,7 @@ target_include_directories(fastcode-native PRIVATE
 )
 
 target_link_libraries(fastcode-native PRIVATE
+    imgui_lib
     PkgConfig::GLFW
     OpenGL::GL
     PkgConfig::FREETYPE
