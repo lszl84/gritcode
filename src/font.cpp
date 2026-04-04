@@ -229,6 +229,7 @@ const GlyphInfo& FontManager::EnsureGlyph(uint32_t glyphId, int faceIdx) const {
     }
 
     auto [ins, _] = cache_.emplace(key, gi);
+    atlasGen_++;
     return ins->second;
 }
 

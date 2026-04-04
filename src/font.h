@@ -50,6 +50,8 @@ public:
 
     const uint8_t* AtlasData() const { return atlasData_.data(); }
     int AtlasWidth() const { return atlasW_; }
+    int AtlasHeight() const { return atlasH_; }
+    size_t AtlasGeneration() const { return atlasGen_; }
 
     int FaceIndex(FontStyle style, bool rtl = false) const;
 
@@ -68,6 +70,7 @@ private:
     mutable std::vector<uint8_t> atlasData_;
     mutable int curX_ = 1, curY_ = 1, rowH_ = 0;
     mutable std::unordered_map<uint64_t, GlyphInfo> cache_;
+    mutable size_t atlasGen_ = 0;
 
     uint64_t Key(uint32_t glyph, int face) const { return ((uint64_t)face << 32) | glyph; }
 

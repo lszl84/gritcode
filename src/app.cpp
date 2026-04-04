@@ -87,6 +87,11 @@ bool App::Init() {
     scrollView_.SetAutoScroll(true);
     scrollView_.SetClipboardFunc([&](const std::string& t) { window_.SetClipboard(t); });
 
+    if (!renderer_.Init()) {
+        fprintf(stderr, "GL renderer init failed\n");
+        return false;
+    }
+
     // Provider dropdown
     providerDropdown_.items = {{"zen", "OpenCode Zen"}, {"claude", "Claude (ACP)"}};
     providerDropdown_.selectedIndex = 0;
@@ -674,17 +679,10 @@ void App::Run() {
         scrollView_.ClearDirty();
 
         // Render
-        uint32_t* pixels = window_.BeginFrame();
-        if (!pixels) continue;
-
         struct timespec t0, t1;
         clock_gettime(CLOCK_MONOTONIC, &t0);
 
-        renderer_.BeginFrame(pixels, window_.Width(), window_.Height(), scrollView_.Fonts());
-
-        // Background
-        Color bg{0.12f, 0.12f, 0.13f};
-        renderer_.DrawRect(0, 0, window_.Width(), window_.Height(), bg);
+        renderer_.BeginFrame(window_.Width(), window_.Height(), scrollView_.Fonts());
 
         // Scroll view (top portion)
         scrollView_.Paint(renderer_);
@@ -692,7 +690,8 @@ void App::Run() {
         // Bottom bar + input
         PaintBottomBar();
 
-        window_.EndFrame();
+        renderer_.EndFrame();
+        window_.SwapBuffers();
 
         // Perf tracking
         clock_gettime(CLOCK_MONOTONIC, &t1);

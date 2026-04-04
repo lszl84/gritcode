@@ -7,7 +7,7 @@
 // Label
 // ============================================================================
 
-void Label::Paint(Renderer& r, FontManager& fm) const {
+void Label::Paint(GLRenderer& r, FontManager& fm) const {
     if (text.empty()) return;
     auto run = fm.Shape(text, style);
     float y = bounds.y + (bounds.h - fm.LineHeight(style)) / 2;
@@ -18,7 +18,7 @@ void Label::Paint(Renderer& r, FontManager& fm) const {
 // Button
 // ============================================================================
 
-void Button::Paint(Renderer& r, FontManager& fm) const {
+void Button::Paint(GLRenderer& r, FontManager& fm) const {
     if (!visible) return;
     Color bg = !enabled ? bgColor : pressed ? pressColor : hovered ? hoverColor : bgColor;
     r.DrawRect(bounds.x, bounds.y, bounds.w, bounds.h, bg);
@@ -84,7 +84,7 @@ std::string TextInput::DisplayText() const {
     return text;
 }
 
-void TextInput::Paint(Renderer& r, FontManager& fm, float time) const {
+void TextInput::Paint(GLRenderer& r, FontManager& fm, float time) const {
     // Background
     r.DrawRect(bounds.x, bounds.y, bounds.w, bounds.h, bgColor);
 
@@ -233,7 +233,7 @@ WidgetRect Dropdown::PopupRect() const {
     return {bounds.x, bounds.y - PopupHeight(), bounds.w, PopupHeight()};
 }
 
-void Dropdown::Paint(Renderer& r, FontManager& fm) const {
+void Dropdown::Paint(GLRenderer& r, FontManager& fm) const {
     if (!enabled) return;
 
     // Main button

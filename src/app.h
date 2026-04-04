@@ -1,5 +1,5 @@
 #pragma once
-#include "wayland_window.h"
+#include "glfw_window.h"
 #include "scroll_view.h"
 #include "widgets.h"
 #include "curl_http.h"
@@ -47,9 +47,9 @@ public:
     void Run();
 
 private:
-    WaylandWindow window_;
+    GlfwWindow window_;
     ScrollView scrollView_;
-    Renderer renderer_;
+    GLRenderer renderer_;
     EventQueue events_;
 
     // Widgets

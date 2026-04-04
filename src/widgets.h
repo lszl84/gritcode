@@ -1,7 +1,7 @@
 #pragma once
 #include "types.h"
 #include "font.h"
-#include "renderer.h"
+#include "gl_renderer.h"
 #include <string>
 #include <vector>
 #include <functional>
@@ -25,7 +25,7 @@ public:
     Color color{0.6f, 0.6f, 0.6f};
     FontStyle style = FontStyle::Regular;
 
-    void Paint(Renderer& r, FontManager& fm) const;
+    void Paint(GLRenderer& r, FontManager& fm) const;
 };
 
 // ============================================================================
@@ -47,7 +47,7 @@ public:
     bool visible = true;
     std::function<void()> onClick;
 
-    void Paint(Renderer& r, FontManager& fm) const;
+    void Paint(GLRenderer& r, FontManager& fm) const;
     bool OnMouseDown(float x, float y);
     bool OnMouseUp(float x, float y);
     void OnMouseMove(float x, float y);
@@ -75,7 +75,7 @@ public:
 
     std::function<void(const std::string&)> onSubmit;  // Enter pressed
 
-    void Paint(Renderer& r, FontManager& fm, float time) const;
+    void Paint(GLRenderer& r, FontManager& fm, float time) const;
     bool OnMouseDown(float x, float y);
     void OnChar(uint32_t codepoint);
     void OnKey(int key, int mods);  // backspace, delete, enter, arrows
@@ -113,7 +113,7 @@ public:
 
     std::function<void(int index, const std::string& id)> onSelect;
 
-    void Paint(Renderer& r, FontManager& fm) const;
+    void Paint(GLRenderer& r, FontManager& fm) const;
     bool OnMouseDown(float x, float y);
     bool OnMouseUp(float x, float y);
     void OnMouseMove(float x, float y);

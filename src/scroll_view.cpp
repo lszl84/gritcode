@@ -918,7 +918,7 @@ void ScrollView::OnKey(int key, int mods) {
 
 // --- Paint ---
 
-void ScrollView::Paint(Renderer& renderer) {
+void ScrollView::Paint(GLRenderer& renderer) {
     size_t blockCount = blocks_.size();
     float clientW = (float)windowW_;
     float clientH = (float)windowH_;

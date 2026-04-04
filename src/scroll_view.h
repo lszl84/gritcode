@@ -1,7 +1,7 @@
 #pragma once
 #include "types.h"
 #include "font.h"
-#include "renderer.h"
+#include "gl_renderer.h"
 #include <vector>
 #include <memory>
 #include <set>
@@ -35,7 +35,7 @@ public:
     void OnKey(int key, int mods);
     void OnResize(int w, int h);
 
-    void Paint(Renderer& renderer);
+    void Paint(GLRenderer& renderer);
     bool NeedsRedraw() const { return needsRedraw_; }
     void MarkDirty() { needsRedraw_ = true; }
     void ClearDirty() { needsRedraw_ = false; }
