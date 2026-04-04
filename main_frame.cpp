@@ -329,11 +329,12 @@ void MainFrame::OnZenMessageReceived(wxCommandEvent& event) {
   m_chunkFlushTimer.Stop();
   m_markdownRenderTimer.Stop();
   
-  // Finalize thinking state
+  // Finalize thinking state and stop any lingering loading animations
   if (m_isReceivingThinking) {
     m_chatDisplay->StopThinking(m_thinkingBlockIndex);
     m_isReceivingThinking = false;
   }
+  m_chatDisplay->StopAllAnimations();
 
   // Final markdown render of the complete response
   if (m_collectingAiResponse && !m_aiResponseBuffer.IsEmpty()) {

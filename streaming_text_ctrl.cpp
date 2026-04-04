@@ -1873,6 +1873,14 @@ void StreamingTextCtrl::StopThinking(size_t blockIndex) {
     Refresh();
 }
 
+void StreamingTextCtrl::StopAllAnimations() {
+    for (auto idx : animatedBlocks) {
+        blockManager.SetBlockLoading(idx, false);
+    }
+    animatedBlocks.clear();
+    animator->Stop();
+}
+
 int StreamingTextCtrl::GetLoadingFrame() const {
     return animator ? animator->GetFrame() : 0;
 }

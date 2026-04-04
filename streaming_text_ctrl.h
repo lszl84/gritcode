@@ -105,6 +105,7 @@ public:
 
     void StartThinking(size_t blockIndex);
     void StopThinking(size_t blockIndex);
+    void StopAllAnimations();
     bool HasAnimatedBlocks() const { return !animatedBlocks.empty(); }
 
     void ToggleBlockCollapse(size_t blockIndex);
