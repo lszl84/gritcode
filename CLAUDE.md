@@ -14,13 +14,13 @@ MY_WS=$(hyprctl clients -j | python3 -c "import sys,json;[print(c['workspace']['
 printf '\033]2;Claude Code\007' > "$_PTY"
 ```
 
-Then launch:
+Then launch for visual testing (standalone, on your workspace):
 
 ```bash
-hyprctl dispatch exec "[workspace $MY_WS silent]" ./build/fcn
+hyprctl dispatch exec "[workspace $MY_WS silent]" $PWD/build/fcn
 ```
 
-For MCP stdin-pipe tests, the window still opens — use the same workspace rule to keep it off the user's screen.
+For MCP stdin-pipe tests, use `GDK_BACKEND=x11 xvfb-run` to avoid any visible window, or simply run headless and check JSON output only (no screenshots needed for functional tests).
 
 ## Build
 
