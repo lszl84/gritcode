@@ -10,21 +10,18 @@ static const SecretSchema SCHEMA = {
     SECRET_SCHEMA_DONT_MATCH_NAME,
     {
         {"service", SECRET_SCHEMA_ATTRIBUTE_STRING},
-        {"account", SECRET_SCHEMA_ATTRIBUTE_STRING},
         {NULL, SECRET_SCHEMA_ATTRIBUTE_STRING}
     },
     0, NULL, NULL, NULL, NULL, NULL, NULL, NULL
 };
 
 static const char* SERVICE = "FastCodeNative/OpenCodeZen";
-static const char* ACCOUNT = "apikey";
 
 std::string LoadApiKey() {
     GError* error = nullptr;
     gchar* password = secret_password_lookup_sync(
         &SCHEMA, nullptr, &error,
         "service", SERVICE,
-        "account", ACCOUNT,
         NULL);
 
     if (error) {
@@ -49,7 +46,6 @@ bool SaveApiKey(const std::string& key) {
         key.c_str(),
         nullptr, &error,
         "service", SERVICE,
-        "account", ACCOUNT,
         NULL);
 
     if (error) {
@@ -64,7 +60,6 @@ bool ClearApiKey() {
     gboolean ok = secret_password_clear_sync(
         &SCHEMA, nullptr, &error,
         "service", SERVICE,
-        "account", ACCOUNT,
         NULL);
 
     if (error) {
