@@ -656,11 +656,11 @@ void App::Run() {
     double lastTime = GetMonotonicTime();
 
     while (!window_.ShouldClose()) {
-        // Process events
-        if (dirty_ || !events_.Empty()) {
-            window_.PollEvents();
-        } else {
+        // Block until something happens
+        if (!dirty_ && events_.Empty() && !scrollView_.NeedsRedraw()) {
             window_.WaitEvents();
+        } else {
+            window_.PollEvents();
         }
 
         // Drain bg thread events
@@ -670,13 +670,15 @@ void App::Run() {
         float dt = (float)(now - lastTime);
         lastTime = now;
 
-        // Update
         messageInput_.Update(dt);
         scrollView_.Update(dt);
 
         if (!dirty_ && !scrollView_.NeedsRedraw()) continue;
         dirty_ = false;
         scrollView_.ClearDirty();
+
+        // Drain again in case events arrived during update
+        events_.Drain();
 
         // Render
         struct timespec t0, t1;
@@ -692,6 +694,9 @@ void App::Run() {
 
         renderer_.EndFrame();
         window_.SwapBuffers();
+
+        // If events arrived during render, mark dirty for another frame
+        if (!events_.Empty()) dirty_ = true;
 
         // Perf tracking
         clock_gettime(CLOCK_MONOTONIC, &t1);
