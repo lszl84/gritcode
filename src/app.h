@@ -94,7 +94,7 @@ private:
 
     // Tool execution
     void ExecuteToolCalls(const std::vector<json>& toolCalls, const std::string& content);
-    void RenderMarkdownToBlocks();
+    void RenderMarkdownToBlocks(bool isFinal = false);
     std::string BuildRequestJson();
 
     // Input handling

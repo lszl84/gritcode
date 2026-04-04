@@ -456,9 +456,9 @@ void App::DoSendToProvider() {
                     scrollView_.StopThinking(scrollView_.BlockCount() - 1);
                 }
 
-                // Final markdown render
+                // Final markdown render (complete buffer, no truncation)
                 if (!responseBuffer_.empty()) {
-                    RenderMarkdownToBlocks();
+                    RenderMarkdownToBlocks(true);
                     responseBuffer_.clear();
                 }
 
@@ -473,15 +473,27 @@ void App::DoSendToProvider() {
     );
 }
 
-void App::RenderMarkdownToBlocks() {
+void App::RenderMarkdownToBlocks(bool isFinal) {
     if (responseBuffer_.empty()) return;
+
+    // During streaming: only render up to the last paragraph boundary
+    // to avoid cutting off incomplete markdown constructs (headings, fences)
+    std::string toRender = responseBuffer_;
+    if (!isFinal) {
+        size_t lastBoundary = toRender.rfind("\n\n");
+        if (lastBoundary == std::string::npos || lastBoundary < 10) {
+            // Not enough complete paragraphs yet — skip this render
+            return;
+        }
+        toRender = toRender.substr(0, lastBoundary);
+    }
 
     // Remove old content blocks from responseStartBlock_ onwards
     scrollView_.RemoveBlocksFrom(responseStartBlock_);
 
     // Render markdown
     MarkdownRenderer mdRenderer(14);
-    auto mdBlocks = mdRenderer.Render(responseBuffer_, true);
+    auto mdBlocks = mdRenderer.Render(toRender, true);
 
     scrollView_.BeginBatch();
     scrollView_.AddBlocks(std::move(mdBlocks));
