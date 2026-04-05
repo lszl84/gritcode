@@ -85,7 +85,11 @@ bool App::Init() {
         return false;
 
     scrollView_.SetAutoScroll(true);
-    scrollView_.SetClipboardFunc([&](const std::string& t) { window_.SetClipboard(t); });
+    scrollView_.SetClipboardFunc([&](const std::string& t) {
+        // Use wl-copy for cross-app clipboard on Wayland
+        FILE* p = popen("wl-copy 2>/dev/null", "w");
+        if (p) { fwrite(t.c_str(), 1, t.size(), p); pclose(p); }
+    });
 
     if (!renderer_.Init()) {
         fprintf(stderr, "GL renderer init failed\n");
@@ -113,8 +117,14 @@ bool App::Init() {
     messageInput_.placeholder = "Type a message...";
     messageInput_.onSubmit = [&](const std::string&) { SendMessage(); };
     messageInput_.onPaste = [&]() -> std::string {
-        const char* clip = glfwGetClipboardString(window_.Handle());
-        return clip ? clip : "";
+        // GLFW can't read cross-app clipboard on Wayland, use wl-paste
+        FILE* p = popen("wl-paste --no-newline 2>/dev/null", "r");
+        if (!p) return "";
+        std::string result;
+        char buf[4096];
+        while (fgets(buf, sizeof(buf), p)) result += buf;
+        pclose(p);
+        return result;
     };
 
     statusLabel_.text = "Disconnected";
