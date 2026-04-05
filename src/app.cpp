@@ -607,10 +607,8 @@ void App::OnMouseDown(float x, float y, bool shift) {
 
     if (sendButton_.OnMouseDown(x, y)) { MarkDirty(); return; }
     if (apiKeyButton_.OnMouseDown(x, y)) { MarkDirty(); return; }
-    if (messageInput_.OnMouseDown(x, y)) {
-        messageInput_.OnMouseDrag(x, y, scrollView_.Fonts());
-        messageInput_.selStart = messageInput_.selEnd;  // Click = no selection
-        scrollView_.ClearSelection();  // Clear scroll view selection
+    if (messageInput_.OnMouseDown(x, y, scrollView_.Fonts())) {
+        scrollView_.ClearSelection();
         MarkDirty();
         return;
     }
@@ -677,9 +675,17 @@ void App::OnKey(int key, int mods, bool pressed) {
         return;
     }
 
-    // Ctrl+C: always copy from scroll view selection
+    // Ctrl+C: copy from whichever has a selection
     if ((mods & Mod::Ctrl) && key == Key::C) {
-        scrollView_.OnKey(key, mods);
+        if (messageInput_.focused && messageInput_.selStart != messageInput_.selEnd) {
+            std::string sel = messageInput_.GetSelectedText();
+            if (!sel.empty()) {
+                FILE* p = popen("wl-copy 2>/dev/null", "w");
+                if (p) { fwrite(sel.c_str(), 1, sel.size(), p); pclose(p); }
+            }
+        } else {
+            scrollView_.OnKey(key, mods);
+        }
         MarkDirty();
         return;
     }

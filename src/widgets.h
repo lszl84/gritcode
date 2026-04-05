@@ -79,8 +79,9 @@ public:
     std::function<std::string()> onPaste;
 
     void Paint(GLRenderer& r, FontManager& fm, float time) const;
-    bool OnMouseDown(float x, float y);
+    bool OnMouseDown(float x, float y, FontManager& fm);
     void OnMouseDrag(float x, float y, FontManager& fm);
+    std::string GetSelectedText() const;
     void OnChar(uint32_t codepoint, FontManager& fm);
     void OnKey(int key, int mods, FontManager& fm);
     void Update(float dt, FontManager& fm);
@@ -89,7 +90,9 @@ public:
 
 private:
     std::string DisplayText() const;
-    float scrollX = 0;  // Horizontal scroll offset for long text
+    float scrollX = 0;
+    int clickCount_ = 0;
+    double lastClickTime_ = 0;
     void EnsureCursorVisible(FontManager& fm);
 };
 

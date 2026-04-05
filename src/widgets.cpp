@@ -207,16 +207,62 @@ static int HitTestText(const std::string& text, FontStyle style, FontManager& fm
     return lo;
 }
 
-bool TextInput::OnMouseDown(float x, float y) {
+std::string TextInput::GetSelectedText() const {
+    if (selStart == selEnd) return "";
+    int s0 = std::min(selStart, selEnd);
+    int s1 = std::max(selStart, selEnd);
+    int b0 = ByteOffsetForCodepoint(text, s0);
+    int b1 = ByteOffsetForCodepoint(text, s1);
+    return text.substr(b0, b1 - b0);
+}
+
+bool TextInput::OnMouseDown(float x, float y, FontManager& fm) {
     focused = PointInRect(x, y, bounds);
     if (!focused) return false;
 
+    double now = GetMonotonicTime();
+    if (now - lastClickTime_ < 0.4) clickCount_++;
+    else clickCount_ = 1;
+    lastClickTime_ = now;
+
     float pad = 8;
-    float localX = x - bounds.x - pad;
-    // Needs FontManager — caller should call OnMouseDrag after for proper placement
-    // For now, set cursor to end; OnMouseDrag with fm will refine
-    cursorPos = text.size();
-    selStart = selEnd = CodepointCount(text, cursorPos);
+    float localX = x - bounds.x - pad + scrollX;
+    std::string display = DisplayText();
+    int cp = HitTestText(display, style, fm, localX);
+
+    if (clickCount_ >= 3) {
+        // Triple click: select all
+        selStart = 0;
+        selEnd = CodepointCount(text, text.size());
+        cursorPos = text.size();
+    } else if (clickCount_ == 2) {
+        // Double click: select word
+        int totalCp = CodepointCount(text, text.size());
+        int ws = cp, we = cp;
+        // Expand left to word boundary
+        while (ws > 0) {
+            int b = ByteOffsetForCodepoint(text, ws - 1);
+            char c = text[b];
+            if (c == ' ' || c == '\t') break;
+            ws--;
+        }
+        // Expand right to word boundary
+        while (we < totalCp) {
+            int b = ByteOffsetForCodepoint(text, we);
+            if (b >= (int)text.size()) break;
+            char c = text[b];
+            if (c == ' ' || c == '\t') break;
+            we++;
+        }
+        selStart = ws;
+        selEnd = we;
+        cursorPos = ByteOffsetForCodepoint(text, we);
+    } else {
+        // Single click: place cursor
+        cursorPos = ByteOffsetForCodepoint(text, cp);
+        selStart = selEnd = cp;
+    }
+
     cursorBlink = 0;
     return true;
 }
@@ -273,6 +319,12 @@ void TextInput::OnKey(int key, int mods, FontManager& fm) {
     if (!focused) return;
     bool ctrl = (mods & 1);  // Mod::Ctrl
     bool shift = (mods & 2); // Mod::Shift
+
+    // Ctrl+C copy from text input selection
+    if (ctrl && key == 'C') {
+        // Handled by app.cpp which reads GetSelectedText()
+        return;
+    }
 
     // Ctrl+V paste
     if (ctrl && key == 'V') {
