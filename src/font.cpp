@@ -201,27 +201,81 @@ void FontManager::FillMissingGlyphs(ShapedRun& run, const std::string& text,
                                      int primaryFace, bool rtl) const {
     int sizePx = (int)(faces_[primaryFace].lineHeight + 0.5f);
 
-    for (auto& g : run.glyphs) {
-        if (g.glyphId != 0) continue;  // Has glyph — skip
-        if (g.cluster >= text.size()) continue;
+    // Find contiguous ranges of missing glyphs (by cluster byte offset)
+    struct MissingRange { size_t byteStart, byteEnd; size_t glyphStart, glyphEnd; };
+    std::vector<MissingRange> ranges;
 
-        // Decode codepoint at this cluster position
+    size_t i = 0;
+    while (i < run.glyphs.size()) {
+        if (run.glyphs[i].glyphId != 0) { i++; continue; }
+        // Start of missing range
+        size_t gs = i;
+        size_t bs = run.glyphs[i].cluster;
+        while (i < run.glyphs.size() && run.glyphs[i].glyphId == 0) i++;
+        size_t ge = i;
+        // Find byte end: next non-missing glyph's cluster, or end of text
+        size_t be = (ge < run.glyphs.size()) ? run.glyphs[ge].cluster : text.size();
+        ranges.push_back({bs, be, gs, ge});
+    }
+
+    if (ranges.empty()) return;
+
+    // Process ranges in reverse so glyph indices stay valid after replacement
+    for (int ri = (int)ranges.size() - 1; ri >= 0; ri--) {
+        auto& r = ranges[ri];
+        if (r.byteStart >= text.size()) continue;
+
+        // Find fallback font for first codepoint in range
         uint32_t cp;
-        DecodeUTF8(text.c_str() + g.cluster, cp);
-        if (cp == 0) continue;
-
-        // Find a fallback font that has this codepoint
+        DecodeUTF8(text.c_str() + r.byteStart, cp);
         int fbFace = FindFallbackFace(cp, sizePx);
         if (fbFace < 0 || fbFace >= (int)faces_.size()) continue;
 
-        // Get glyph index from fallback font
-        FT_UInt glyphIndex = FT_Get_Char_Index(faces_[fbFace].ft, cp);
-        if (glyphIndex == 0) continue;  // Fallback font doesn't have it either
+        // Shape this text range with the fallback font
+        std::string sub = text.substr(r.byteStart, r.byteEnd - r.byteStart);
+        hb_buffer_t* buf = hb_buffer_create();
+        hb_buffer_add_utf8(buf, sub.c_str(), (int)sub.size(), 0, (int)sub.size());
+        hb_buffer_set_direction(buf, rtl ? HB_DIRECTION_RTL : HB_DIRECTION_LTR);
+        hb_buffer_guess_segment_properties(buf);
+        hb_shape(faces_[fbFace].hb, buf, nullptr, 0);
 
-        // Replace glyph with fallback version, keep position from primary shaping
-        g.glyphId = glyphIndex;
-        g.faceIdx = fbFace;
-        g.cached = &EnsureGlyph(g.glyphId, g.faceIdx);
+        unsigned int fbCount = 0;
+        hb_glyph_info_t* fbInfo = hb_buffer_get_glyph_infos(buf, &fbCount);
+        hb_glyph_position_t* fbPos = hb_buffer_get_glyph_positions(buf, &fbCount);
+
+        // Build replacement glyphs
+        float xBase = run.glyphs[r.glyphStart].xPos;
+        float curX = 0;
+        std::vector<ShapedGlyph> replacement(fbCount);
+        for (unsigned int j = 0; j < fbCount; j++) {
+            auto& g = replacement[j];
+            g.glyphId = fbInfo[j].codepoint;
+            g.cluster = fbInfo[j].cluster + r.byteStart;
+            g.xPos = xBase + curX + fbPos[j].x_offset / 64.0f;
+            g.yPos = fbPos[j].y_offset / 64.0f;
+            g.xAdvance = fbPos[j].x_advance / 64.0f;
+            g.faceIdx = fbFace;
+            g.cached = &EnsureGlyph(g.glyphId, g.faceIdx);
+            curX += g.xAdvance;
+        }
+        hb_buffer_destroy(buf);
+
+        // Calculate width difference and shift subsequent glyphs
+        float oldWidth = 0;
+        for (size_t gi = r.glyphStart; gi < r.glyphEnd; gi++)
+            oldWidth += run.glyphs[gi].xAdvance;
+        float diff = curX - oldWidth;
+
+        // Replace glyphs in the run
+        run.glyphs.erase(run.glyphs.begin() + r.glyphStart,
+                         run.glyphs.begin() + r.glyphEnd);
+        run.glyphs.insert(run.glyphs.begin() + r.glyphStart,
+                          replacement.begin(), replacement.end());
+
+        // Shift all glyphs after this range
+        for (size_t gi = r.glyphStart + replacement.size(); gi < run.glyphs.size(); gi++)
+            run.glyphs[gi].xPos += diff;
+        run.totalWidth += diff;
     }
 }
 
