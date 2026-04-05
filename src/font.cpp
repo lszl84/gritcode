@@ -147,6 +147,84 @@ float FontManager::SpaceWidth(FontStyle style) const {
     return (idx >= 0 && idx < (int)faces_.size()) ? faces_[idx].spaceWidth : 6;
 }
 
+static int DecodeUTF8(const char* p, uint32_t& cp) {
+    uint8_t c = *p;
+    if (c < 0x80) { cp = c; return 1; }
+    if (c < 0xE0) { cp = ((c & 0x1F) << 6) | (p[1] & 0x3F); return 2; }
+    if (c < 0xF0) { cp = ((c & 0x0F) << 12) | ((p[1] & 0x3F) << 6) | (p[2] & 0x3F); return 3; }
+    cp = ((c & 0x07) << 18) | ((p[1] & 0x3F) << 12) | ((p[2] & 0x3F) << 6) | (p[3] & 0x3F);
+    return 4;
+}
+
+int FontManager::FindFallbackFace(uint32_t codepoint, int sizePx) const {
+    uint64_t key = ((uint64_t)codepoint << 32) | sizePx;
+    auto it = fallbackCache_.find(key);
+    if (it != fallbackCache_.end()) return it->second;
+
+    FcPattern* pat = FcPatternCreate();
+    FcCharSet* cs = FcCharSetCreate();
+    FcCharSetAddChar(cs, codepoint);
+    FcPatternAddCharSet(pat, FC_CHARSET, cs);
+    FcConfigSubstitute(nullptr, pat, FcMatchPattern);
+    FcDefaultSubstitute(pat);
+
+    FcResult res;
+    FcPattern* match = FcFontMatch(nullptr, pat, &res);
+    int faceIdx = -1;
+    if (match) {
+        FcChar8* file = nullptr;
+        if (FcPatternGetString(match, FC_FILE, 0, &file) == FcResultMatch)
+            faceIdx = const_cast<FontManager*>(this)->LoadFace((const char*)file, sizePx);
+        FcPatternDestroy(match);
+    }
+    FcCharSetDestroy(cs);
+    FcPatternDestroy(pat);
+    fallbackCache_[key] = faceIdx;
+    return faceIdx;
+}
+
+void FontManager::FillMissingGlyphs(ShapedRun& run, const std::string& text,
+                                     int primaryFace, bool rtl) const {
+    int sizePx = (int)(faces_[primaryFace].lineHeight + 0.5f);
+
+    for (auto& g : run.glyphs) {
+        if (g.glyphId != 0) continue;  // Has glyph — skip
+        if (g.cluster >= text.size()) continue;
+
+        // Decode codepoint at this cluster position
+        uint32_t cp;
+        DecodeUTF8(text.c_str() + g.cluster, cp);
+        if (cp == 0) continue;
+
+        // Find a fallback font that has this codepoint
+        int fbFace = FindFallbackFace(cp, sizePx);
+        if (fbFace < 0 || fbFace >= (int)faces_.size()) continue;
+
+        // Get glyph index from fallback font
+        FT_UInt glyphIndex = FT_Get_Char_Index(faces_[fbFace].ft, cp);
+        if (glyphIndex == 0) continue;  // Fallback font doesn't have it either
+
+        // Replace glyph with fallback version
+        g.glyphId = glyphIndex;
+        g.faceIdx = fbFace;
+
+        // Get correct advance from fallback font
+        if (FT_Load_Glyph(faces_[fbFace].ft, glyphIndex, FT_LOAD_DEFAULT) == 0) {
+            float newAdvance = faces_[fbFace].ft->glyph->advance.x / 64.0f;
+            float diff = newAdvance - g.xAdvance;
+            g.xAdvance = newAdvance;
+            // Shift all subsequent glyphs
+            for (auto& g2 : run.glyphs) {
+                if (&g2 > &g) g2.xPos += diff;
+            }
+            run.totalWidth += diff;
+        }
+
+        // Update cached pointer
+        g.cached = &EnsureGlyph(g.glyphId, g.faceIdx);
+    }
+}
+
 ShapedRun FontManager::Shape(const std::string& text, FontStyle style, bool rtl) const {
     ShapedRun result;
     if (text.empty()) return result;
@@ -156,11 +234,11 @@ ShapedRun FontManager::Shape(const std::string& text, FontStyle style, bool rtl)
 
     const Face& face = faces_[fIdx];
 
+    // Step 1: Shape entire text with primary font (preserves ligatures, Arabic forms)
     hb_buffer_t* buf = hb_buffer_create();
     hb_buffer_add_utf8(buf, text.c_str(), (int)text.size(), 0, (int)text.size());
     hb_buffer_set_direction(buf, rtl ? HB_DIRECTION_RTL : HB_DIRECTION_LTR);
     hb_buffer_guess_segment_properties(buf);
-
     hb_shape(face.hb, buf, nullptr, 0);
 
     unsigned int glyphCount = 0;
@@ -169,6 +247,7 @@ ShapedRun FontManager::Shape(const std::string& text, FontStyle style, bool rtl)
 
     float cursorX = 0;
     result.glyphs.resize(glyphCount);
+    bool hasMissing = false;
 
     for (unsigned int i = 0; i < glyphCount; i++) {
         auto& g = result.glyphs[i];
@@ -178,12 +257,16 @@ ShapedRun FontManager::Shape(const std::string& text, FontStyle style, bool rtl)
         g.yPos = pos[i].y_offset / 64.0f;
         g.xAdvance = pos[i].x_advance / 64.0f;
         g.faceIdx = fIdx;
-        g.cached = &EnsureGlyph(g.glyphId, fIdx);  // Pre-cache pointer
+        g.cached = &EnsureGlyph(g.glyphId, fIdx);
         cursorX += pos[i].x_advance / 64.0f;
+        if (g.glyphId == 0) hasMissing = true;
     }
-
     result.totalWidth = cursorX;
     hb_buffer_destroy(buf);
+
+    // Step 2: Fill missing glyphs with fallback fonts (per-glyph, not per-run)
+    if (hasMissing) FillMissingGlyphs(result, text, fIdx, rtl);
+
     return result;
 }
 
@@ -207,7 +290,13 @@ const GlyphInfo& FontManager::EnsureGlyph(uint32_t glyphId, int faceIdx) const {
     GlyphInfo gi{};
     if (faceIdx >= 0 && faceIdx < (int)faces_.size()) {
         FT_Face ft = faces_[faceIdx].ft;
-        if (FT_Load_Glyph(ft, glyphId, FT_LOAD_RENDER) == 0) {
+        bool isColor = false;
+        if (FT_Load_Glyph(ft, glyphId, FT_LOAD_RENDER | FT_LOAD_COLOR) == 0) {
+            isColor = (ft->glyph->bitmap.pixel_mode == FT_PIXEL_MODE_BGRA);
+        } else {
+            FT_Load_Glyph(ft, glyphId, FT_LOAD_RENDER);
+        }
+        if (ft->glyph && ft->glyph->bitmap.buffer) {
             FT_GlyphSlot slot = ft->glyph;
             int w = (int)slot->bitmap.width;
             int h = (int)slot->bitmap.rows;
@@ -219,9 +308,20 @@ const GlyphInfo& FontManager::EnsureGlyph(uint32_t glyphId, int faceIdx) const {
                     rowH_ = 0;
                 }
                 if (curY_ + h + 1 < atlasH_) {
-                    for (int r = 0; r < h; r++)
-                        memcpy(&atlasData_[(curY_ + r) * atlasW_ + curX_],
-                               &slot->bitmap.buffer[r * slot->bitmap.pitch], w);
+                    if (isColor) {
+                        for (int r = 0; r < h; r++) {
+                            const uint8_t* src = slot->bitmap.buffer + r * slot->bitmap.pitch;
+                            uint8_t* dst = &atlasData_[(curY_ + r) * atlasW_ + curX_];
+                            for (int c = 0; c < w; c++) {
+                                uint8_t b=src[c*4], g=src[c*4+1], rv=src[c*4+2], a=src[c*4+3];
+                                dst[c] = a > 0 ? (uint8_t)((rv*77 + g*150 + b*29) >> 8) : 0;
+                            }
+                        }
+                    } else {
+                        for (int r = 0; r < h; r++)
+                            memcpy(&atlasData_[(curY_ + r) * atlasW_ + curX_],
+                                   &slot->bitmap.buffer[r * slot->bitmap.pitch], w);
+                    }
 
                     gi.atlasX = curX_;
                     gi.atlasY = curY_;

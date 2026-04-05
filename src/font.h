@@ -85,5 +85,9 @@ private:
 
     int LoadFace(const std::string& path, int sizePx);
     std::string FindFont(const char* family, bool bold, bool italic) const;
+    int FindFallbackFace(uint32_t codepoint, int sizePx) const;
+    void FillMissingGlyphs(ShapedRun& run, const std::string& text, int primaryFace, bool rtl) const;
+
+    mutable std::map<uint64_t, int> fallbackCache_;
     std::map<std::string, std::shared_ptr<std::vector<uint8_t>>> fileCache_;
 };
