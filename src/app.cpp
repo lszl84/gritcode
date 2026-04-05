@@ -144,14 +144,16 @@ bool App::Init() {
 
     LayoutWidgets();
 
-    // Render first frame immediately so compositor doesn't think we froze
-    renderer_.BeginFrame(window_.Width(), window_.Height(), scrollView_.Fonts());
-    Color bg{0.12f, 0.12f, 0.13f};
-    renderer_.DrawRect(0, 0, window_.Width(), window_.Height(), bg);
-    renderer_.EndFrame();
-    window_.SwapBuffers();
+    // Render two frames immediately so compositor doesn't think we froze
+    // (keychain + model fetch can take time)
+    for (int i = 0; i < 2; i++) {
+        window_.PollEvents();
+        glClearColor(0.12f, 0.12f, 0.13f, 1.0f);
+        glClear(GL_COLOR_BUFFER_BIT);
+        window_.SwapBuffers();
+    }
 
-    // Auto-connect
+    // Load API key (may involve dbus → libsecret)
     std::string savedKey = keychain::LoadApiKey();
     if (!savedKey.empty()) {
         AppendSystem("Connecting with saved API key...");

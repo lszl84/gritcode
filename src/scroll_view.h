@@ -34,7 +34,12 @@ public:
     void OnScroll(float yOffset);
     void OnKey(int key, int mods);
     void OnResize(int w, int h);
-    float ContentBottom() const { return cachedTotalH_ - scrollPos_; }
+    float ContentBottom() const {
+        // Last block's actual bottom edge (no margin padding)
+        if (blocks_.empty() || blockTopCache_.empty()) return topMargin_;
+        size_t last = blocks_.size() - 1;
+        return blockTopCache_[last] + blockHeightCache_[last] - scrollPos_;
+    }
 
     void Paint(GLRenderer& renderer);
     bool NeedsRedraw() const { return needsRedraw_; }
