@@ -274,7 +274,13 @@ const GlyphInfo& FontManager::EnsureGlyph(uint32_t glyphId, int faceIdx) const {
     GlyphInfo gi{};
     if (faceIdx >= 0 && faceIdx < (int)faces_.size()) {
         FT_Face ft = faces_[faceIdx].ft;
-        if (FT_Load_Glyph(ft, glyphId, FT_LOAD_RENDER) == 0) {
+        // Try color first (for emoji), fall back to grayscale
+        FT_Int32 loadFlags = FT_LOAD_RENDER | FT_LOAD_COLOR;
+        if (FT_Load_Glyph(ft, glyphId, loadFlags) != 0) {
+            loadFlags = FT_LOAD_RENDER;
+            FT_Load_Glyph(ft, glyphId, loadFlags);
+        }
+        if (ft->glyph) {
             FT_GlyphSlot slot = ft->glyph;
             int w = (int)slot->bitmap.width;
             int h = (int)slot->bitmap.rows;
@@ -286,9 +292,23 @@ const GlyphInfo& FontManager::EnsureGlyph(uint32_t glyphId, int faceIdx) const {
                     rowH_ = 0;
                 }
                 if (curY_ + h + 1 < atlasH_) {
-                    for (int r = 0; r < h; r++)
-                        memcpy(&atlasData_[(curY_ + r) * atlasW_ + curX_],
-                               &slot->bitmap.buffer[r * slot->bitmap.pitch], w);
+                    if (slot->bitmap.pixel_mode == FT_PIXEL_MODE_BGRA) {
+                        // Color emoji: convert BGRA to grayscale alpha
+                        for (int r = 0; r < h; r++) {
+                            const uint8_t* src = slot->bitmap.buffer + r * slot->bitmap.pitch;
+                            uint8_t* dst = &atlasData_[(curY_ + r) * atlasW_ + curX_];
+                            for (int c = 0; c < w; c++) {
+                                // BGRA: use alpha channel, or luminance if alpha is full
+                                uint8_t b = src[c*4], g = src[c*4+1], rv = src[c*4+2], a = src[c*4+3];
+                                dst[c] = a > 0 ? (uint8_t)((rv * 77 + g * 150 + b * 29) >> 8) : 0;
+                            }
+                        }
+                    } else {
+                        // Normal grayscale
+                        for (int r = 0; r < h; r++)
+                            memcpy(&atlasData_[(curY_ + r) * atlasW_ + curX_],
+                                   &slot->bitmap.buffer[r * slot->bitmap.pitch], w);
+                    }
 
                     gi.atlasX = curX_;
                     gi.atlasY = curY_;
