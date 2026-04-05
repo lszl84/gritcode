@@ -161,31 +161,34 @@ bool App::Init() {
 
     LayoutWidgets();
 
-    // Session: load for current working directory
+    // Session: load for current working directory (deferred to main loop)
     char cwdBuf[4096];
     std::string cwd = getcwd(cwdBuf, sizeof(cwdBuf)) ? cwdBuf : ".";
     session_.SetCwd(cwd);
+    session_.LoadForCwd(cwd);
 
-    if (session_.LoadForCwd(cwd)) {
-        // Restore conversation to scroll view (single batch for correct layout)
-        MarkdownRenderer mdRenderer(14);
-        scrollView_.BeginBatch();
-        for (auto& m : session_.History()) {
-            if (m.role == "user") {
-                scrollView_.AppendStream(BlockType::USER_PROMPT, m.content);
-            } else if (m.role == "assistant" && !m.content.empty()) {
-                scrollView_.AddBlocks(mdRenderer.Render(m.content, true));
+    window_.Show();
+
+    // Defer restore to first frame so fonts/scale are finalized
+    if (!session_.History().empty()) {
+        events_.Push([this]() {
+            MarkdownRenderer mdRenderer(14);
+            scrollView_.BeginBatch();
+            for (auto& m : session_.History()) {
+                if (m.role == "user")
+                    scrollView_.AppendStream(BlockType::USER_PROMPT, m.content);
+                else if (m.role == "assistant" && !m.content.empty())
+                    scrollView_.AddBlocks(mdRenderer.Render(m.content, true));
             }
-        }
-        scrollView_.EndBatch();
-        activeProvider_ = session_.Provider();
-        if (!session_.Model().empty()) activeModel_ = session_.Model();
-        AppendSystem("Session restored (" + std::to_string(session_.History().size()) + " messages)");
+            scrollView_.EndBatch();
+            activeProvider_ = session_.Provider();
+            if (!session_.Model().empty()) activeModel_ = session_.Model();
+            AppendSystem("Session restored (" + std::to_string(session_.History().size()) + " messages)");
+            MarkDirty();
+        });
     } else {
         AppendSystem("Starting...");
     }
-
-    window_.Show();
 
     // Load API key and connect in background
     std::thread([this]() {

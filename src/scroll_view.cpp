@@ -140,6 +140,8 @@ void ScrollView::BeginBatch() { inBatch_ = true; }
 void ScrollView::EndBatch() {
     inBatch_ = false;
     needsFullRebuild_ = true;
+    needsRedraw_ = true;
+    if (autoScroll_) scrollPos_ = 999999;
 }
 
 // --- Scrolling ---
