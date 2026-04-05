@@ -290,13 +290,13 @@ const GlyphInfo& FontManager::EnsureGlyph(uint32_t glyphId, int faceIdx) const {
     GlyphInfo gi{};
     if (faceIdx >= 0 && faceIdx < (int)faces_.size()) {
         FT_Face ft = faces_[faceIdx].ft;
-        bool isColor = false;
-        if (FT_Load_Glyph(ft, glyphId, FT_LOAD_RENDER | FT_LOAD_COLOR) == 0) {
-            isColor = (ft->glyph->bitmap.pixel_mode == FT_PIXEL_MODE_BGRA);
-        } else {
-            FT_Load_Glyph(ft, glyphId, FT_LOAD_RENDER);
-        }
-        if (ft->glyph && ft->glyph->bitmap.buffer) {
+        // Check if this face has color bitmaps (emoji font)
+        bool hasColorBitmaps = FT_HAS_COLOR(ft);
+        FT_Int32 loadFlags = FT_LOAD_RENDER;
+        if (hasColorBitmaps) loadFlags |= FT_LOAD_COLOR;
+
+        if (FT_Load_Glyph(ft, glyphId, loadFlags) == 0 && ft->glyph->bitmap.buffer) {
+            bool isColor = (ft->glyph->bitmap.pixel_mode == FT_PIXEL_MODE_BGRA);
             FT_GlyphSlot slot = ft->glyph;
             int w = (int)slot->bitmap.width;
             int h = (int)slot->bitmap.rows;
