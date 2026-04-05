@@ -3,6 +3,7 @@
 #include <cstring>
 #include <thread>
 #include <array>
+#include <unistd.h>
 #include <xkbcommon/xkbcommon-keysyms.h>
 
 // Tool execution (same as before)
@@ -160,7 +161,32 @@ bool App::Init() {
 
     LayoutWidgets();
 
-    AppendSystem("Starting...");
+    // Session: load for current working directory
+    char cwdBuf[4096];
+    std::string cwd = getcwd(cwdBuf, sizeof(cwdBuf)) ? cwdBuf : ".";
+    session_.SetCwd(cwd);
+
+    if (session_.LoadForCwd(cwd)) {
+        // Restore conversation to scroll view
+        for (auto& m : session_.History()) {
+            if (m.role == "user") {
+                scrollView_.AppendStream(BlockType::USER_PROMPT, m.content);
+            } else if (m.role == "assistant" && !m.content.empty()) {
+                MarkdownRenderer mdRenderer(14);
+                auto blocks = mdRenderer.Render(m.content, true);
+                scrollView_.BeginBatch();
+                scrollView_.AddBlocks(std::move(blocks));
+                scrollView_.EndBatch();
+            }
+            // Skip tool calls/results in visual replay — they were part of thinking
+        }
+        activeProvider_ = session_.Provider();
+        if (!session_.Model().empty()) activeModel_ = session_.Model();
+        AppendSystem("Session restored (" + std::to_string(session_.History().size()) + " messages)");
+    } else {
+        AppendSystem("Starting...");
+    }
+
     window_.Show();
 
     // Load API key and connect in background
@@ -337,7 +363,7 @@ std::string App::BuildRequestJson() {
     j["stream"] = true;
 
     json msgs = json::array();
-    for (auto& m : history_) {
+    for (auto& m : session_.History()) {
         json msg;
         msg["role"] = m.role;
         if (m.role == "tool") {
@@ -373,7 +399,7 @@ void App::SendMessage() {
     scrollView_.AppendStream(BlockType::USER_PROMPT, msg);
     messageInput_.Clear();
 
-    history_.push_back({"user", msg, {}, {}});
+    session_.History().push_back({"user", msg, {}, {}});
     requestInProgress_ = true;
     sendButton_.enabled = false;
     toolRound_ = 0;
@@ -389,15 +415,15 @@ void App::DoSendToProvider() {
     if (activeProvider_ == "claude") {
         // Claude ACP: spawn claude binary with stream-json output
         std::string prompt;
-        if (history_.size() > 1) {
+        if (session_.History().size() > 1) {
             prompt = "<conversation_history>\n";
-            for (size_t i = 0; i < history_.size() - 1; i++) {
-                prompt += "<" + history_[i].role + ">\n" + history_[i].content + "\n</" + history_[i].role + ">\n";
+            for (size_t i = 0; i < session_.History().size() - 1; i++) {
+                prompt += "<" + session_.History()[i].role + ">\n" + session_.History()[i].content + "\n</" + session_.History()[i].role + ">\n";
             }
             prompt += "</conversation_history>\n\n";
         }
-        if (!history_.empty() && history_.back().role == "user")
-            prompt += history_.back().content;
+        if (!session_.History().empty() && session_.History().back().role == "user")
+            prompt += session_.History().back().content;
 
         std::string cmd = "claude --print --verbose --output-format stream-json --include-partial-messages --dangerously-skip-permissions --model " + activeModel_;
 
@@ -501,9 +527,12 @@ void App::DoSendToProvider() {
                     responseBuffer_.clear();
                 }
                 if (!fullResponse.empty())
-                    history_.push_back({"assistant", fullResponse, {}, {}});
+                    session_.History().push_back({"assistant", fullResponse, {}, {}});
                 requestInProgress_ = false;
                 scrollView_.StopAllAnimations();
+                session_.SetProvider(activeProvider_);
+                session_.SetModel(activeModel_);
+                session_.Save();
                 MarkDirty();
             });
         }).detach();
@@ -569,8 +598,8 @@ void App::DoSendToProvider() {
                 waitingForResponse_ = false;
 
                 if (!ok) {
-                    if (!history_.empty() && history_.back().role == "user")
-                        history_.pop_back();
+                    if (!session_.History().empty() && session_.History().back().role == "user")
+                        session_.History().pop_back();
                     AppendSystem("Error: " + error);
                     requestInProgress_ = false;
                     sendButton_.enabled = true;
@@ -596,10 +625,13 @@ void App::DoSendToProvider() {
                 }
 
                 if (!content.empty())
-                    history_.push_back({"assistant", content, {}, {}});
+                    session_.History().push_back({"assistant", content, {}, {}});
                 requestInProgress_ = false;
                 sendButton_.enabled = true;
                 scrollView_.StopAllAnimations();
+                session_.SetProvider(activeProvider_);
+                session_.SetModel(activeModel_);
+                session_.Save();
                 MarkDirty();
             });
         }
@@ -637,7 +669,7 @@ void App::ExecuteToolCalls(const std::vector<json>& toolCalls, const std::string
     toolRound_++;
 
     // Add assistant message with tool calls
-    history_.push_back({"assistant", content, toolCalls, {}});
+    session_.History().push_back({"assistant", content, toolCalls, {}});
 
     // Show tool info in thinking block
     std::string info;
@@ -674,7 +706,7 @@ void App::ExecuteToolCalls(const std::vector<json>& toolCalls, const std::string
 
             // Add to history
             for (size_t i = 0; i < results.size(); i++) {
-                history_.push_back({"tool", results[i].output, {}, results[i].id});
+                session_.History().push_back({"tool", results[i].output, {}, results[i].id});
             }
 
             scrollView_.StopThinking(scrollView_.BlockCount() - 1);
@@ -759,9 +791,9 @@ void App::OnKey(int key, int mods, bool pressed) {
         httpClient_.Abort();
         requestInProgress_ = false;
         sendButton_.enabled = true;
-        if (!history_.empty() && history_.back().role == "user") {
+        if (!session_.History().empty() && session_.History().back().role == "user") {
             // Keep message but mark as cancelled
-            history_.push_back({"assistant", "[cancelled]", {}, {}});
+            session_.History().push_back({"assistant", "[cancelled]", {}, {}});
         }
         scrollView_.StopAllAnimations();
         AppendSystem("Cancelled");

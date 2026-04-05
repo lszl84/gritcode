@@ -5,6 +5,7 @@
 #include "curl_http.h"
 #include "keychain.h"
 #include "markdown_renderer.h"
+#include "session.h"
 #include <string>
 #include <vector>
 #include <mutex>
@@ -35,13 +36,6 @@ private:
     std::queue<std::function<void()>> q_;
 };
 
-struct ChatMessage {
-    std::string role;
-    std::string content;
-    std::vector<json> toolCalls;
-    std::string toolCallId;
-};
-
 class App {
 public:
     bool Init();
@@ -64,9 +58,9 @@ private:
 
     // Backend state
     net::CurlHttpClient httpClient_;
-    std::string activeProvider_ = "zen";  // "zen" or "claude"
+    SessionManager session_;
+    std::string activeProvider_ = "zen";
     std::string activeModel_;
-    std::vector<ChatMessage> history_;
     bool connected_ = false;
     bool requestInProgress_ = false;
     int toolRound_ = 0;

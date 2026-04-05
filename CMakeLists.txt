@@ -62,6 +62,7 @@ add_executable(fastcode-native
     src/widgets.cpp
     src/curl_http.cpp
     src/keychain.cpp
+    src/session.cpp
     src/fake_data.cpp
 )
 
