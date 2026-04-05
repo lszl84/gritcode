@@ -735,7 +735,10 @@ void App::Run() {
         renderer_.EndFrame();
         window_.SwapBuffers();
 
-        // If events arrived during render, mark dirty for another frame
+        // Throttle to ~60fps since vsync is off (Wayland frame callback issue)
+        struct timespec sleepTime = {0, 8000000};  // 8ms (~120fps headroom)
+        nanosleep(&sleepTime, nullptr);
+
         if (!events_.Empty()) dirty_ = true;
 
         // Perf tracking

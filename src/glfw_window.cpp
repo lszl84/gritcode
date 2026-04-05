@@ -27,7 +27,10 @@ bool GlfwWindow::Init(int width, int height, const char* title) {
     }
 
     glfwMakeContextCurrent(window_);
-    glfwSwapInterval(1);  // VSync
+    // Don't use swap interval 1 — on Wayland, SwapBuffers blocks
+    // indefinitely waiting for frame callbacks on invisible surfaces
+    // (non-focused workspaces). We throttle via WaitEvents instead.
+    glfwSwapInterval(0);
 
     glfwSetWindowUserPointer(window_, this);
     glfwSetFramebufferSizeCallback(window_, FramebufferSizeCb);
@@ -55,7 +58,7 @@ bool GlfwWindow::ShouldClose() const {
 }
 
 void GlfwWindow::PollEvents() { glfwPollEvents(); }
-void GlfwWindow::WaitEvents() { glfwWaitEvents(); }
+void GlfwWindow::WaitEvents() { glfwWaitEventsTimeout(0.5); }  // Wake periodically for bg events
 void GlfwWindow::SwapBuffers() { glfwSwapBuffers(window_); }
 
 void GlfwWindow::SetClipboard(const std::string& text) {
