@@ -446,6 +446,7 @@ void App::DoSendToProvider() {
                                 if (!text.empty()) {
                                     fullResponse += text;
                                     events_.Push([this, text]() {
+                                        waitingForResponse_ = false;
                                         if (responseBuffer_.empty())
                                             responseStartBlock_ = scrollView_.BlockCount();
                                         responseBuffer_ += text;
@@ -464,6 +465,7 @@ void App::DoSendToProvider() {
                                 std::string thinking = delta.value("thinking", "");
                                 if (!thinking.empty()) {
                                     events_.Push([this, thinking]() {
+                                        waitingForResponse_ = false;
                                         if (!receivingThinking_) {
                                             receivingThinking_ = true;
                                             scrollView_.AppendStream(BlockType::THINKING, thinking);
