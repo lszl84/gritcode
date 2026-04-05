@@ -60,6 +60,7 @@ private:
         FT_Face ft = nullptr;
         hb_font_t* hb = nullptr;
         float lineHeight = 0, ascent = 0, descent = 0, spaceWidth = 0;
+        float bitmapScale = 1.0f;  // For bitmap fonts: scale factor to desired size
     };
 
     FT_Library ft_ = nullptr;

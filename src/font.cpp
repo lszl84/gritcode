@@ -61,7 +61,21 @@ int FontManager::LoadFace(const std::string& path, int sizePx) {
         fprintf(stderr, "Failed to load font: %s\n", path.c_str());
         return -1;
     }
-    FT_Set_Pixel_Sizes(f.ft, 0, sizePx);
+
+    // For bitmap-only fonts (emoji), select the nearest available strike
+    if (FT_HAS_FIXED_SIZES(f.ft) && !FT_IS_SCALABLE(f.ft)) {
+        int bestIdx = 0;
+        int bestDiff = 99999;
+        for (int si = 0; si < f.ft->num_fixed_sizes; si++) {
+            int diff = abs(f.ft->available_sizes[si].height - sizePx);
+            if (diff < bestDiff) { bestDiff = diff; bestIdx = si; }
+        }
+        FT_Select_Size(f.ft, bestIdx);
+        f.bitmapScale = (float)sizePx / f.ft->available_sizes[bestIdx].height;
+    } else {
+        FT_Set_Pixel_Sizes(f.ft, 0, sizePx);
+        f.bitmapScale = 1.0f;
+    }
 
     f.hb = hb_ft_font_create_referenced(f.ft);
 
@@ -284,8 +298,15 @@ const GlyphInfo& FontManager::EnsureGlyph(uint32_t glyphId, int faceIdx) const {
         if (FT_Load_Glyph(ft, glyphId, loadFlags) == 0 && ft->glyph->bitmap.buffer) {
             bool isColor = (ft->glyph->bitmap.pixel_mode == FT_PIXEL_MODE_BGRA);
             FT_GlyphSlot slot = ft->glyph;
-            int w = (int)slot->bitmap.width;
-            int h = (int)slot->bitmap.rows;
+            int srcW = (int)slot->bitmap.width;
+            int srcH = (int)slot->bitmap.rows;
+            float scale = faces_[faceIdx].bitmapScale;
+
+            // For bitmap fonts, scale down to target size
+            int w = (scale < 0.99f) ? (int)(srcW * scale) : srcW;
+            int h = (scale < 0.99f) ? (int)(srcH * scale) : srcH;
+            if (w < 1) w = 1;
+            if (h < 1) h = 1;
 
             if (w > 0 && h > 0) {
                 if (curX_ + w + 1 >= atlasW_) {
@@ -295,12 +316,29 @@ const GlyphInfo& FontManager::EnsureGlyph(uint32_t glyphId, int faceIdx) const {
                 }
                 if (curY_ + h + 1 < atlasH_) {
                     if (isColor) {
+                        // Color bitmap → grayscale with nearest-neighbor scaling
                         for (int r = 0; r < h; r++) {
-                            const uint8_t* src = slot->bitmap.buffer + r * slot->bitmap.pitch;
+                            int sr = (scale < 0.99f) ? (int)(r / scale) : r;
+                            if (sr >= srcH) sr = srcH - 1;
+                            const uint8_t* src = slot->bitmap.buffer + sr * slot->bitmap.pitch;
                             uint8_t* dst = &atlasData_[(curY_ + r) * atlasW_ + curX_];
                             for (int c = 0; c < w; c++) {
-                                uint8_t b=src[c*4], g=src[c*4+1], rv=src[c*4+2], a=src[c*4+3];
+                                int sc = (scale < 0.99f) ? (int)(c / scale) : c;
+                                if (sc >= srcW) sc = srcW - 1;
+                                uint8_t b=src[sc*4], g=src[sc*4+1], rv=src[sc*4+2], a=src[sc*4+3];
                                 dst[c] = a > 0 ? (uint8_t)((rv*77 + g*150 + b*29) >> 8) : 0;
+                            }
+                        }
+                    } else if (scale < 0.99f) {
+                        // Grayscale bitmap with scaling
+                        for (int r = 0; r < h; r++) {
+                            int sr = (int)(r / scale);
+                            if (sr >= srcH) sr = srcH - 1;
+                            uint8_t* dst = &atlasData_[(curY_ + r) * atlasW_ + curX_];
+                            for (int c = 0; c < w; c++) {
+                                int sc = (int)(c / scale);
+                                if (sc >= srcW) sc = srcW - 1;
+                                dst[c] = slot->bitmap.buffer[sr * slot->bitmap.pitch + sc];
                             }
                         }
                     } else {
@@ -311,8 +349,8 @@ const GlyphInfo& FontManager::EnsureGlyph(uint32_t glyphId, int faceIdx) const {
 
                     gi.atlasX = curX_;
                     gi.atlasY = curY_;
-                    gi.bearingX = slot->bitmap_left;
-                    gi.bearingY = slot->bitmap_top;
+                    gi.bearingX = (int)(slot->bitmap_left * scale);
+                    gi.bearingY = (int)(slot->bitmap_top * scale);
                     gi.width = w;
                     gi.height = h;
 
