@@ -63,7 +63,6 @@ add_executable(fastcode-native
     src/curl_http.cpp
     src/keychain.cpp
     src/session.cpp
-    src/fake_data.cpp
 )
 
 target_include_directories(fastcode-native PRIVATE
