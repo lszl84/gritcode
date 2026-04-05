@@ -933,8 +933,8 @@ void ScrollView::Paint(GLRenderer& renderer) {
         blockHeightCache_.resize(blockCount);
         charHeightCache_.resize(blockCount);
         segCache_.resize(blockCount);
-        segValid_.resize(blockCount, false);
-        segTextLen_.resize(blockCount, 0);
+        segValid_.assign(blockCount, false);    // Force re-measure ALL
+        segTextLen_.assign(blockCount, 0);
 
         for (size_t i = 0; i < blockCount; i++) {
             auto& block = *blocks_[i];
