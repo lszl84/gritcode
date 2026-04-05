@@ -160,15 +160,7 @@ bool App::Init() {
 
     LayoutWidgets();
 
-    // Pre-render several frames before showing window so atlas is fully populated
     AppendSystem("Starting...");
-    for (int i = 0; i < 3; i++) {
-        renderer_.BeginFrame(window_.Width(), window_.Height(), scrollView_.Fonts());
-        scrollView_.Paint(renderer_);
-        PaintBottomBar();
-        renderer_.EndFrame();
-        window_.SwapBuffers();
-    }
     window_.Show();
 
     // Load API key and connect in background
@@ -797,10 +789,6 @@ void App::Run() {
 
         renderer_.EndFrame();
         window_.SwapBuffers();
-
-        // Force several redraws at startup to ensure all glyphs settle
-        static int startupFrames = 5;
-        if (startupFrames > 0) { startupFrames--; dirty_ = true; }
 
         // Throttle to ~60fps since vsync is off (Wayland frame callback issue)
         struct timespec sleepTime = {0, 8000000};  // 8ms (~120fps headroom)

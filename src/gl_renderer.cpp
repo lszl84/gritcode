@@ -150,10 +150,8 @@ void GLRenderer::EndFrame() {
 void GLRenderer::UpdateAtlasTexture() {
     if (!fm_) return;
     size_t gen = fm_->AtlasGeneration();
-    // Always upload for first 3 frames to ensure atlas is synced
-    if (gen == lastAtlasGen_ && frameCount_ > 3) return;
+    if (gen == lastAtlasGen_) return;
     lastAtlasGen_ = gen;
-    frameCount_++;
 
     int w = fm_->AtlasWidth();
     int h = fm_->AtlasHeight();
@@ -265,13 +263,15 @@ void GLRenderer::DrawTriRight(float cx, float cy, float size, const Color& c) {
 }
 
 void GLRenderer::PushClip(float x, float y, float w, float h) {
-    FlushBatch();  // Draw everything before clip change
+    UpdateAtlasTexture();  // Sync atlas before flushing
+    FlushBatch();
     glEnable(GL_SCISSOR_TEST);
     // GL scissor is in bottom-left origin, our coords are top-left
     glScissor((int)x, vpH_ - (int)(y + h), (int)w, (int)h);
 }
 
 void GLRenderer::PopClip() {
+    UpdateAtlasTexture();
     FlushBatch();
     glDisable(GL_SCISSOR_TEST);
 }
