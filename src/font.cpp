@@ -187,8 +187,19 @@ int FontManager::FindFallbackFace(uint32_t codepoint, int sizePx) const {
     int faceIdx = -1;
     if (match) {
         FcChar8* file = nullptr;
-        if (FcPatternGetString(match, FC_FILE, 0, &file) == FcResultMatch)
-            faceIdx = const_cast<FontManager*>(this)->LoadFace((const char*)file, sizePx);
+        if (FcPatternGetString(match, FC_FILE, 0, &file) == FcResultMatch) {
+            // Check if this font file+size was already loaded
+            std::string path((const char*)file);
+            std::string faceKey = path + ":" + std::to_string(sizePx);
+            auto fit = loadedFaces_.find(faceKey);
+            if (fit != loadedFaces_.end()) {
+                faceIdx = fit->second;
+            } else {
+                faceIdx = const_cast<FontManager*>(this)->LoadFace(path, sizePx);
+                if (faceIdx >= 0)
+                    loadedFaces_[faceKey] = faceIdx;
+            }
+        }
         FcPatternDestroy(match);
     }
     FcCharSetDestroy(cs);
@@ -197,130 +208,99 @@ int FontManager::FindFallbackFace(uint32_t codepoint, int sizePx) const {
     return faceIdx;
 }
 
-void FontManager::FillMissingGlyphs(ShapedRun& run, const std::string& text,
-                                     int primaryFace, bool rtl) const {
-    int sizePx = (int)(faces_[primaryFace].lineHeight + 0.5f);
-
-    // Find contiguous ranges of missing glyphs (by cluster byte offset)
-    struct MissingRange { size_t byteStart, byteEnd; size_t glyphStart, glyphEnd; };
-    std::vector<MissingRange> ranges;
-
-    size_t i = 0;
-    while (i < run.glyphs.size()) {
-        if (run.glyphs[i].glyphId != 0) { i++; continue; }
-        // Start of missing range
-        size_t gs = i;
-        size_t bs = run.glyphs[i].cluster;
-        while (i < run.glyphs.size() && run.glyphs[i].glyphId == 0) i++;
-        size_t ge = i;
-        // Find byte end: next non-missing glyph's cluster, or end of text
-        size_t be = (ge < run.glyphs.size()) ? run.glyphs[ge].cluster : text.size();
-        ranges.push_back({bs, be, gs, ge});
-    }
-
-    if (ranges.empty()) return;
-
-    // Process ranges in reverse so glyph indices stay valid after replacement
-    for (int ri = (int)ranges.size() - 1; ri >= 0; ri--) {
-        auto& r = ranges[ri];
-        if (r.byteStart >= text.size()) continue;
-
-        // Find fallback font for first codepoint in range
-        uint32_t cp;
-        DecodeUTF8(text.c_str() + r.byteStart, cp);
-        int fbFace = FindFallbackFace(cp, sizePx);
-        if (fbFace < 0 || fbFace >= (int)faces_.size()) continue;
-
-        // Shape this text range with the fallback font
-        std::string sub = text.substr(r.byteStart, r.byteEnd - r.byteStart);
-        hb_buffer_t* buf = hb_buffer_create();
-        hb_buffer_add_utf8(buf, sub.c_str(), (int)sub.size(), 0, (int)sub.size());
-        hb_buffer_set_direction(buf, rtl ? HB_DIRECTION_RTL : HB_DIRECTION_LTR);
-        hb_buffer_guess_segment_properties(buf);
-        hb_shape(faces_[fbFace].hb, buf, nullptr, 0);
-
-        unsigned int fbCount = 0;
-        hb_glyph_info_t* fbInfo = hb_buffer_get_glyph_infos(buf, &fbCount);
-        hb_glyph_position_t* fbPos = hb_buffer_get_glyph_positions(buf, &fbCount);
-
-        // Build replacement glyphs
-        float xBase = run.glyphs[r.glyphStart].xPos;
-        float curX = 0;
-        std::vector<ShapedGlyph> replacement(fbCount);
-        for (unsigned int j = 0; j < fbCount; j++) {
-            auto& g = replacement[j];
-            g.glyphId = fbInfo[j].codepoint;
-            g.cluster = fbInfo[j].cluster + r.byteStart;
-            g.xPos = xBase + curX + fbPos[j].x_offset / 64.0f;
-            g.yPos = fbPos[j].y_offset / 64.0f;
-            g.xAdvance = fbPos[j].x_advance / 64.0f;
-            g.faceIdx = fbFace;
-            g.cached = &EnsureGlyph(g.glyphId, g.faceIdx);
-            curX += g.xAdvance;
-        }
-        hb_buffer_destroy(buf);
-
-        // Calculate width difference and shift subsequent glyphs
-        float oldWidth = 0;
-        for (size_t gi = r.glyphStart; gi < r.glyphEnd; gi++)
-            oldWidth += run.glyphs[gi].xAdvance;
-        float diff = curX - oldWidth;
-
-        // Replace glyphs in the run
-        run.glyphs.erase(run.glyphs.begin() + r.glyphStart,
-                         run.glyphs.begin() + r.glyphEnd);
-        run.glyphs.insert(run.glyphs.begin() + r.glyphStart,
-                          replacement.begin(), replacement.end());
-
-        // Shift all glyphs after this range
-        for (size_t gi = r.glyphStart + replacement.size(); gi < run.glyphs.size(); gi++)
-            run.glyphs[gi].xPos += diff;
-        run.totalWidth += diff;
-    }
-}
-
 ShapedRun FontManager::Shape(const std::string& text, FontStyle style, bool rtl) const {
     ShapedRun result;
     if (text.empty()) return result;
 
-    int fIdx = FaceIndex(style, rtl);
-    if (fIdx < 0 || fIdx >= (int)faces_.size()) return result;
+    int primaryIdx = FaceIndex(style, rtl);
+    if (primaryIdx < 0 || primaryIdx >= (int)faces_.size()) return result;
 
-    const Face& face = faces_[fIdx];
+    int sizePx = (int)(faces_[primaryIdx].lineHeight + 0.5f);
 
-    // Step 1: Shape entire text with primary font (preserves ligatures, Arabic forms)
-    hb_buffer_t* buf = hb_buffer_create();
-    hb_buffer_add_utf8(buf, text.c_str(), (int)text.size(), 0, (int)text.size());
-    hb_buffer_set_direction(buf, rtl ? HB_DIRECTION_RTL : HB_DIRECTION_LTR);
-    hb_buffer_guess_segment_properties(buf);
-    hb_shape(face.hb, buf, nullptr, 0);
+    // Step 1: Resolve font per codepoint, group consecutive same-font chars into runs
+    struct FontRun { size_t byteStart, byteEnd; int faceIdx; };
+    std::vector<FontRun> fontRuns;
 
-    unsigned int glyphCount = 0;
-    hb_glyph_info_t* info = hb_buffer_get_glyph_infos(buf, &glyphCount);
-    hb_glyph_position_t* pos = hb_buffer_get_glyph_positions(buf, &glyphCount);
+    const char* p = text.c_str();
+    const char* textEnd = p + text.size();
+    int prevFallback = -1;
+    bool prevWasZwj = false;
 
-    float cursorX = 0;
-    result.glyphs.resize(glyphCount);
-    bool hasMissing = false;
+    while (p < textEnd) {
+        size_t off = p - text.c_str();
+        uint32_t cp;
+        int len = DecodeUTF8(p, cp);
 
-    for (unsigned int i = 0; i < glyphCount; i++) {
-        auto& g = result.glyphs[i];
-        g.glyphId = info[i].codepoint;
-        g.cluster = info[i].cluster;
-        g.xPos = cursorX + pos[i].x_offset / 64.0f;
-        g.yPos = pos[i].y_offset / 64.0f;
-        g.xAdvance = pos[i].x_advance / 64.0f;
-        g.faceIdx = fIdx;
-        g.cached = &EnsureGlyph(g.glyphId, fIdx);
-        cursorX += pos[i].x_advance / 64.0f;
-        if (g.glyphId == 0) hasMissing = true;
+        int face = primaryIdx;
+        if (FT_Get_Char_Index(faces_[primaryIdx].ft, cp) == 0) {
+            int fb = FindFallbackFace(cp, sizePx);
+            if (fb >= 0) face = fb;
+        }
+
+        // Emoji sequence continuations inherit previous fallback font:
+        // - Character immediately after ZWJ (e.g., ♂ in 🤷‍♂️)
+        // - ZWJ itself, variation selectors, skin tone modifiers, tag chars
+        if (prevFallback >= 0 &&
+            (prevWasZwj ||
+             cp == 0x200D || (cp >= 0xFE00 && cp <= 0xFE0F) || cp == 0x20E3 ||
+             (cp >= 0x1F3FB && cp <= 0x1F3FF) ||
+             (cp >= 0xE0020 && cp <= 0xE007F))) {
+            face = prevFallback;
+        }
+
+        prevWasZwj = (cp == 0x200D);
+        prevFallback = (face != primaryIdx) ? face : -1;
+
+        p += len;
+        size_t byteEnd = p - text.c_str();
+
+        if (!fontRuns.empty() && fontRuns.back().faceIdx == face)
+            fontRuns.back().byteEnd = byteEnd;
+        else
+            fontRuns.push_back({off, byteEnd, face});
     }
+
+    // Step 2: Shape each font run independently
+    // For RTL, process runs in reverse order for correct visual placement.
+    // Uses hb_buffer_add_utf8 with full text context so Arabic joining
+    // works correctly across run boundaries.
+    float cursorX = 0;
+    int rStart = rtl ? (int)fontRuns.size() - 1 : 0;
+    int rEnd   = rtl ? -1 : (int)fontRuns.size();
+    int rStep  = rtl ? -1 : 1;
+
+    for (int ri = rStart; ri != rEnd; ri += rStep) {
+        auto& fr = fontRuns[ri];
+
+        hb_buffer_t* buf = hb_buffer_create();
+        hb_buffer_add_utf8(buf, text.c_str(), (int)text.size(),
+                           (unsigned int)fr.byteStart, (int)(fr.byteEnd - fr.byteStart));
+        hb_buffer_set_direction(buf, rtl ? HB_DIRECTION_RTL : HB_DIRECTION_LTR);
+        hb_buffer_guess_segment_properties(buf);
+        hb_shape(faces_[fr.faceIdx].hb, buf, nullptr, 0);
+
+        unsigned int count = 0;
+        hb_glyph_info_t* info = hb_buffer_get_glyph_infos(buf, &count);
+        hb_glyph_position_t* pos = hb_buffer_get_glyph_positions(buf, &count);
+
+        float scale = faces_[fr.faceIdx].bitmapScale;
+        for (unsigned int i = 0; i < count; i++) {
+            ShapedGlyph g;
+            g.glyphId = info[i].codepoint;
+            g.cluster = info[i].cluster;  // Absolute byte offset (hb context)
+            g.xPos = cursorX + pos[i].x_offset / 64.0f * scale;
+            g.yPos = pos[i].y_offset / 64.0f * scale;
+            g.xAdvance = pos[i].x_advance / 64.0f * scale;
+            g.faceIdx = fr.faceIdx;
+            g.cached = &EnsureGlyph(g.glyphId, fr.faceIdx);
+            cursorX += g.xAdvance;
+            result.glyphs.push_back(g);
+        }
+
+        hb_buffer_destroy(buf);
+    }
+
     result.totalWidth = cursorX;
-    hb_buffer_destroy(buf);
-
-    // Step 2: Fill missing glyphs with fallback fonts (per-glyph, not per-run)
-    if (hasMissing) FillMissingGlyphs(result, text, fIdx, rtl);
-
     return result;
 }
 
