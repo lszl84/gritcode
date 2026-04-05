@@ -144,24 +144,20 @@ bool App::Init() {
 
     LayoutWidgets();
 
-    // Render two frames immediately so compositor doesn't think we froze
-    // (keychain + model fetch can take time)
-    for (int i = 0; i < 2; i++) {
-        window_.PollEvents();
-        glClearColor(0.12f, 0.12f, 0.13f, 1.0f);
-        glClear(GL_COLOR_BUFFER_BIT);
-        window_.SwapBuffers();
-    }
-
-    // Load API key (may involve dbus → libsecret)
-    std::string savedKey = keychain::LoadApiKey();
-    if (!savedKey.empty()) {
-        AppendSystem("Connecting with saved API key...");
-        Connect(savedKey);
-    } else {
-        AppendSystem("Connecting anonymously...");
-        Connect("");
-    }
+    // Load API key and connect in background to avoid blocking startup
+    AppendSystem("Starting...");
+    std::thread([this]() {
+        std::string savedKey = keychain::LoadApiKey();
+        events_.Push([this, savedKey]() {
+            if (!savedKey.empty()) {
+                AppendSystem("Connecting with saved API key...");
+                Connect(savedKey);
+            } else {
+                AppendSystem("Connecting anonymously...");
+                Connect("");
+            }
+        });
+    }).detach();
 
     return true;
 }
@@ -674,7 +670,7 @@ void App::Run() {
 
     while (!window_.ShouldClose()) {
         // Block until something happens (poll during waiting animation)
-        bool showingDots = waitingForResponse_ && (GetMonotonicTime() - requestStartTime_ > 0.5);
+        bool showingDots = waitingForResponse_ && (GetMonotonicTime() - requestStartTime_ > 1.5);
         if (!dirty_ && events_.Empty() && !scrollView_.NeedsRedraw() && !showingDots) {
             window_.WaitEvents();
         } else {
@@ -695,7 +691,7 @@ void App::Run() {
         if (waitingForResponse_) {
             waitingDotAnim_ += dt;
             double elapsed = now - requestStartTime_;
-            if (elapsed > 0.5) MarkDirty();  // Keep redrawing for animation
+            if (elapsed > 1.5) MarkDirty();  // Keep redrawing for animation
         }
 
         if (!dirty_ && !scrollView_.NeedsRedraw()) continue;
@@ -715,13 +711,12 @@ void App::Run() {
         scrollView_.Paint(renderer_);
 
         // Waiting dots (plain, below last block, after 3s)
-        if (waitingForResponse_ && (now - requestStartTime_ > 0.5)) {
+        if (waitingForResponse_ && (now - requestStartTime_ > 1.5)) {
             auto& fm = scrollView_.Fonts();
             float dotR = fm.LineHeight(FontStyle::Regular) * 0.15f;
             float spacing = dotR * 3;
             float baseX = 20;
-            // Tight to the last block
-            float baseY = scrollView_.ContentBottom() + dotR * 2;
+            float baseY = scrollView_.ContentBottom() + fm.LineHeight(FontStyle::Regular);
             int frame = (int)(waitingDotAnim_ * 4) % 4;  // 0-3 animation frame
             for (int d = 0; d < 3; d++) {
                 float alpha = (d == (frame % 3)) ? 1.0f : 0.3f;
