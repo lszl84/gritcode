@@ -382,9 +382,12 @@ void ScrollView::LayoutFromSegments(size_t idx, float textAreaW, float clientW,
     bool hasCurrentRun = false;
 
     auto flushLine = [&]() {
+        // Detect RTL per line so English lines in Arabic blocks aren't reversed
+        bool lineRtl = !lineText.empty() ? DetectRTL(lineText) : rtl;
+
         if (lineText.empty() && lineRuns.empty() && !hasCurrentRun) {
             float h = segs.empty() ? fonts_.LineHeight(blockStyle) : segs[0].height;
-            WrappedLine wl = MakeLine("", rtl, 0, h, leftMargin_, clientW, (int)indent);
+            WrappedLine wl = MakeLine("", lineRtl, 0, h, leftMargin_, clientW, (int)indent);
             wl.y = outH;
             out.push_back(std::move(wl));
             outH += h;
@@ -393,11 +396,11 @@ void ScrollView::LayoutFromSegments(size_t idx, float textAreaW, float clientW,
 
         // Flush current run
         if (hasCurrentRun && !currentRun.text.empty()) {
-            lineRunOffsets.push_back(lineW - fonts_.MeasureWidth(currentRun.text, currentRun.style, rtl));
+            lineRunOffsets.push_back(lineW - fonts_.MeasureWidth(currentRun.text, currentRun.style, lineRtl));
             // Actually we need the offset before adding, let me fix
         }
 
-        WrappedLine wl = MakeLine(lineText, rtl, lineW, lineH > 0 ? lineH : fonts_.LineHeight(blockStyle),
+        WrappedLine wl = MakeLine(lineText, lineRtl, lineW, lineH > 0 ? lineH : fonts_.LineHeight(blockStyle),
                                    leftMargin_, clientW, (int)indent);
         wl.y = outH;
 
@@ -412,7 +415,7 @@ void ScrollView::LayoutFromSegments(size_t idx, float textAreaW, float clientW,
             float xOff = 0;
             for (auto& r : wl.styledRuns) {
                 wl.runXOffsets.push_back(xOff);
-                xOff += fonts_.MeasureWidth(r.text, r.style, rtl);
+                xOff += fonts_.MeasureWidth(r.text, r.style, lineRtl);
             }
         }
 
@@ -617,7 +620,7 @@ void ScrollView::EnsureShapedCache(size_t bi, size_t li) const {
     auto& shapes = shapedCache_[bi][li];
     shapes.clear();
 
-    bool rtl = blocks_[bi]->rightToLeft;
+    bool rtl = wl.rightToLeft;
     if (!wl.styledRuns.empty()) {
         for (auto& run : wl.styledRuns)
             shapes.push_back(fonts_.Shape(run.text, run.style, rtl));
@@ -1095,7 +1098,7 @@ void ScrollView::Paint(GLRenderer& renderer) {
                 if (selFromChar < selToChar) {
                     // Compute selection rect
                     auto& mutWl = const_cast<WrappedLine&>(wl);
-                    EnsureCaretX(mutWl, blockStyle, block.rightToLeft);
+                    EnsureCaretX(mutWl, blockStyle, wl.rightToLeft);
 
                     float vx1 = CaretXForOffset(wl, selFromChar);
                     float vx2 = CaretXForOffset(wl, selToChar);
@@ -1138,7 +1141,6 @@ void ScrollView::Paint(GLRenderer& renderer) {
                 }
             } else if (!wl.text.empty() && !shapes.empty()) {
                 auto& shaped = shapes[0];
-                bool rtl = block.rightToLeft;
                 Color normalC = ColorForType(block.type);
 
                 if (!lineSelected || (selFromChar == 0 && selToChar == lineCharLen)) {
