@@ -783,10 +783,10 @@ void ScrollView::FindWordBoundary(const TextPosition& pos, TextPosition& ws, Tex
 void ScrollView::OnMouseDown(float x, float y, bool shift) {
     TextPosition pos = HitTest(x, y);
 
-    // Toggle thinking collapse
+    // Toggle thinking collapse (only expandable blocks)
     if (pos.IsValid() && pos.block < (int)blocks_.size()) {
         auto& b = blocks_[pos.block];
-        if (b->type == BlockType::THINKING) {
+        if (b->type == BlockType::THINKING && b->isExpandable) {
             if (b->isCollapsed || pos.line == 0) {
                 ToggleCollapse(pos.block);
                 return;
@@ -947,15 +947,44 @@ void ScrollView::Paint(GLRenderer& renderer) {
             LayoutFromSegments(i, textAreaW, clientW, wrappedCache_[i], h);
             shapedCache_[i].clear(); // New lines need fresh shapes
 
-            // Collapsed thinking: only first line
-            if (block.type == BlockType::THINKING && block.isCollapsed && wrappedCache_[i].size() > 1) {
-                float firstH = wrappedCache_[i][0].height;
-                wrappedCache_[i].resize(1);
-                h = firstH;
+            // Track expandability and handle collapse
+            if (block.type == BlockType::THINKING) {
+                block.isExpandable = (wrappedCache_[i].size() > 1);
+                if (!block.isExpandable) block.isCollapsed = false;  // Single-line: always expanded (no triangle)
+
+                if (block.isCollapsed && block.isExpandable) {
+                    // Collapsed: show only first line, truncated to leave room for dots
+                    float firstH = wrappedCache_[i][0].height;
+                    wrappedCache_[i].resize(1);
+                    h = firstH;
+
+                    if (block.isLoading) {
+                        // Truncate first line text to fit dots
+                        float ch = fonts_.LineHeight(FontStyle::ThinkingItalic);
+                        float dotSpace = ch * 2.5f;  // Space needed for 3 dots
+                        float maxTextW = textAreaW - dotSpace - 20;  // 20 for triangle
+                        auto& wl = wrappedCache_[i][0];
+                        if (wl.width > maxTextW && !wl.text.empty()) {
+                            // Truncate word by word
+                            std::string truncated = wl.text;
+                            while (!truncated.empty() && fonts_.MeasureWidth(truncated, FontStyle::ThinkingItalic) > maxTextW) {
+                                size_t sp = truncated.rfind(' ');
+                                if (sp == std::string::npos) { truncated.clear(); break; }
+                                truncated = truncated.substr(0, sp);
+                            }
+                            if (!truncated.empty() && truncated.size() < wl.text.size())
+                                truncated += "\xe2\x80\xa6";  // …
+                            wl.text = truncated;
+                            wl.width = fonts_.MeasureWidth(truncated, FontStyle::ThinkingItalic);
+                            wl.shapedValid = false;
+                            if (i < shapedCache_.size()) shapedCache_[i].clear();
+                        }
+                    }
+                }
             }
 
             float ch = fonts_.LineHeight(StyleForType(block.type));
-            if (block.isLoading && !block.isCollapsed) h += ch;
+            if (block.isLoading && !block.isCollapsed && block.isExpandable) h += ch;
             blockHeightCache_[i] = h;
             charHeightCache_[i] = ch;
         }
@@ -1009,8 +1038,8 @@ void ScrollView::Paint(GLRenderer& renderer) {
             renderer.DrawRect(leftMargin_ - 5, blockTop, 3, blockH + 4, userPromptColor_);
         }
 
-        // Thinking collapse/expand triangle (drawn, not unicode)
-        if (block.type == BlockType::THINKING && !wrappedCache_[i].empty()) {
+        // Thinking collapse/expand triangle (only for expandable blocks)
+        if (block.type == BlockType::THINKING && block.isExpandable && !wrappedCache_[i].empty()) {
             float ch = fonts_.LineHeight(FontStyle::ThinkingItalic);
             float triSize = ch * 0.4f;
             float triY = blockTop + wrappedCache_[i][0].y + ch / 2;
@@ -1128,13 +1157,13 @@ void ScrollView::Paint(GLRenderer& renderer) {
             float dotSpacing = dotR * 3;
 
             float dotX, dotY;
-            if (block.isCollapsed) {
-                // Collapsed: dots at end of the header line
+            if (block.isCollapsed || !block.isExpandable) {
+                // Collapsed or single-line: dots at end of first line
                 auto& firstLine = lines[0];
                 dotX = firstLine.x + firstLine.width + dotSpacing;
                 dotY = blockTop + firstLine.y + ch / 2;
             } else {
-                // Expanded: dots on a new line below the last text line
+                // Expanded multi-line: dots on new line below last text
                 auto& lastLine = lines.back();
                 dotX = leftMargin_ + 10;
                 dotY = blockTop + lastLine.y + lastLine.height + ch / 2;
