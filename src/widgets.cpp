@@ -119,8 +119,13 @@ void TextInput::EnsureCursorVisible(FontManager& fm) {
     std::string before = display.substr(0, ByteOffsetForCodepoint(display, cpIdx));
     float cursorX = fm.MeasureWidth(before, style);
 
+    float totalW = fm.MeasureWidth(display, style);
+    float maxScroll = std::max(0.0f, totalW - visibleW);
+    scrollX = std::min(scrollX, maxScroll);  // Clamp when text got shorter
+
     if (cursorX - scrollX > visibleW) scrollX = cursorX - visibleW + 10;
     if (cursorX - scrollX < 0) scrollX = std::max(0.0f, cursorX - 10);
+    scrollX = std::max(0.0f, scrollX);
 }
 
 void TextInput::Paint(GLRenderer& r, FontManager& fm, float time) const {
