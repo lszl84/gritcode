@@ -34,7 +34,8 @@ private:
 
     int vpW_ = 0, vpH_ = 0;
     const FontManager* fm_ = nullptr;
-    size_t lastAtlasGen_ = 0;  // Track atlas changes
+    size_t lastAtlasGen_ = 0;
+    int frameCount_ = 0;
 
     struct Vertex {
         float x, y;       // position

@@ -150,8 +150,10 @@ void GLRenderer::EndFrame() {
 void GLRenderer::UpdateAtlasTexture() {
     if (!fm_) return;
     size_t gen = fm_->AtlasGeneration();
-    if (gen == lastAtlasGen_) return;
+    // Always upload for first 3 frames to ensure atlas is synced
+    if (gen == lastAtlasGen_ && frameCount_ > 3) return;
     lastAtlasGen_ = gen;
+    frameCount_++;
 
     int w = fm_->AtlasWidth();
     int h = fm_->AtlasHeight();
