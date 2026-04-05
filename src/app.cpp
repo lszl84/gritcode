@@ -791,6 +791,10 @@ void App::Run() {
         renderer_.EndFrame();
         window_.SwapBuffers();
 
+        // Always render a second frame after the first (atlas may have been updated)
+        static bool firstFrame = true;
+        if (firstFrame) { firstFrame = false; dirty_ = true; }
+
         // Throttle to ~60fps since vsync is off (Wayland frame callback issue)
         struct timespec sleepTime = {0, 8000000};  // 8ms (~120fps headroom)
         nanosleep(&sleepTime, nullptr);
