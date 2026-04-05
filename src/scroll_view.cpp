@@ -32,7 +32,7 @@ bool ScrollView::Init(int w, int h, float scale) {
     if (baseFontPx < 14) baseFontPx = 14;
     if (!fonts_.Init(baseFontPx)) return false;
 
-    leftMargin_ = 10 * scale;
+    leftMargin_ = 16 * scale;
 
     float lh = fonts_.LineHeight(FontStyle::Regular);
     topMargin_ = lh;
@@ -1029,15 +1029,20 @@ void ScrollView::Paint(GLRenderer& renderer) {
         FontStyle blockStyle = StyleForType(block.type);
         float ascent = fonts_.Ascent(blockStyle);
 
-        // Block backgrounds
+        // Block backgrounds with padding
+        float bgPad = 6;  // Vertical padding above and below text
         Color bg = BgForType(block.type);
         if (bg.a > 0) {
-            renderer.DrawRect(leftMargin_ - 5, blockTop, textAreaW + 10, blockH + 4, bg);
+            if (block.type == BlockType::THINKING) {
+                renderer.DrawRect(0, blockTop - bgPad, clientW, blockH + bgPad * 2, bg);
+            } else {
+                renderer.DrawRect(leftMargin_ - 8, blockTop - bgPad, textAreaW + 16, blockH + bgPad * 2, bg);
+            }
         }
 
         // User prompt left border
         if (block.type == BlockType::USER_PROMPT) {
-            renderer.DrawRect(leftMargin_ - 5, blockTop, 3, blockH + 4, userPromptColor_);
+            renderer.DrawRect(leftMargin_ - 8, blockTop - bgPad, 3, blockH + bgPad * 2, userPromptColor_);
         }
 
         // Thinking collapse/expand triangle (only for expandable blocks)
