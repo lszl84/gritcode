@@ -204,23 +204,9 @@ void FontManager::FillMissingGlyphs(ShapedRun& run, const std::string& text,
         FT_UInt glyphIndex = FT_Get_Char_Index(faces_[fbFace].ft, cp);
         if (glyphIndex == 0) continue;  // Fallback font doesn't have it either
 
-        // Replace glyph with fallback version
+        // Replace glyph with fallback version, keep position from primary shaping
         g.glyphId = glyphIndex;
         g.faceIdx = fbFace;
-
-        // Get correct advance from fallback font
-        if (FT_Load_Glyph(faces_[fbFace].ft, glyphIndex, FT_LOAD_DEFAULT) == 0) {
-            float newAdvance = faces_[fbFace].ft->glyph->advance.x / 64.0f;
-            float diff = newAdvance - g.xAdvance;
-            g.xAdvance = newAdvance;
-            // Shift all subsequent glyphs
-            for (auto& g2 : run.glyphs) {
-                if (&g2 > &g) g2.xPos += diff;
-            }
-            run.totalWidth += diff;
-        }
-
-        // Update cached pointer
         g.cached = &EnsureGlyph(g.glyphId, g.faceIdx);
     }
 }
