@@ -144,6 +144,13 @@ bool App::Init() {
 
     LayoutWidgets();
 
+    // Render first frame immediately so compositor doesn't think we froze
+    renderer_.BeginFrame(window_.Width(), window_.Height(), scrollView_.Fonts());
+    Color bg{0.12f, 0.12f, 0.13f};
+    renderer_.DrawRect(0, 0, window_.Width(), window_.Height(), bg);
+    renderer_.EndFrame();
+    window_.SwapBuffers();
+
     // Auto-connect
     std::string savedKey = keychain::LoadApiKey();
     if (!savedKey.empty()) {
@@ -665,7 +672,7 @@ void App::Run() {
 
     while (!window_.ShouldClose()) {
         // Block until something happens (poll during waiting animation)
-        bool showingDots = waitingForResponse_ && (GetMonotonicTime() - requestStartTime_ > 3.0);
+        bool showingDots = waitingForResponse_ && (GetMonotonicTime() - requestStartTime_ > 0.5);
         if (!dirty_ && events_.Empty() && !scrollView_.NeedsRedraw() && !showingDots) {
             window_.WaitEvents();
         } else {
@@ -686,7 +693,7 @@ void App::Run() {
         if (waitingForResponse_) {
             waitingDotAnim_ += dt;
             double elapsed = now - requestStartTime_;
-            if (elapsed > 3.0) MarkDirty();  // Keep redrawing for animation
+            if (elapsed > 0.5) MarkDirty();  // Keep redrawing for animation
         }
 
         if (!dirty_ && !scrollView_.NeedsRedraw()) continue;
@@ -706,13 +713,13 @@ void App::Run() {
         scrollView_.Paint(renderer_);
 
         // Waiting dots (plain, below last block, after 3s)
-        if (waitingForResponse_ && (now - requestStartTime_ > 3.0)) {
+        if (waitingForResponse_ && (now - requestStartTime_ > 0.5)) {
             auto& fm = scrollView_.Fonts();
             float dotR = fm.LineHeight(FontStyle::Regular) * 0.15f;
             float spacing = dotR * 3;
             float baseX = 20;
-            // Position below the last block in the scroll view
-            float baseY = scrollView_.ContentBottom() + fm.LineHeight(FontStyle::Regular) * 0.5f;
+            // Tight to the last block
+            float baseY = scrollView_.ContentBottom() + dotR * 2;
             int frame = (int)(waitingDotAnim_ * 4) % 4;  // 0-3 animation frame
             for (int d = 0; d < 3; d++) {
                 float alpha = (d == (frame % 3)) ? 1.0f : 0.3f;
