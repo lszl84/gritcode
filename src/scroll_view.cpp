@@ -1009,13 +1009,15 @@ void ScrollView::Paint(GLRenderer& renderer) {
             renderer.DrawRect(leftMargin_ - 5, blockTop, 3, blockH + 4, userPromptColor_);
         }
 
-        // Thinking collapse indicator
+        // Thinking collapse/expand triangle (drawn, not unicode)
         if (block.type == BlockType::THINKING && !wrappedCache_[i].empty()) {
-            std::string arrow = block.isCollapsed ? "\xe2\x96\xb6" : "\xe2\x96\xbc";
-            auto run = fonts_.Shape(arrow, FontStyle::ThinkingItalic, false);
-            float arrowAsc = fonts_.Ascent(FontStyle::ThinkingItalic);
-            renderer.DrawShapedRun(fonts_, run, 2, blockTop + wrappedCache_[i][0].y,
-                                   arrowAsc, thinkingColor_);
+            float ch = fonts_.LineHeight(FontStyle::ThinkingItalic);
+            float triSize = ch * 0.4f;
+            float triY = blockTop + wrappedCache_[i][0].y + ch / 2;
+            if (block.isCollapsed)
+                renderer.DrawTriRight(4, triY, triSize, thinkingColor_);
+            else
+                renderer.DrawTriDown(4 + triSize / 2, triY, triSize, thinkingColor_);
         }
 
         // Draw lines
@@ -1119,22 +1121,31 @@ void ScrollView::Paint(GLRenderer& renderer) {
             }
         }
 
-        // Loading dots
-        if (block.isLoading && !block.isCollapsed) {
+        // Loading dots for thinking blocks
+        if (block.type == BlockType::THINKING && block.isLoading && !lines.empty()) {
             float ch = charHeightCache_[i];
-            float dotY = blockTop + blockH - ch;
-            float dotR = ch / 4;
-            float dotSpacing = ch * 0.8f;
-            float startX = leftMargin_ + 10;
+            float dotR = ch / 5;
+            float dotSpacing = dotR * 3;
+
+            float dotX, dotY;
+            if (block.isCollapsed) {
+                // Collapsed: dots at end of the header line
+                auto& firstLine = lines[0];
+                dotX = firstLine.x + firstLine.width + dotSpacing;
+                dotY = blockTop + firstLine.y + ch / 2;
+            } else {
+                // Expanded: dots on a new line below the last text line
+                auto& lastLine = lines.back();
+                dotX = leftMargin_ + 10;
+                dotY = blockTop + lastLine.y + lastLine.height + ch / 2;
+            }
 
             for (int d = 0; d < LOADING_DOT_COUNT; d++) {
-                float cx = startX + d * dotSpacing;
-                float cy = dotY + ch / 2;
+                float cx = dotX + d * dotSpacing;
                 bool active = (d == loadingFrame_);
-                float r = active ? dotR : dotR * 0.7f;
+                float r = active ? dotR : dotR * 0.6f;
                 Color dc = active ? thinkingColor_ : Color::RGB(100, 100, 100);
-                // Approximate circle with a small rect
-                renderer.DrawRect(cx - r, cy - r, r * 2, r * 2, dc);
+                renderer.DrawRect(cx - r, dotY - r, r * 2, r * 2, dc);
             }
         }
     }
