@@ -348,6 +348,8 @@ void App::SendMessage() {
     requestInProgress_ = true;
     sendButton_.enabled = false;
     toolRound_ = 0;
+    requestStartTime_ = GetMonotonicTime();
+    waitingIndicatorShown_ = false;
     MarkDirty();
 
     DoSendToProvider();
@@ -399,6 +401,13 @@ void App::DoSendToProvider() {
         // onChunk (bg thread)
         [this](const std::string& chunk, bool isThinking) {
             events_.Push([this, chunk, isThinking]() {
+                // Remove waiting indicator on first chunk
+                if (waitingIndicatorShown_) {
+                    scrollView_.StopThinking(waitingBlockIdx_);
+                    scrollView_.RemoveBlocksFrom(waitingBlockIdx_);
+                    waitingIndicatorShown_ = false;
+                }
+
                 if (isThinking) {
                     if (!receivingThinking_) {
                         receivingThinking_ = true;
@@ -440,6 +449,13 @@ void App::DoSendToProvider() {
         [this](bool ok, const std::string& content, const std::string& error,
                const std::vector<json>& toolCalls, int, int) {
             events_.Push([this, ok, content, error, toolCalls]() {
+                // Clean up waiting indicator
+                if (waitingIndicatorShown_) {
+                    scrollView_.StopThinking(waitingBlockIdx_);
+                    scrollView_.RemoveBlocksFrom(waitingBlockIdx_);
+                    waitingIndicatorShown_ = false;
+                }
+
                 if (!ok) {
                     if (!history_.empty() && history_.back().role == "user")
                         history_.pop_back();
@@ -656,8 +672,9 @@ void App::Run() {
     double lastTime = GetMonotonicTime();
 
     while (!window_.ShouldClose()) {
-        // Block until something happens
-        if (!dirty_ && events_.Empty() && !scrollView_.NeedsRedraw()) {
+        // Block until something happens (but poll during active request for waiting indicator)
+        bool hasAnimation = scrollView_.NeedsRedraw() || (requestInProgress_ && !waitingIndicatorShown_);
+        if (!dirty_ && events_.Empty() && !hasAnimation) {
             window_.WaitEvents();
         } else {
             window_.PollEvents();
@@ -672,6 +689,18 @@ void App::Run() {
 
         messageInput_.Update(dt);
         scrollView_.Update(dt);
+
+        // Show waiting indicator after 3s with no response
+        if (requestInProgress_ && !waitingIndicatorShown_ && !receivingThinking_) {
+            double elapsed = now - requestStartTime_;
+            if (elapsed > 3.0) {
+                waitingIndicatorShown_ = true;
+                waitingBlockIdx_ = scrollView_.BlockCount();
+                scrollView_.AppendStream(BlockType::THINKING, "");
+                scrollView_.StartThinking(waitingBlockIdx_);
+                MarkDirty();
+            }
+        }
 
         if (!dirty_ && !scrollView_.NeedsRedraw()) continue;
         dirty_ = false;

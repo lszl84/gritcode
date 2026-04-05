@@ -71,11 +71,16 @@ private:
     int toolRound_ = 0;
 
     // Streaming state
-    std::string responseBuffer_;      // Accumulated markdown text
+    std::string responseBuffer_;
     bool receivingThinking_ = false;
-    size_t responseStartBlock_ = 0;   // Where content blocks start
-    size_t lastMarkdownLen_ = 0;      // Buffer length at last markdown render
-    double lastMarkdownTime_ = 0;     // Time of last markdown render
+    size_t responseStartBlock_ = 0;
+    size_t lastMarkdownLen_ = 0;
+    double lastMarkdownTime_ = 0;
+
+    // Waiting indicator (shown after 3s if no chunks received)
+    double requestStartTime_ = 0;
+    bool waitingIndicatorShown_ = false;
+    size_t waitingBlockIdx_ = 0;
 
     // Layout
     float barHeight_ = 40;
