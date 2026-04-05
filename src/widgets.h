@@ -80,6 +80,7 @@ public:
 
     void Paint(GLRenderer& r, FontManager& fm, float time) const;
     bool OnMouseDown(float x, float y);
+    void OnMouseDrag(float x, float y, FontManager& fm);
     void OnChar(uint32_t codepoint);
     void OnKey(int key, int mods);
     void Update(float dt);

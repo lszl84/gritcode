@@ -194,8 +194,8 @@ void App::LayoutWidgets() {
     float barY = h - bar;
     float inputY = barY - inp;
 
-    messageInput_.bounds = {8, inputY + 5, w - 80, inp - 10};
-    sendButton_.bounds = {w - 68, inputY + 5, 60, inp - 10};
+    messageInput_.bounds = {8, inputY + 5, w - 90, inp - 10};
+    sendButton_.bounds = {w - 78, inputY + 5, 70, inp - 10};
 
     float bx = 8;
     providerDropdown_.bounds = {bx, barY + 5, 170 * s, bar - 10}; bx += 178 * s;
@@ -607,7 +607,13 @@ void App::OnMouseDown(float x, float y, bool shift) {
 
     if (sendButton_.OnMouseDown(x, y)) { MarkDirty(); return; }
     if (apiKeyButton_.OnMouseDown(x, y)) { MarkDirty(); return; }
-    if (messageInput_.OnMouseDown(x, y)) { MarkDirty(); return; }
+    if (messageInput_.OnMouseDown(x, y)) {
+        // Refine cursor position with font measurement
+        messageInput_.OnMouseDrag(x, y, scrollView_.Fonts());
+        messageInput_.selStart = messageInput_.selEnd;  // Click = no selection
+        MarkDirty();
+        return;
+    }
 
     // Scroll view
     float s = window_.Scale();
@@ -627,6 +633,12 @@ void App::OnMouseUp(float x, float y) {
 }
 
 void App::OnMouseMove(float x, float y, bool leftDown) {
+    // Mouse drag selection in text input
+    if (leftDown && messageInput_.focused) {
+        messageInput_.OnMouseDrag(x, y, scrollView_.Fonts());
+        MarkDirty();
+    }
+
     sendButton_.OnMouseMove(x, y);
     apiKeyButton_.OnMouseMove(x, y);
     providerDropdown_.OnMouseMove(x, y);

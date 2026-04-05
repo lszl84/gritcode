@@ -10,15 +10,18 @@ layout(location=0) in vec2 aPos;
 layout(location=1) in vec2 aUV;
 layout(location=2) in vec4 aColor;
 layout(location=3) in float aUseTex;
+layout(location=4) in vec2 aRectSize;
 uniform mat4 uProj;
 out vec2 vUV;
 out vec4 vColor;
 out float vUseTex;
+out vec2 vRectSize;
 void main() {
     gl_Position = uProj * vec4(aPos, 0.0, 1.0);
     vUV = aUV;
     vColor = aColor;
     vUseTex = aUseTex;
+    vRectSize = aRectSize;
 }
 )";
 
@@ -27,13 +30,30 @@ static const char* fragSrc = R"(
 in vec2 vUV;
 in vec4 vColor;
 in float vUseTex;
+in vec2 vRectSize;
 uniform sampler2D uAtlas;
 out vec4 fragColor;
+
+float roundedRectSDF(vec2 p, vec2 halfSize, float radius) {
+    vec2 d = abs(p) - halfSize + radius;
+    return length(max(d, 0.0)) - radius;
+}
+
 void main() {
-    if (vUseTex > 0.5) {
+    if (vUseTex > 1.5) {
+        // Rounded rect SDF mode: useTex = 2.0 + radius
+        float radius = vUseTex - 2.0;
+        vec2 halfSize = vRectSize * 0.5;
+        vec2 p = vUV - halfSize;
+        float d = roundedRectSDF(p, halfSize, radius);
+        float aa = 1.0 - smoothstep(-0.5, 0.5, d);
+        fragColor = vec4(vColor.rgb, vColor.a * aa);
+    } else if (vUseTex > 0.5) {
+        // Glyph texture mode
         float alpha = texture(uAtlas, vUV).r;
         fragColor = vec4(vColor.rgb, vColor.a * alpha);
     } else {
+        // Solid color
         fragColor = vColor;
     }
 }
@@ -70,16 +90,19 @@ bool GLRenderer::Init() {
 
     // position
     glEnableVertexAttribArray(0);
-    glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, sizeof(Vertex), (void*)0);
+    glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, sizeof(Vertex), (void*)offsetof(Vertex, x));
     // uv
     glEnableVertexAttribArray(1);
-    glVertexAttribPointer(1, 2, GL_FLOAT, GL_FALSE, sizeof(Vertex), (void*)(2*sizeof(float)));
+    glVertexAttribPointer(1, 2, GL_FLOAT, GL_FALSE, sizeof(Vertex), (void*)offsetof(Vertex, u));
     // color
     glEnableVertexAttribArray(2);
-    glVertexAttribPointer(2, 4, GL_FLOAT, GL_FALSE, sizeof(Vertex), (void*)(4*sizeof(float)));
+    glVertexAttribPointer(2, 4, GL_FLOAT, GL_FALSE, sizeof(Vertex), (void*)offsetof(Vertex, r));
     // useTex
     glEnableVertexAttribArray(3);
-    glVertexAttribPointer(3, 1, GL_FLOAT, GL_FALSE, sizeof(Vertex), (void*)(8*sizeof(float)));
+    glVertexAttribPointer(3, 1, GL_FLOAT, GL_FALSE, sizeof(Vertex), (void*)offsetof(Vertex, useTex));
+    // rectSize
+    glEnableVertexAttribArray(4);
+    glVertexAttribPointer(4, 2, GL_FLOAT, GL_FALSE, sizeof(Vertex), (void*)offsetof(Vertex, rectW));
 
     glBindVertexArray(0);
 
@@ -169,15 +192,13 @@ void GLRenderer::FlushBatch() {
 void GLRenderer::PushQuad(float x0, float y0, float x1, float y1,
                            float u0, float v0, float u1, float v1,
                            const Color& c, float useTex) {
-    Vertex v;
+    Vertex v{};
     v.r = c.r; v.g = c.g; v.b = c.b; v.a = c.a;
     v.useTex = useTex;
 
-    // Triangle 1
     v.x=x0; v.y=y0; v.u=u0; v.v=v0; batch_.push_back(v);
     v.x=x1; v.y=y0; v.u=u1; v.v=v0; batch_.push_back(v);
     v.x=x1; v.y=y1; v.u=u1; v.v=v1; batch_.push_back(v);
-    // Triangle 2
     v.x=x0; v.y=y0; v.u=u0; v.v=v0; batch_.push_back(v);
     v.x=x1; v.y=y1; v.u=u1; v.v=v1; batch_.push_back(v);
     v.x=x0; v.y=y1; v.u=u0; v.v=v1; batch_.push_back(v);
@@ -187,30 +208,21 @@ void GLRenderer::DrawRect(float x, float y, float w, float h, const Color& c) {
     PushQuad(x, y, x+w, y+h, 0,0,0,0, c, 0.0f);
 }
 
-void GLRenderer::DrawRoundedRect(float x, float y, float w, float h, float r, const Color& c) {
-    if (r < 1) { DrawRect(x, y, w, h, c); return; }
-    r = std::min(r, std::min(w, h) / 2);
-    // Center cross
-    DrawRect(x + r, y, w - 2*r, h, c);
-    // Left/right strips
-    DrawRect(x, y + r, r, h - 2*r, c);
-    DrawRect(x + w - r, y + r, r, h - 2*r, c);
-    // Four corners as triangle fans
-    int segs = 6;
-    for (int corner = 0; corner < 4; corner++) {
-        float cx = (corner & 1) ? x + w - r : x + r;
-        float cy = (corner < 2) ? y + r : y + h - r;
-        float startAngle = corner * 1.5708f;  // PI/2 per corner
-        for (int i = 0; i < segs; i++) {
-            float a0 = startAngle + i * 1.5708f / segs;
-            float a1 = startAngle + (i + 1) * 1.5708f / segs;
-            Vertex v;
-            v.u=0; v.v=0; v.r=c.r; v.g=c.g; v.b=c.b; v.a=c.a; v.useTex=0;
-            v.x=cx; v.y=cy; batch_.push_back(v);
-            v.x=cx+cosf(a0)*r; v.y=cy-sinf(a0)*r; batch_.push_back(v);
-            v.x=cx+cosf(a1)*r; v.y=cy-sinf(a1)*r; batch_.push_back(v);
-        }
-    }
+void GLRenderer::DrawRoundedRect(float x, float y, float w, float h, float radius, const Color& c) {
+    if (radius < 0.5f) { DrawRect(x, y, w, h, c); return; }
+    // Single quad — fragment shader computes SDF for smooth rounded corners
+    // UV stores local coords (0,0 to w,h), useTex = 2.0 + radius
+    Vertex v{};
+    v.r = c.r; v.g = c.g; v.b = c.b; v.a = c.a;
+    v.useTex = 2.0f + radius;
+    v.rectW = w; v.rectH = h;
+
+    v.x=x;   v.y=y;   v.u=0; v.v=0; batch_.push_back(v);
+    v.x=x+w; v.y=y;   v.u=w; v.v=0; batch_.push_back(v);
+    v.x=x+w; v.y=y+h; v.u=w; v.v=h; batch_.push_back(v);
+    v.x=x;   v.y=y;   v.u=0; v.v=0; batch_.push_back(v);
+    v.x=x+w; v.y=y+h; v.u=w; v.v=h; batch_.push_back(v);
+    v.x=x;   v.y=y+h; v.u=0; v.v=h; batch_.push_back(v);
 }
 
 void GLRenderer::DrawGlyph(const GlyphInfo& gi, float x, float y,

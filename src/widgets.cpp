@@ -20,7 +20,7 @@ void Label::Paint(GLRenderer& r, FontManager& fm) const {
 
 void Button::Paint(GLRenderer& r, FontManager& fm) const {
     if (!visible) return;
-    float radius = 4;
+    float radius = 6;
     float padX = 12;  // Horizontal padding
     Color bg = !enabled ? bgColor : pressed ? pressColor : hovered ? hoverColor : bgColor;
     r.DrawRoundedRect(bounds.x, bounds.y, bounds.w, bounds.h, radius, bg);
@@ -112,19 +112,13 @@ static int NextCP(const std::string& s, int pos) {
 }
 
 void TextInput::Paint(GLRenderer& r, FontManager& fm, float time) const {
-    float radius = 4;
+    float radius = 6;
     float pad = 8;
 
-    // Background
-    r.DrawRoundedRect(bounds.x, bounds.y, bounds.w, bounds.h, radius, bgColor);
-
-    // Border
+    // Border (rounded rect outline: larger rect behind, then fill)
     Color bc = focused ? focusBorder : borderColor;
-    // Top/bottom/left/right 1px borders
-    r.DrawRect(bounds.x + radius, bounds.y, bounds.w - 2*radius, 1, bc);
-    r.DrawRect(bounds.x + radius, bounds.y + bounds.h - 1, bounds.w - 2*radius, 1, bc);
-    r.DrawRect(bounds.x, bounds.y + radius, 1, bounds.h - 2*radius, bc);
-    r.DrawRect(bounds.x + bounds.w - 1, bounds.y + radius, 1, bounds.h - 2*radius, bc);
+    r.DrawRoundedRect(bounds.x - 1, bounds.y - 1, bounds.w + 2, bounds.h + 2, radius + 1, bc);
+    r.DrawRoundedRect(bounds.x, bounds.y, bounds.w, bounds.h, radius, bgColor);
 
     float ty = bounds.y + (bounds.h - fm.LineHeight(style)) / 2;
 
@@ -169,20 +163,55 @@ void TextInput::Paint(GLRenderer& r, FontManager& fm, float time) const {
     }
 }
 
-bool TextInput::OnMouseDown(float x, float y) {
-    bool wasFocused = focused;
-    focused = PointInRect(x, y, bounds);
-    if (focused) {
-        // Place cursor at click position
-        float pad = 8;
-        float localX = x - bounds.x - pad;
-        if (localX < 0) localX = 0;
-        // TODO: proper hit-testing with font measurement
-        cursorPos = text.size();
-        selStart = selEnd = CodepointCount(text, cursorPos);
-        cursorBlink = 0;
+// Hit-test: find codepoint index at pixel X within text
+static int HitTestText(const std::string& text, FontStyle style, FontManager& fm, float localX) {
+    if (text.empty() || localX <= 0) return 0;
+    float total = fm.MeasureWidth(text, style);
+    if (localX >= total) return CodepointCount(text, text.size());
+
+    // Binary search by codepoint
+    int cpCount = CodepointCount(text, text.size());
+    int lo = 0, hi = cpCount;
+    while (lo < hi) {
+        int mid = (lo + hi) / 2;
+        int byteOff = ByteOffsetForCodepoint(text, mid);
+        float w = fm.MeasureWidth(text.substr(0, byteOff), style);
+        if (w < localX) lo = mid + 1; else hi = mid;
     }
-    return focused;
+    // Snap to nearest side
+    if (lo > 0) {
+        int bPrev = ByteOffsetForCodepoint(text, lo - 1);
+        int bCurr = ByteOffsetForCodepoint(text, lo);
+        float wPrev = fm.MeasureWidth(text.substr(0, bPrev), style);
+        float wCurr = fm.MeasureWidth(text.substr(0, bCurr), style);
+        if (localX - wPrev < wCurr - localX) lo--;
+    }
+    return lo;
+}
+
+bool TextInput::OnMouseDown(float x, float y) {
+    focused = PointInRect(x, y, bounds);
+    if (!focused) return false;
+
+    float pad = 8;
+    float localX = x - bounds.x - pad;
+    // Needs FontManager — caller should call OnMouseDrag after for proper placement
+    // For now, set cursor to end; OnMouseDrag with fm will refine
+    cursorPos = text.size();
+    selStart = selEnd = CodepointCount(text, cursorPos);
+    cursorBlink = 0;
+    return true;
+}
+
+void TextInput::OnMouseDrag(float x, float y, FontManager& fm) {
+    if (!focused) return;
+    float pad = 8;
+    float localX = x - bounds.x - pad;
+    std::string display = DisplayText();
+    int cp = HitTestText(display, style, fm, localX);
+    cursorPos = ByteOffsetForCodepoint(text, cp);
+    selEnd = cp;
+    cursorBlink = 0;
 }
 
 void TextInput::OnChar(uint32_t codepoint) {
@@ -355,7 +384,7 @@ WidgetRect Dropdown::PopupRect() const {
 
 void Dropdown::Paint(GLRenderer& r, FontManager& fm) const {
     if (!enabled) return;
-    float radius = 4;
+    float radius = 6;
 
     Color bg = open ? hoverColor : hovered ? hoverColor : bgColor;
     r.DrawRoundedRect(bounds.x, bounds.y, bounds.w, bounds.h, radius, bg);
@@ -378,7 +407,7 @@ void Dropdown::Paint(GLRenderer& r, FontManager& fm) const {
 
 void Dropdown::PaintPopup(GLRenderer& r, FontManager& fm) const {
     if (!open || items.empty()) return;
-    float radius = 4;
+    float radius = 6;
 
     WidgetRect pr = PopupRect();
     r.DrawRoundedRect(pr.x, pr.y, pr.w, pr.h, radius, popupBg);

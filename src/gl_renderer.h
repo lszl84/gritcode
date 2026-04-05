@@ -36,9 +36,10 @@ private:
 
     struct Vertex {
         float x, y;       // position
-        float u, v;       // texcoord
+        float u, v;       // texcoord / local coords for SDF
         float r, g, b, a; // color
-        float useTex;     // 1.0 = textured, 0.0 = solid color
+        float useTex;     // 0=solid, 1=textured, 2+=rounded rect (value-2 = radius)
+        float rectW, rectH; // rect size for SDF rounded rect mode
     };
     std::vector<Vertex> batch_;
 
