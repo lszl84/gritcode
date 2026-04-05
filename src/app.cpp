@@ -194,8 +194,8 @@ void App::LayoutWidgets() {
     float barY = h - bar;
     float inputY = barY - inp;
 
-    messageInput_.bounds = {8, inputY + 5, w - 90, inp - 10};
-    sendButton_.bounds = {w - 78, inputY + 5, 70, inp - 10};
+    messageInput_.bounds = {8, inputY + 5, w - 100, inp - 10};
+    sendButton_.bounds = {w - 88, inputY + 5, 80, inp - 10};
 
     float bx = 8;
     providerDropdown_.bounds = {bx, barY + 5, 170 * s, bar - 10}; bx += 178 * s;
@@ -691,7 +691,7 @@ void App::OnKey(int key, int mods, bool pressed) {
 
     // Forward to text input if focused
     if (messageInput_.focused) {
-        messageInput_.OnKey(key, mods);
+        messageInput_.OnKey(key, mods, scrollView_.Fonts());
         MarkDirty();
         return;
     }
@@ -703,7 +703,7 @@ void App::OnKey(int key, int mods, bool pressed) {
 
 void App::OnChar(uint32_t codepoint) {
     if (messageInput_.focused) {
-        messageInput_.OnChar(codepoint);
+        messageInput_.OnChar(codepoint, scrollView_.Fonts());
         MarkDirty();
     }
 }
@@ -731,7 +731,7 @@ void App::Run() {
         float dt = (float)(now - lastTime);
         lastTime = now;
 
-        messageInput_.Update(dt);
+        messageInput_.Update(dt, scrollView_.Fonts());
         scrollView_.Update(dt);
 
         // Animate waiting dots

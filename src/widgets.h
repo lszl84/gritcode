@@ -81,14 +81,16 @@ public:
     void Paint(GLRenderer& r, FontManager& fm, float time) const;
     bool OnMouseDown(float x, float y);
     void OnMouseDrag(float x, float y, FontManager& fm);
-    void OnChar(uint32_t codepoint);
-    void OnKey(int key, int mods);
-    void Update(float dt);
-    void SetText(const std::string& t) { text = t; cursorPos = t.size(); selStart = selEnd = 0; }
-    void Clear() { text.clear(); cursorPos = 0; selStart = selEnd = 0; }
+    void OnChar(uint32_t codepoint, FontManager& fm);
+    void OnKey(int key, int mods, FontManager& fm);
+    void Update(float dt, FontManager& fm);
+    void SetText(const std::string& t) { text = t; cursorPos = t.size(); selStart = selEnd = 0; scrollX = 0; }
+    void Clear() { text.clear(); cursorPos = 0; selStart = selEnd = 0; scrollX = 0; }
 
 private:
     std::string DisplayText() const;
+    float scrollX = 0;  // Horizontal scroll offset for long text
+    void EnsureCursorVisible(FontManager& fm);
 };
 
 // ============================================================================
@@ -134,7 +136,7 @@ public:
     }
 
     float PopupHeight() const { return items.size() * ItemHeight(); }
-    float ItemHeight() const { return 28; }
+    float ItemHeight() const { return 32; }
 
 private:
     WidgetRect PopupRect() const;

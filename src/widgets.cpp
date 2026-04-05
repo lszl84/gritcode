@@ -111,16 +111,29 @@ static int NextCP(const std::string& s, int pos) {
     return pos;
 }
 
+void TextInput::EnsureCursorVisible(FontManager& fm) {
+    float pad = 8;
+    float visibleW = bounds.w - pad * 2;
+    std::string display = DisplayText();
+    int cpIdx = CodepointCount(display, std::min(cursorPos, (int)display.size()));
+    std::string before = display.substr(0, ByteOffsetForCodepoint(display, cpIdx));
+    float cursorX = fm.MeasureWidth(before, style);
+
+    if (cursorX - scrollX > visibleW) scrollX = cursorX - visibleW + 10;
+    if (cursorX - scrollX < 0) scrollX = std::max(0.0f, cursorX - 10);
+}
+
 void TextInput::Paint(GLRenderer& r, FontManager& fm, float time) const {
     float radius = 6;
     float pad = 8;
 
-    // Border (rounded rect outline: larger rect behind, then fill)
+    // Border (rounded rect outline)
     Color bc = focused ? focusBorder : borderColor;
     r.DrawRoundedRect(bounds.x - 1, bounds.y - 1, bounds.w + 2, bounds.h + 2, radius + 1, bc);
     r.DrawRoundedRect(bounds.x, bounds.y, bounds.w, bounds.h, radius, bgColor);
 
     float ty = bounds.y + (bounds.h - fm.LineHeight(style)) / 2;
+    float textX = bounds.x + pad - scrollX;
 
     if (text.empty() && !focused) {
         auto run = fm.Shape(placeholder, style);
@@ -128,36 +141,36 @@ void TextInput::Paint(GLRenderer& r, FontManager& fm, float time) const {
     } else {
         std::string display = DisplayText();
 
-        // Draw selection highlight
+        // Selection highlight
         if (selStart != selEnd && !display.empty()) {
             int s0 = std::min(selStart, selEnd);
             int s1 = std::max(selStart, selEnd);
-            std::string before = display.substr(0, ByteOffsetForCodepoint(display, s0));
-            std::string selected = display.substr(ByteOffsetForCodepoint(display, s0),
-                ByteOffsetForCodepoint(display, s1) - ByteOffsetForCodepoint(display, s0));
-            float x0 = bounds.x + pad + fm.MeasureWidth(before, style);
-            float x1 = x0 + fm.MeasureWidth(selected, style);
-            r.DrawRect(x0, ty, x1 - x0, fm.LineHeight(style), {0.2f, 0.4f, 0.8f, 0.5f});
+            float x0 = textX + fm.MeasureWidth(display.substr(0, ByteOffsetForCodepoint(display, s0)), style);
+            float x1 = textX + fm.MeasureWidth(display.substr(0, ByteOffsetForCodepoint(display, s1)), style);
+            // Clamp to visible area
+            x0 = std::max(x0, bounds.x + pad);
+            x1 = std::min(x1, bounds.x + bounds.w - pad);
+            if (x1 > x0)
+                r.DrawRect(x0, ty, x1 - x0, fm.LineHeight(style), {0.2f, 0.4f, 0.8f, 0.5f});
         }
 
+        // Text (shifted by scrollX)
         if (!display.empty()) {
             auto run = fm.Shape(display, style);
-            r.DrawShapedRun(fm, run, bounds.x + pad, ty, fm.Ascent(style), textColor);
+            r.DrawShapedRun(fm, run, textX, ty, fm.Ascent(style), textColor);
         }
 
         // Cursor
         if (focused) {
             float blink = std::fmod(cursorBlink, 1.0f);
             if (blink < 0.5f) {
-                float cx = bounds.x + pad;
-                if (cursorPos > 0 && !display.empty()) {
-                    int cpIdx = CodepointCount(display, std::min(cursorPos, (int)display.size()));
-                    std::string before = display.substr(0, ByteOffsetForCodepoint(display, cpIdx));
-                    cx += fm.MeasureWidth(before, style);
+                int cpIdx = CodepointCount(display, std::min(cursorPos, (int)display.size()));
+                float cx = textX + fm.MeasureWidth(display.substr(0, ByteOffsetForCodepoint(display, cpIdx)), style);
+                if (cx >= bounds.x + pad - 1 && cx <= bounds.x + bounds.w - pad + 1) {
+                    float cursorH = fm.LineHeight(style) * 0.8f;
+                    float cursorY = ty + fm.LineHeight(style) * 0.1f;
+                    r.DrawRect(cx, cursorY, 1.5f, cursorH, cursorColor);
                 }
-                float cursorH = fm.LineHeight(style) * 0.8f;
-                float cursorY = ty + fm.LineHeight(style) * 0.1f;
-                r.DrawRect(cx, cursorY, 1.5f, cursorH, cursorColor);
             }
         }
     }
@@ -214,7 +227,7 @@ void TextInput::OnMouseDrag(float x, float y, FontManager& fm) {
     cursorBlink = 0;
 }
 
-void TextInput::OnChar(uint32_t codepoint) {
+void TextInput::OnChar(uint32_t codepoint, FontManager& fm) {
     if (!focused) return;
 
     // Delete selected text first
@@ -246,9 +259,10 @@ void TextInput::OnChar(uint32_t codepoint) {
     cursorPos += len;
     selStart = selEnd = CodepointCount(text, cursorPos);
     cursorBlink = 0;
+    EnsureCursorVisible(fm);
 }
 
-void TextInput::OnKey(int key, int mods) {
+void TextInput::OnKey(int key, int mods, FontManager& fm) {
     if (!focused) return;
     bool ctrl = (mods & 1);  // Mod::Ctrl
     bool shift = (mods & 2); // Mod::Shift
@@ -370,8 +384,11 @@ void TextInput::OnKey(int key, int mods) {
     }
 }
 
-void TextInput::Update(float dt) {
-    if (focused) cursorBlink += dt;
+void TextInput::Update(float dt, FontManager& fm) {
+    if (focused) {
+        cursorBlink += dt;
+        EnsureCursorVisible(fm);
+    }
 }
 
 // ============================================================================
