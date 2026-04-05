@@ -262,6 +262,18 @@ void GLRenderer::DrawTriRight(float cx, float cy, float size, const Color& c) {
     v.x=cx;        v.y=cy+half;  batch_.push_back(v);
 }
 
+void GLRenderer::PushClip(float x, float y, float w, float h) {
+    FlushBatch();  // Draw everything before clip change
+    glEnable(GL_SCISSOR_TEST);
+    // GL scissor is in bottom-left origin, our coords are top-left
+    glScissor((int)x, vpH_ - (int)(y + h), (int)w, (int)h);
+}
+
+void GLRenderer::PopClip() {
+    FlushBatch();
+    glDisable(GL_SCISSOR_TEST);
+}
+
 void GLRenderer::DrawTriDown(float cx, float cy, float size, const Color& c) {
     float half = size / 2;
     Vertex v;

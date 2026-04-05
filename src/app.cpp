@@ -608,9 +608,9 @@ void App::OnMouseDown(float x, float y, bool shift) {
     if (sendButton_.OnMouseDown(x, y)) { MarkDirty(); return; }
     if (apiKeyButton_.OnMouseDown(x, y)) { MarkDirty(); return; }
     if (messageInput_.OnMouseDown(x, y)) {
-        // Refine cursor position with font measurement
         messageInput_.OnMouseDrag(x, y, scrollView_.Fonts());
         messageInput_.selStart = messageInput_.selEnd;  // Click = no selection
+        scrollView_.ClearSelection();  // Clear scroll view selection
         MarkDirty();
         return;
     }
@@ -621,6 +621,7 @@ void App::OnMouseDown(float x, float y, bool shift) {
     if (y < viewH) {
         scrollView_.OnMouseDown(x, y, shift);
         messageInput_.focused = false;
+        messageInput_.selStart = messageInput_.selEnd = 0;  // Clear text input selection
         MarkDirty();
     }
 }
@@ -633,10 +634,11 @@ void App::OnMouseUp(float x, float y) {
 }
 
 void App::OnMouseMove(float x, float y, bool leftDown) {
-    // Mouse drag selection in text input
+    // Mouse drag in text input — skip all other hover updates
     if (leftDown && messageInput_.focused) {
         messageInput_.OnMouseDrag(x, y, scrollView_.Fonts());
         MarkDirty();
+        return;
     }
 
     sendButton_.OnMouseMove(x, y);

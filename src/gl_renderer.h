@@ -23,6 +23,8 @@ public:
                        float x, float y, float ascent, const Color& c);
     void DrawTriRight(float cx, float cy, float size, const Color& c);
     void DrawTriDown(float cx, float cy, float size, const Color& c);
+    void PushClip(float x, float y, float w, float h);
+    void PopClip();
 
 private:
     GLuint program_ = 0;

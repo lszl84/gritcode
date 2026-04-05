@@ -135,6 +135,9 @@ void TextInput::Paint(GLRenderer& r, FontManager& fm, float time) const {
     float ty = bounds.y + (bounds.h - fm.LineHeight(style)) / 2;
     float textX = bounds.x + pad - scrollX;
 
+    // Clip text to input bounds
+    r.PushClip(bounds.x + pad - 1, bounds.y, bounds.w - pad * 2 + 2, bounds.h);
+
     if (text.empty() && !focused) {
         auto run = fm.Shape(placeholder, style);
         r.DrawShapedRun(fm, run, bounds.x + pad, ty, fm.Ascent(style), placeholderColor);
@@ -174,6 +177,8 @@ void TextInput::Paint(GLRenderer& r, FontManager& fm, float time) const {
             }
         }
     }
+
+    r.PopClip();
 }
 
 // Hit-test: find codepoint index at pixel X within text
@@ -217,14 +222,16 @@ bool TextInput::OnMouseDown(float x, float y) {
 }
 
 void TextInput::OnMouseDrag(float x, float y, FontManager& fm) {
+    (void)y;
     if (!focused) return;
     float pad = 8;
-    float localX = x - bounds.x - pad;
+    float localX = x - bounds.x - pad + scrollX;  // Account for scroll offset
     std::string display = DisplayText();
     int cp = HitTestText(display, style, fm, localX);
     cursorPos = ByteOffsetForCodepoint(text, cp);
     selEnd = cp;
     cursorBlink = 0;
+    EnsureCursorVisible(fm);
 }
 
 void TextInput::OnChar(uint32_t codepoint, FontManager& fm) {
