@@ -1,139 +1,75 @@
 #+TITLE: FastCode Native
-#+SUBTITLE: A native AI coding harness. No Electron. No web views.
+#+SUBTITLE: GPU-rendered AI coding harness. No Electron. No web views.
 
 * FastCode Native
 
-A native desktop client for [[https://opencode.ai][OpenCode Zen]], built in C++ with wxWidgets.
+A native AI coding assistant built in C++ with OpenGL, HarfBuzz, and FreeType.
 
 No Electron. No Chromium. No 800 MB RAM for a chat window.
-
-#+begin_quote
-/Screenshots and demo GIF coming soon -- the app runs today on Linux, macOS, and Windows./
-#+end_quote
 
 ** The Problem
 
 Every AI coding tool ships as an Electron app or a web-based TUI. You're running a compiler, a language server, a browser with 47 tabs, and then your AI assistant wants another Chromium instance and half a gigabyte of RAM to show you a text conversation.
 
-Native desktop apps solve this, but nobody builds them anymore because it's hard. FastCode Native is an attempt to change that.
-
 ** What It Does
 
-- Connects to *OpenCode Zen* (free models available, no API key needed)
-- Renders conversations with a *custom text control* -- not a web view, not a rich text widget, a purpose-built component with pixel-perfect selection
-- Runs on *Windows, macOS, and Linux* from one codebase
-- Builds to a *single 9 MB binary* (stripped release) with zero runtime dependencies
-
-** Features
-
-- *Custom text rendering engine* -- Block-type styling for user prompts, AI responses, code blocks, and thinking/reasoning. Word wrap, Unicode, bidirectional text (Arabic, Hebrew), double/triple-click selection, drag-to-select with auto-scroll.
-- *OpenCode Zen integration* -- Free anonymous access to models like Big Pickle, MiMo, Nemotron, MiniMax. API key unlocks all models.
-- *OS theme integration* -- Follows system dark/light mode automatically
-- *Secure API key storage* -- Uses your OS keychain (libsecret / Keychain / Credential Manager)
-- *MCP Protocol server* -- Built-in Model Context Protocol support over stdio
-- *Loading animations* -- Animated dots while the model is thinking
-
-** Measured Numbers
-
-These are real measurements, not marketing:
-
-| Metric                | FastCode Native         | Typical Electron app |
-|-----------------------+-------------------------+----------------------|
-| Release binary        | 11 MB (9.4 MB stripped) | 150-300 MB           |
-| Runtime dependencies  | None                    | Node.js + Chromium   |
-| Build dependencies    | CMake + C++ compiler    | Node.js + npm + ...  |
-| Startup               | < 1 second              | 2-5 seconds          |
-| Text selection        | Pixel-perfect, custom   | Browser-based        |
-
-/Memory usage benchmarks coming once profiling infrastructure is in place./
+- *GPU-rendered UI* -- OpenGL 3.3 batched quads, SDF rounded rects, 0% idle CPU
+- *HarfBuzz text shaping* -- proper Arabic RTL, ligatures, contextual forms, diacritics
+- *Emoji support* -- FontConfig fallback, ZWJ sequences, bitmap scaling
+- *Multi-provider* -- OpenCode Zen (free models) and Claude ACP
+- *Tool use* -- bash, read_file, list_directory with background execution
+- *Session persistence* -- per working directory, automatic restore
+- *Markdown rendering* -- bold, italic, code blocks, headings, blockquotes, lists
+- *~4,900 lines of C++* -- entire codebase
 
 ** Quick Start
 
 #+begin_src bash
+# Dependencies (Arch)
+sudo pacman -S glfw freetype2 harfbuzz fontconfig curl libsecret
+
 git clone https://github.com/lszl84/fastcode-native.git
 cd fastcode-native
 
-cmake -B build -G Ninja
+cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX=~/.local
 cmake --build build
+cmake --install build
 
-./build/fastcode-native
+fastcode-native
 #+end_src
 
-No =npm install=. No =node_modules=. CMake fetches all dependencies (wxWidgets, nlohmann/json) automatically.
+CMake fetches cmark and nlohmann_json automatically. Everything else is system libraries.
 
-** Free Models
+** Architecture
 
-Works out of the box with no API key:
+| File              | Purpose                                     |
+|-------------------+---------------------------------------------|
+| =app.cpp=         | Main app, providers, streaming, tool use    |
+| =gl_renderer.cpp= | OpenGL batched renderer, SDF shapes         |
+| =font.cpp=        | HarfBuzz shaping, FreeType raster, fallback |
+| =scroll_view.cpp= | Block layout, word wrap, selection, caret   |
+| =markdown_renderer.cpp= | cmark AST to styled blocks             |
+| =widgets.cpp=     | TextInput, ComboBox, Button (custom)        |
+| =glfw_window.cpp= | GLFW setup, input handling, main loop       |
+| =curl_http.cpp=   | Async HTTP with SSE streaming               |
+| =session.cpp=     | Per-CWD session persistence                 |
+| =keychain.cpp=    | libsecret API key storage                   |
 
-- Big Pickle
-- MiMo V2 Flash Free
-- Nemotron 3 Super Free
-- MiniMax M2.5 Free
-- Trinity Large Preview Free
+** Measured Numbers
 
-Set your API key (=Ctrl+K=) to unlock all OpenCode Zen models.
+| Metric               | FastCode Native      | Typical Electron app |
+|------------------------+----------------------+----------------------|
+| Codebase              | ~4,900 lines C++     | 50K-200K+ lines      |
+| Idle CPU              | 0%                   | 1-5%                 |
+| Scroll CPU            | ~1%                  | 10-40%               |
+| System dependencies   | System libs only     | Node.js + Chromium   |
+| Startup               | < 1 second           | 2-5 seconds          |
 
 ** Requirements
 
-- CMake 3.24+
-- C++23 compiler (GCC 13+, Clang 16+, MSVC 2022+)
-- Ninja (recommended)
-
-** How It's Built
-
-Flat source layout, every file in the project root:
-
-| File                       | Purpose                              |
-|----------------------------+--------------------------------------|
-| =streaming_text_ctrl.cpp/h= | Custom text control (the core)       |
-| =block_manager.cpp/h=       | Content block storage                |
-| =main_frame.cpp/h=          | Main window and UI                   |
-| =http_client.cpp/h=         | Async HTTP via wxWebRequest          |
-| =zen_client.cpp/h=          | OpenCode Zen API client              |
-| =mcp_server.cpp/h=          | MCP protocol server (stdio JSON-RPC) |
-| =application.cpp/h=         | wxApp entry point                    |
-
-The =StreamingTextCtrl= is the interesting part. It's a fully custom =wxControl= with:
-
-- O(log N) block lookup via prefix-sum cache
-- Lazy per-character caret position arrays (only computed for lines involved in selection)
-- Word-wrap with hard and soft line breaks
-- Pixel-perfect selection across mixed LTR/RTL content
-- Incremental layout -- only re-wraps blocks that changed
-
-The text control is adapted from [[https://github.com/lszl84/cutescroll][cutescroll]].
-
-** Sponsoring
-
-This project is independent and open source. It stays that way with community support.
-
-Building a cross-platform native desktop app is harder than wrapping a web page. It takes knowledge of platform APIs, text layout engines, Unicode bidirectional algorithms, and native widget toolkits. That's the work that makes this project different from everything else in the space.
-
-*** What Sponsoring Gets You
-
-- *The project keeps moving.* Active development, bug fixes, new features.
-- *Your voice in the roadmap.* Sponsors can request and prioritize features.
-- *Corporate tiers available.* Logo placement, priority support, custom integrations.
-
-*** How to Sponsor
-
-- [[https://github.com/sponsors/lszl84][GitHub Sponsors]] -- monthly or one-time
-- For corporate sponsorship, open an issue or reach out directly
-
-If you use AI coding tools professionally and think native apps deserve to exist, consider sponsoring. It doesn't take much from many people to keep an independent project alive.
-
-** Roadmap
-
-Near term:
-- [ ] Streaming token-by-token display (SSE)
-- [ ] Syntax highlighting in code blocks
-- [ ] Conversation persistence (SQLite)
-
-Later:
-- [ ] Multi-conversation tabs
-- [ ] Image and file attachments
-- [ ] Plugin system
-- [ ] GPU-accelerated text rendering
+- Linux (Wayland or X11)
+- CMake 3.24+, Ninja, C++23 compiler
+- System libs: glfw3, freetype2, harfbuzz, fontconfig, libcurl, libsecret-1, OpenGL
 
 ** License
 
@@ -141,4 +77,4 @@ GPL v3 -- See [[./LICENSE][LICENSE]].
 
 ** Credits
 
-Built by [[https://github.com/lszl84][lszl84]]. Powered by [[https://opencode.ai][OpenCode Zen]].
+Built by [[https://github.com/lszl84][lszl84]].
