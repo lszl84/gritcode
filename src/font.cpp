@@ -147,6 +147,38 @@ float FontManager::SpaceWidth(FontStyle style) const {
     return (idx >= 0 && idx < (int)faces_.size()) ? faces_[idx].spaceWidth : 6;
 }
 
+int FontManager::FindFallbackFace(uint32_t codepoint, int sizePx) const {
+    // Check cache first
+    auto it = fallbackCache_.find(codepoint);
+    if (it != fallbackCache_.end()) return it->second;
+
+    // Ask FontConfig for a font that has this codepoint
+    FcPattern* pat = FcPatternCreate();
+    FcCharSet* cs = FcCharSetCreate();
+    FcCharSetAddChar(cs, codepoint);
+    FcPatternAddCharSet(pat, FC_CHARSET, cs);
+    FcConfigSubstitute(nullptr, pat, FcMatchPattern);
+    FcDefaultSubstitute(pat);
+
+    FcResult result;
+    FcPattern* match = FcFontMatch(nullptr, pat, &result);
+    int faceIdx = -1;
+
+    if (match) {
+        FcChar8* file = nullptr;
+        if (FcPatternGetString(match, FC_FILE, 0, &file) == FcResultMatch) {
+            std::string path = (const char*)file;
+            faceIdx = const_cast<FontManager*>(this)->LoadFace(path, sizePx);
+        }
+        FcPatternDestroy(match);
+    }
+    FcCharSetDestroy(cs);
+    FcPatternDestroy(pat);
+
+    fallbackCache_[codepoint] = faceIdx;
+    return faceIdx;
+}
+
 ShapedRun FontManager::Shape(const std::string& text, FontStyle style, bool rtl) const {
     ShapedRun result;
     if (text.empty()) return result;
@@ -155,6 +187,7 @@ ShapedRun FontManager::Shape(const std::string& text, FontStyle style, bool rtl)
     if (fIdx < 0 || fIdx >= (int)faces_.size()) return result;
 
     const Face& face = faces_[fIdx];
+    int sizePx = (int)(face.lineHeight + 0.5f);
 
     hb_buffer_t* buf = hb_buffer_create();
     hb_buffer_add_utf8(buf, text.c_str(), (int)text.size(), 0, (int)text.size());
@@ -178,8 +211,42 @@ ShapedRun FontManager::Shape(const std::string& text, FontStyle style, bool rtl)
         g.yPos = pos[i].y_offset / 64.0f;
         g.xAdvance = pos[i].x_advance / 64.0f;
         g.faceIdx = fIdx;
-        g.cached = &EnsureGlyph(g.glyphId, fIdx);  // Pre-cache pointer
-        cursorX += pos[i].x_advance / 64.0f;
+
+        // Fallback: if glyph is .notdef (0), find a font that has this codepoint
+        if (g.glyphId == 0 && g.cluster < text.size()) {
+            // Decode the UTF-8 codepoint at this cluster position
+            const uint8_t* p = (const uint8_t*)text.c_str() + g.cluster;
+            uint32_t cp = 0;
+            if (*p < 0x80) cp = *p;
+            else if (*p < 0xE0) cp = ((*p & 0x1F) << 6) | (p[1] & 0x3F);
+            else if (*p < 0xF0) cp = ((*p & 0x0F) << 12) | ((p[1] & 0x3F) << 6) | (p[2] & 0x3F);
+            else cp = ((*p & 0x07) << 18) | ((p[1] & 0x3F) << 12) | ((p[2] & 0x3F) << 6) | (p[3] & 0x3F);
+
+            if (cp > 0) {
+                int fbIdx = FindFallbackFace(cp, sizePx);
+                if (fbIdx >= 0 && fbIdx < (int)faces_.size()) {
+                    // Re-shape just this character with the fallback font
+                    FT_Face fbFt = faces_[fbIdx].ft;
+                    FT_UInt glyphIndex = FT_Get_Char_Index(fbFt, cp);
+                    if (glyphIndex != 0) {
+                        g.glyphId = glyphIndex;
+                        g.faceIdx = fbIdx;
+                        // Get proper advance from fallback font
+                        if (FT_Load_Glyph(fbFt, glyphIndex, FT_LOAD_DEFAULT) == 0) {
+                            float advance = fbFt->glyph->advance.x / 64.0f;
+                            // Adjust remaining positions
+                            float diff = advance - g.xAdvance;
+                            g.xAdvance = advance;
+                            for (unsigned int j = i + 1; j < glyphCount; j++)
+                                result.glyphs[j].xPos += diff;
+                        }
+                    }
+                }
+            }
+        }
+
+        g.cached = &EnsureGlyph(g.glyphId, g.faceIdx);
+        cursorX += g.xAdvance;
     }
 
     result.totalWidth = cursorX;

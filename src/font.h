@@ -85,5 +85,7 @@ private:
 
     int LoadFace(const std::string& path, int sizePx);
     std::string FindFont(const char* family, bool bold, bool italic) const;
+    int FindFallbackFace(uint32_t codepoint, int sizePx) const;
+    mutable std::map<uint32_t, int> fallbackCache_;  // codepoint → face index
     std::map<std::string, std::shared_ptr<std::vector<uint8_t>>> fileCache_;
 };
