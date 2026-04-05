@@ -110,7 +110,8 @@ size_t CurlHttpClient::WriteCallback(char* data, size_t size, size_t nmemb, void
 }
 
 void CurlHttpClient::FetchModels(std::function<void(std::vector<ModelInfo>)> cb) {
-    if (requestThread_.joinable()) requestThread_.join();
+    Abort();
+    if (requestThread_.joinable()) requestThread_.detach();
 
     aborted_ = false;
     requestThread_ = std::thread([this, cb]() {
@@ -121,6 +122,8 @@ void CurlHttpClient::FetchModels(std::function<void(std::vector<ModelInfo>)> cb)
         std::string response;
 
         curl_easy_setopt(curl, CURLOPT_URL, url.c_str());
+        curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT, 10L);
+        curl_easy_setopt(curl, CURLOPT_TIMEOUT, 30L);
         curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION,
             +[](char* d, size_t s, size_t n, void* p) -> size_t {
                 ((std::string*)p)->append(d, s * n);
@@ -166,7 +169,9 @@ void CurlHttpClient::SendStreaming(
     std::function<void(bool, const std::string&, const std::string&,
                        const std::vector<json>&, int, int)> onComplete) {
 
-    if (requestThread_.joinable()) requestThread_.join();
+    // Abort any in-flight request and detach its thread (don't block main thread)
+    Abort();
+    if (requestThread_.joinable()) requestThread_.detach();
 
     aborted_ = false;
     requestThread_ = std::thread([this, requestJson, onChunk, onComplete]() {
@@ -188,6 +193,19 @@ void CurlHttpClient::SendStreaming(
         curl_easy_setopt(curl, CURLOPT_POSTFIELDS, requestJson.c_str());
         curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, WriteCallback);
         curl_easy_setopt(curl, CURLOPT_WRITEDATA, &ctx);
+
+        // Timeouts: don't hang forever
+        curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT, 15L);      // 15s to connect
+        curl_easy_setopt(curl, CURLOPT_LOW_SPEED_LIMIT, 1L);      // At least 1 byte/s
+        curl_easy_setopt(curl, CURLOPT_LOW_SPEED_TIME, 60L);      // ...for 60s, else abort
+
+        // Progress callback for abort during connect/DNS
+        curl_easy_setopt(curl, CURLOPT_NOPROGRESS, 0L);
+        curl_easy_setopt(curl, CURLOPT_XFERINFOFUNCTION,
+            +[](void* p, curl_off_t, curl_off_t, curl_off_t, curl_off_t) -> int {
+                return ((std::atomic<bool>*)p)->load() ? 1 : 0;  // 1 = abort
+            });
+        curl_easy_setopt(curl, CURLOPT_XFERINFODATA, &aborted_);
 
         struct curl_slist* headers = nullptr;
         headers = curl_slist_append(headers, "Content-Type: application/json");
