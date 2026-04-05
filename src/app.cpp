@@ -235,8 +235,12 @@ void App::PaintBottomBar() {
     modelDropdown_.Paint(renderer_, fm);
     statusLabel_.Paint(renderer_, fm);
     apiKeyButton_.Paint(renderer_, fm);
-    messageInput_.Paint(renderer_, fm, 0);  // TODO: pass real time for cursor blink
+    messageInput_.Paint(renderer_, fm, 0);
     sendButton_.Paint(renderer_, fm);
+
+    // Dropdown popups last (z-order: on top of everything)
+    providerDropdown_.PaintPopup(renderer_, fm);
+    modelDropdown_.PaintPopup(renderer_, fm);
 }
 
 // ============================================================================

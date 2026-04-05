@@ -187,6 +187,32 @@ void GLRenderer::DrawRect(float x, float y, float w, float h, const Color& c) {
     PushQuad(x, y, x+w, y+h, 0,0,0,0, c, 0.0f);
 }
 
+void GLRenderer::DrawRoundedRect(float x, float y, float w, float h, float r, const Color& c) {
+    if (r < 1) { DrawRect(x, y, w, h, c); return; }
+    r = std::min(r, std::min(w, h) / 2);
+    // Center cross
+    DrawRect(x + r, y, w - 2*r, h, c);
+    // Left/right strips
+    DrawRect(x, y + r, r, h - 2*r, c);
+    DrawRect(x + w - r, y + r, r, h - 2*r, c);
+    // Four corners as triangle fans
+    int segs = 6;
+    for (int corner = 0; corner < 4; corner++) {
+        float cx = (corner & 1) ? x + w - r : x + r;
+        float cy = (corner < 2) ? y + r : y + h - r;
+        float startAngle = corner * 1.5708f;  // PI/2 per corner
+        for (int i = 0; i < segs; i++) {
+            float a0 = startAngle + i * 1.5708f / segs;
+            float a1 = startAngle + (i + 1) * 1.5708f / segs;
+            Vertex v;
+            v.u=0; v.v=0; v.r=c.r; v.g=c.g; v.b=c.b; v.a=c.a; v.useTex=0;
+            v.x=cx; v.y=cy; batch_.push_back(v);
+            v.x=cx+cosf(a0)*r; v.y=cy-sinf(a0)*r; batch_.push_back(v);
+            v.x=cx+cosf(a1)*r; v.y=cy-sinf(a1)*r; batch_.push_back(v);
+        }
+    }
+}
+
 void GLRenderer::DrawGlyph(const GlyphInfo& gi, float x, float y,
                             const Color& c, float ascent) {
     if (gi.width == 0 || gi.height == 0 || !fm_) return;

@@ -71,18 +71,20 @@ public:
     bool focused = false;
     bool password = false;  // mask with dots
     int cursorPos = 0;      // byte position
+    int selStart = 0;       // selection in codepoint offsets
+    int selEnd = 0;
     float cursorBlink = 0;
 
-    std::function<void(const std::string&)> onSubmit;  // Enter pressed
-    std::function<std::string()> onPaste;              // Return clipboard text
+    std::function<void(const std::string&)> onSubmit;
+    std::function<std::string()> onPaste;
 
     void Paint(GLRenderer& r, FontManager& fm, float time) const;
     bool OnMouseDown(float x, float y);
     void OnChar(uint32_t codepoint);
-    void OnKey(int key, int mods);  // backspace, delete, enter, arrows
+    void OnKey(int key, int mods);
     void Update(float dt);
-    void SetText(const std::string& t) { text = t; cursorPos = t.size(); }
-    void Clear() { text.clear(); cursorPos = 0; }
+    void SetText(const std::string& t) { text = t; cursorPos = t.size(); selStart = selEnd = 0; }
+    void Clear() { text.clear(); cursorPos = 0; selStart = selEnd = 0; }
 
 private:
     std::string DisplayText() const;
@@ -115,6 +117,7 @@ public:
     std::function<void(int index, const std::string& id)> onSelect;
 
     void Paint(GLRenderer& r, FontManager& fm) const;
+    void PaintPopup(GLRenderer& r, FontManager& fm) const;  // Draw on top of everything
     bool OnMouseDown(float x, float y);
     bool OnMouseUp(float x, float y);
     void OnMouseMove(float x, float y);

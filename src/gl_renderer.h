@@ -17,6 +17,7 @@ public:
     void EndFrame();
 
     void DrawRect(float x, float y, float w, float h, const Color& c);
+    void DrawRoundedRect(float x, float y, float w, float h, float r, const Color& c);
     void DrawGlyph(const GlyphInfo& gi, float x, float y, const Color& c, float ascent);
     void DrawShapedRun(const FontManager& fm, const ShapedRun& run,
                        float x, float y, float ascent, const Color& c);
