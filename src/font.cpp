@@ -147,21 +147,58 @@ float FontManager::SpaceWidth(FontStyle style) const {
     return (idx >= 0 && idx < (int)faces_.size()) ? faces_[idx].spaceWidth : 6;
 }
 
-ShapedRun FontManager::Shape(const std::string& text, FontStyle style, bool rtl) const {
+static int DecodeUTF8(const char* p, uint32_t& cp) {
+    uint8_t c = *p;
+    if (c < 0x80) { cp = c; return 1; }
+    if (c < 0xE0) { cp = ((c & 0x1F) << 6) | (p[1] & 0x3F); return 2; }
+    if (c < 0xF0) { cp = ((c & 0x0F) << 12) | ((p[1] & 0x3F) << 6) | (p[2] & 0x3F); return 3; }
+    cp = ((c & 0x07) << 18) | ((p[1] & 0x3F) << 12) | ((p[2] & 0x3F) << 6) | (p[3] & 0x3F);
+    return 4;
+}
+
+int FontManager::FindFallbackFace(uint32_t codepoint, int sizePx) const {
+    uint64_t key = ((uint64_t)codepoint << 32) | sizePx;
+    auto it = fallbackCache_.find(key);
+    if (it != fallbackCache_.end()) return it->second;
+
+    FcPattern* pat = FcPatternCreate();
+    FcCharSet* cs = FcCharSetCreate();
+    FcCharSetAddChar(cs, codepoint);
+    FcPatternAddCharSet(pat, FC_CHARSET, cs);
+    FcConfigSubstitute(nullptr, pat, FcMatchPattern);
+    FcDefaultSubstitute(pat);
+
+    FcResult res;
+    FcPattern* match = FcFontMatch(nullptr, pat, &res);
+    int faceIdx = -1;
+    if (match) {
+        FcChar8* file = nullptr;
+        if (FcPatternGetString(match, FC_FILE, 0, &file) == FcResultMatch)
+            faceIdx = const_cast<FontManager*>(this)->LoadFace((const char*)file, sizePx);
+        FcPatternDestroy(match);
+    }
+    FcCharSetDestroy(cs);
+    FcPatternDestroy(pat);
+    fallbackCache_[key] = faceIdx;
+    return faceIdx;
+}
+
+int FontManager::ResolveFace(uint32_t codepoint, int primaryFace, int sizePx) const {
+    if (primaryFace < 0 || primaryFace >= (int)faces_.size()) return primaryFace;
+    if (FT_Get_Char_Index(faces_[primaryFace].ft, codepoint) != 0) return primaryFace;
+    int fb = FindFallbackFace(codepoint, sizePx);
+    return (fb >= 0) ? fb : primaryFace;
+}
+
+ShapedRun FontManager::ShapeRun(const std::string& text, int faceIdx, bool rtl) const {
     ShapedRun result;
-    if (text.empty()) return result;
-
-    int fIdx = FaceIndex(style, rtl);
-    if (fIdx < 0 || fIdx >= (int)faces_.size()) return result;
-
-    const Face& face = faces_[fIdx];
+    if (text.empty() || faceIdx < 0 || faceIdx >= (int)faces_.size()) return result;
 
     hb_buffer_t* buf = hb_buffer_create();
     hb_buffer_add_utf8(buf, text.c_str(), (int)text.size(), 0, (int)text.size());
     hb_buffer_set_direction(buf, rtl ? HB_DIRECTION_RTL : HB_DIRECTION_LTR);
     hb_buffer_guess_segment_properties(buf);
-
-    hb_shape(face.hb, buf, nullptr, 0);
+    hb_shape(faces_[faceIdx].hb, buf, nullptr, 0);
 
     unsigned int glyphCount = 0;
     hb_glyph_info_t* info = hb_buffer_get_glyph_infos(buf, &glyphCount);
@@ -169,7 +206,6 @@ ShapedRun FontManager::Shape(const std::string& text, FontStyle style, bool rtl)
 
     float cursorX = 0;
     result.glyphs.resize(glyphCount);
-
     for (unsigned int i = 0; i < glyphCount; i++) {
         auto& g = result.glyphs[i];
         g.glyphId = info[i].codepoint;
@@ -177,13 +213,61 @@ ShapedRun FontManager::Shape(const std::string& text, FontStyle style, bool rtl)
         g.xPos = cursorX + pos[i].x_offset / 64.0f;
         g.yPos = pos[i].y_offset / 64.0f;
         g.xAdvance = pos[i].x_advance / 64.0f;
-        g.faceIdx = fIdx;
-        g.cached = &EnsureGlyph(g.glyphId, fIdx);  // Pre-cache pointer
+        g.faceIdx = faceIdx;
+        g.cached = &EnsureGlyph(g.glyphId, faceIdx);
         cursorX += pos[i].x_advance / 64.0f;
     }
-
     result.totalWidth = cursorX;
     hb_buffer_destroy(buf);
+    return result;
+}
+
+ShapedRun FontManager::Shape(const std::string& text, FontStyle style, bool rtl) const {
+    ShapedRun result;
+    if (text.empty()) return result;
+
+    int primaryFace = FaceIndex(style, rtl);
+    if (primaryFace < 0 || primaryFace >= (int)faces_.size()) return result;
+    int sizePx = (int)(faces_[primaryFace].lineHeight + 0.5f);
+
+    // Split text into runs by font face (before shaping, preserves ligatures)
+    struct Run { std::string text; int face; size_t startByte; };
+    std::vector<Run> runs;
+    int curFace = -1;
+    size_t runStart = 0;
+
+    for (size_t i = 0; i < text.size(); ) {
+        uint32_t cp;
+        int bytes = DecodeUTF8(text.c_str() + i, cp);
+        int face = ResolveFace(cp, primaryFace, sizePx);
+
+        if (face != curFace) {
+            if (curFace >= 0 && i > runStart)
+                runs.push_back({text.substr(runStart, i - runStart), curFace, runStart});
+            curFace = face;
+            runStart = i;
+        }
+        i += bytes;
+    }
+    if (curFace >= 0 && text.size() > runStart)
+        runs.push_back({text.substr(runStart), curFace, runStart});
+
+    // Fast path: single run (no fallback needed)
+    if (runs.size() == 1)
+        return ShapeRun(text, runs[0].face, rtl);
+
+    // Shape each run separately, concatenate results
+    float cursorX = 0;
+    for (auto& run : runs) {
+        ShapedRun shaped = ShapeRun(run.text, run.face, rtl);
+        for (auto& g : shaped.glyphs) {
+            g.xPos += cursorX;
+            g.cluster += run.startByte;
+            result.glyphs.push_back(g);
+        }
+        cursorX += shaped.totalWidth;
+    }
+    result.totalWidth = cursorX;
     return result;
 }
 
@@ -207,7 +291,14 @@ const GlyphInfo& FontManager::EnsureGlyph(uint32_t glyphId, int faceIdx) const {
     GlyphInfo gi{};
     if (faceIdx >= 0 && faceIdx < (int)faces_.size()) {
         FT_Face ft = faces_[faceIdx].ft;
-        if (FT_Load_Glyph(ft, glyphId, FT_LOAD_RENDER) == 0) {
+        // Try color bitmap first (emoji), fall back to grayscale
+        bool isColor = false;
+        if (FT_Load_Glyph(ft, glyphId, FT_LOAD_RENDER | FT_LOAD_COLOR) == 0) {
+            isColor = (ft->glyph->bitmap.pixel_mode == FT_PIXEL_MODE_BGRA);
+        } else {
+            FT_Load_Glyph(ft, glyphId, FT_LOAD_RENDER);
+        }
+        if (ft->glyph) {
             FT_GlyphSlot slot = ft->glyph;
             int w = (int)slot->bitmap.width;
             int h = (int)slot->bitmap.rows;
@@ -219,9 +310,20 @@ const GlyphInfo& FontManager::EnsureGlyph(uint32_t glyphId, int faceIdx) const {
                     rowH_ = 0;
                 }
                 if (curY_ + h + 1 < atlasH_) {
-                    for (int r = 0; r < h; r++)
-                        memcpy(&atlasData_[(curY_ + r) * atlasW_ + curX_],
-                               &slot->bitmap.buffer[r * slot->bitmap.pitch], w);
+                    if (isColor) {
+                        for (int r = 0; r < h; r++) {
+                            const uint8_t* src = slot->bitmap.buffer + r * slot->bitmap.pitch;
+                            uint8_t* dst = &atlasData_[(curY_ + r) * atlasW_ + curX_];
+                            for (int c = 0; c < w; c++) {
+                                uint8_t b = src[c*4], g = src[c*4+1], rv = src[c*4+2], a = src[c*4+3];
+                                dst[c] = a > 0 ? (uint8_t)((rv * 77 + g * 150 + b * 29) >> 8) : 0;
+                            }
+                        }
+                    } else {
+                        for (int r = 0; r < h; r++)
+                            memcpy(&atlasData_[(curY_ + r) * atlasW_ + curX_],
+                                   &slot->bitmap.buffer[r * slot->bitmap.pitch], w);
+                    }
 
                     gi.atlasX = curX_;
                     gi.atlasY = curY_;

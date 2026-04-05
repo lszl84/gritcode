@@ -85,5 +85,10 @@ private:
 
     int LoadFace(const std::string& path, int sizePx);
     std::string FindFont(const char* family, bool bold, bool italic) const;
+    int FindFallbackFace(uint32_t codepoint, int sizePx) const;
+    int ResolveFace(uint32_t codepoint, int primaryFace, int sizePx) const;
+    ShapedRun ShapeRun(const std::string& text, int faceIdx, bool rtl) const;
+
+    mutable std::map<uint64_t, int> fallbackCache_;  // (codepoint<<32|sizePx) → face index
     std::map<std::string, std::shared_ptr<std::vector<uint8_t>>> fileCache_;
 };
