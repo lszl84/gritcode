@@ -387,8 +387,7 @@ void App::SendMessage() {
 
 void App::DoSendToProvider() {
     if (activeProvider_ == "claude") {
-        // Claude ACP: spawn claude binary
-        // Build prompt with history
+        // Claude ACP: spawn claude binary with stream-json output
         std::string prompt;
         if (history_.size() > 1) {
             prompt = "<conversation_history>\n";
@@ -400,19 +399,109 @@ void App::DoSendToProvider() {
         if (!history_.empty() && history_.back().role == "user")
             prompt += history_.back().content;
 
-        std::string cmd = "claude --print --verbose --output-format stream-json --dangerously-skip-permissions --model " + activeModel_;
+        std::string cmd = "claude --print --verbose --output-format stream-json --include-partial-messages --dangerously-skip-permissions --model " + activeModel_;
 
         std::thread([this, cmd, prompt]() {
-            FILE* pipe = popen(cmd.c_str(), "w");
-            // TODO: proper ACP streaming. For now, use simple print mode
-            // This is a placeholder — real ACP needs process management
-            if (pipe) {
-                fwrite(prompt.c_str(), 1, prompt.size(), pipe);
-                pclose(pipe);
+            // Spawn with redirected stdin/stdout
+            FILE* pipe = popen(("echo " + json(prompt).dump() + " | " + cmd).c_str(), "r");
+            if (!pipe) {
+                events_.Push([this]() {
+                    AppendSystem("Error: failed to spawn claude binary");
+                    requestInProgress_ = false;
+                    MarkDirty();
+                });
+                return;
             }
-            events_.Push([this]() {
+
+            // Write prompt via stdin (already piped via echo above)
+            // Read stdout line by line, parse stream-json
+            std::string fullResponse;
+            bool inThinking = false;
+            char buf[4096];
+
+            while (fgets(buf, sizeof(buf), pipe)) {
+                std::string line(buf);
+                if (!line.empty() && line.back() == '\n') line.pop_back();
+                if (line.empty()) continue;
+
+                try {
+                    auto j = json::parse(line);
+                    std::string type = j.value("type", "");
+
+                    if (type == "stream_event" && j.contains("event")) {
+                        auto& evt = j["event"];
+                        std::string evtType = evt.value("type", "");
+
+                        if (evtType == "content_block_start" && evt.contains("content_block")) {
+                            std::string blockType = evt["content_block"].value("type", "");
+                            inThinking = (blockType == "thinking");
+                        } else if (evtType == "content_block_stop") {
+                            inThinking = false;
+                        } else if (evtType == "content_block_delta" && evt.contains("delta")) {
+                            auto& delta = evt["delta"];
+                            std::string deltaType = delta.value("type", "");
+
+                            if (deltaType == "text_delta") {
+                                std::string text = delta.value("text", "");
+                                if (!text.empty()) {
+                                    fullResponse += text;
+                                    events_.Push([this, text]() {
+                                        if (responseBuffer_.empty())
+                                            responseStartBlock_ = scrollView_.BlockCount();
+                                        responseBuffer_ += text;
+
+                                        double now = GetMonotonicTime();
+                                        if (now - lastMarkdownTime_ > 0.5 &&
+                                            responseBuffer_.size() > lastMarkdownLen_ + 20) {
+                                            RenderMarkdownToBlocks();
+                                            lastMarkdownTime_ = now;
+                                            lastMarkdownLen_ = responseBuffer_.size();
+                                        }
+                                        MarkDirty();
+                                    });
+                                }
+                            } else if (deltaType == "thinking_delta") {
+                                std::string thinking = delta.value("thinking", "");
+                                if (!thinking.empty()) {
+                                    events_.Push([this, thinking]() {
+                                        if (!receivingThinking_) {
+                                            receivingThinking_ = true;
+                                            scrollView_.AppendStream(BlockType::THINKING, thinking);
+                                            scrollView_.StartThinking(scrollView_.BlockCount() - 1);
+                                        } else {
+                                            scrollView_.ContinueStream(thinking);
+                                        }
+                                        MarkDirty();
+                                    });
+                                }
+                            }
+                        }
+                    } else if (type == "result") {
+                        bool isError = j.value("is_error", false);
+                        if (isError) {
+                            std::string err = j.value("error", "Unknown error");
+                            events_.Push([this, err]() { AppendSystem("Error: " + err); });
+                        }
+                        std::string result = j.value("result", "");
+                        if (!result.empty() && fullResponse.empty()) fullResponse = result;
+                    }
+                } catch (...) {}
+            }
+            pclose(pipe);
+
+            events_.Push([this, fullResponse]() {
+                if (receivingThinking_) {
+                    receivingThinking_ = false;
+                    scrollView_.StopThinking(scrollView_.BlockCount() - 1);
+                }
+                if (!responseBuffer_.empty()) {
+                    RenderMarkdownToBlocks(true);
+                    responseBuffer_.clear();
+                }
+                if (!fullResponse.empty())
+                    history_.push_back({"assistant", fullResponse, {}, {}});
                 requestInProgress_ = false;
-                sendButton_.enabled = true;
+                scrollView_.StopAllAnimations();
                 MarkDirty();
             });
         }).detach();
