@@ -168,6 +168,7 @@ bool App::Init() {
     session_.LoadForCwd(cwd);
 
     window_.Show();
+    messageInput_.focused = true;
 
     // Defer restore to first frame so fonts/scale are finalized
     if (!session_.History().empty()) {
