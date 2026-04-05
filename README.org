@@ -1,8 +1,6 @@
 #+TITLE: FastCode Native
 #+SUBTITLE: GPU-rendered AI coding harness. No Electron. No web views.
 
-* FastCode Native
-
 A native AI coding assistant built in C++ with OpenGL, HarfBuzz, and FreeType.
 
 No Electron. No Chromium. No 800 MB RAM for a chat window.
