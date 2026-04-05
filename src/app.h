@@ -60,6 +60,7 @@ private:
     Button sendButton_;
     Button apiKeyButton_;
     Label statusLabel_;
+    Label versionLabel_;
 
     // Backend state
     net::CurlHttpClient httpClient_;

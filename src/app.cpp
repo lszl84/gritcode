@@ -128,6 +128,8 @@ bool App::Init() {
     };
 
     statusLabel_.text = "Disconnected";
+    versionLabel_.text = "v" FCN_VERSION;
+    versionLabel_.color = {0.35f, 0.35f, 0.37f};
 
     // Window callbacks
     float currentScale = window_.Scale();
@@ -204,6 +206,7 @@ void App::LayoutWidgets() {
 
     apiKeyButton_.bounds = {w - 110 * s, barY + 5, 100 * s, bar - 10};
     apiKeyButton_.visible = (activeProvider_ == "zen");
+    versionLabel_.bounds = {w - 110 * s - 80 * s, barY + 5, 70 * s, bar - 10};
 }
 
 // ============================================================================
@@ -234,6 +237,7 @@ void App::PaintBottomBar() {
     providerDropdown_.Paint(renderer_, fm);
     modelDropdown_.Paint(renderer_, fm);
     statusLabel_.Paint(renderer_, fm);
+    versionLabel_.Paint(renderer_, fm);
     apiKeyButton_.Paint(renderer_, fm);
     messageInput_.Paint(renderer_, fm, 0);
     sendButton_.Paint(renderer_, fm);

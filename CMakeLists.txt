@@ -1,9 +1,24 @@
 cmake_minimum_required(VERSION 3.24)
-project(fastcode-native CXX C)
+project(fastcode-native VERSION 0.1.0 LANGUAGES CXX C)
 
 set(CMAKE_CXX_STANDARD 23)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
+
+# Build number from git commit count
+execute_process(
+    COMMAND git rev-list --count HEAD
+    WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+    OUTPUT_VARIABLE BUILD_NUMBER
+    OUTPUT_STRIP_TRAILING_WHITESPACE
+    ERROR_QUIET
+)
+if(NOT BUILD_NUMBER)
+    set(BUILD_NUMBER "0")
+endif()
+
+set(VERSION_STRING "${PROJECT_VERSION_MAJOR}.${PROJECT_VERSION_MINOR}.${BUILD_NUMBER}")
+message(STATUS "Version: ${VERSION_STRING}")
 
 include(FetchContent)
 
@@ -68,6 +83,10 @@ target_link_libraries(fastcode-native PRIVATE
     cmark
 )
 
+target_compile_definitions(fastcode-native PRIVATE
+    FCN_VERSION="${VERSION_STRING}"
+)
+
 target_compile_options(fastcode-native PRIVATE -Wall -Wextra -Wpedantic)
 
 include(CheckIPOSupported)
@@ -75,3 +94,6 @@ check_ipo_supported(RESULT lto_supported)
 if(lto_supported)
     set_property(TARGET fastcode-native PROPERTY INTERPROCEDURAL_OPTIMIZATION_RELEASE TRUE)
 endif()
+
+# Install to ~/.local/bin/
+install(TARGETS fastcode-native DESTINATION bin)
