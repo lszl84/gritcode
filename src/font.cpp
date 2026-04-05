@@ -178,6 +178,7 @@ ShapedRun FontManager::Shape(const std::string& text, FontStyle style, bool rtl)
         g.yPos = pos[i].y_offset / 64.0f;
         g.xAdvance = pos[i].x_advance / 64.0f;
         g.faceIdx = fIdx;
+        g.cached = &EnsureGlyph(g.glyphId, fIdx);  // Pre-cache pointer
         cursorX += pos[i].x_advance / 64.0f;
     }
 
@@ -192,9 +193,17 @@ float FontManager::MeasureWidth(const std::string& text, FontStyle style, bool r
 
 const GlyphInfo& FontManager::EnsureGlyph(uint32_t glyphId, int faceIdx) const {
     uint64_t key = Key(glyphId, faceIdx);
-    auto it = cache_.find(key);
-    if (it != cache_.end()) return it->second;
 
+    // Flat open-addressing lookup (cache-friendly linear probing)
+    size_t idx = (size_t)(key * 0x9E3779B97F4A7C15ULL) & CACHE_MASK;
+    for (size_t i = 0; i < 64; i++) {  // Max 64 probes
+        auto& slot = cache_[idx];
+        if (slot.key == key) return slot.info;      // Hit
+        if (slot.key == ~0ULL) break;               // Empty = miss
+        idx = (idx + 1) & CACHE_MASK;
+    }
+
+    // Cache miss: rasterize glyph
     GlyphInfo gi{};
     if (faceIdx >= 0 && faceIdx < (int)faces_.size()) {
         FT_Face ft = faces_[faceIdx].ft;
@@ -228,9 +237,25 @@ const GlyphInfo& FontManager::EnsureGlyph(uint32_t glyphId, int faceIdx) const {
         }
     }
 
-    auto [ins, _] = cache_.emplace(key, gi);
+    // Insert into flat cache
+    idx = (size_t)(key * 0x9E3779B97F4A7C15ULL) & CACHE_MASK;
+    for (size_t i = 0; i < 64; i++) {
+        auto& s = cache_[idx];
+        if (s.key == ~0ULL || s.key == key) {
+            s.key = key;
+            s.info = gi;
+            atlasGen_++;
+            return s.info;
+        }
+        idx = (idx + 1) & CACHE_MASK;
+    }
+
+    // Fallback: overwrite first slot (shouldn't happen with 8192 slots)
+    auto& s = cache_[(size_t)(key * 0x9E3779B97F4A7C15ULL) & CACHE_MASK];
+    s.key = key;
+    s.info = gi;
     atlasGen_++;
-    return ins->second;
+    return s.info;
 }
 
 std::vector<float> FontManager::CaretPositionsFromRun(const ShapedRun& run, const std::string& text, bool rtl) const {

@@ -1009,14 +1009,13 @@ void ScrollView::Paint(GLRenderer& renderer) {
             renderer.DrawRect(leftMargin_ - 5, blockTop, 3, blockH + 4, userPromptColor_);
         }
 
-        // Thinking collapse indicator (drawn triangle, not unicode)
+        // Thinking collapse indicator
         if (block.type == BlockType::THINKING && !wrappedCache_[i].empty()) {
-            float triSize = fonts_.LineHeight(FontStyle::ThinkingItalic) * 0.4f;
-            float triY = blockTop + wrappedCache_[i][0].y + fonts_.LineHeight(FontStyle::ThinkingItalic) / 2;
-            if (block.isCollapsed)
-                renderer.DrawTriRight(4, triY, triSize, thinkingColor_);
-            else
-                renderer.DrawTriDown(4 + triSize/2, triY, triSize, thinkingColor_);
+            std::string arrow = block.isCollapsed ? "\xe2\x96\xb6" : "\xe2\x96\xbc";
+            auto run = fonts_.Shape(arrow, FontStyle::ThinkingItalic, false);
+            float arrowAsc = fonts_.Ascent(FontStyle::ThinkingItalic);
+            renderer.DrawShapedRun(fonts_, run, 2, blockTop + wrappedCache_[i][0].y,
+                                   arrowAsc, thinkingColor_);
         }
 
         // Draw lines
@@ -1028,20 +1027,21 @@ void ScrollView::Paint(GLRenderer& renderer) {
             if (absY + wl.height < 0) continue;
             if (absY > clientH) break;
 
-            // Check selection for this line (skip utf8 counting when no selection)
+            // Check selection (skip utf8 counting when no selection active)
             bool lineSelected = false;
             int lineCharLen = 0;
             int selFromChar = 0, selToChar = 0;
-            TextPosition lineStart = {(int)i, (int)li, 0};
-            TextPosition lineEnd = lineStart;
             if (hasSel) {
                 lineCharLen = utf8_codepoint_count(wl.text);
-                lineEnd = {(int)i, (int)li, lineCharLen};
+                TextPosition lineStart = {(int)i, (int)li, 0};
+                TextPosition lineEnd = {(int)i, (int)li, lineCharLen};
                 lineSelected = selStart <= lineEnd && selEnd >= lineStart;
             }
 
             if (lineSelected) {
                 // Compute character range of selection on this line
+                TextPosition lineStart = {(int)i, (int)li, 0};
+                TextPosition lineEnd = {(int)i, (int)li, lineCharLen};
                 if (selStart <= lineStart && lineEnd <= selEnd) {
                     selFromChar = 0;
                     selToChar = lineCharLen;

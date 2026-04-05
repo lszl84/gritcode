@@ -109,6 +109,7 @@ void GLRenderer::BeginFrame(int viewportW, int viewportH, const FontManager& fm)
     vpH_ = viewportH;
     fm_ = &fm;
     batch_.clear();
+    batch_.reserve(16384);  // Pre-allocate for ~2700 quads (avoids realloc)
 
     glViewport(0, 0, vpW_, vpH_);
     glClearColor(0.12f, 0.12f, 0.13f, 1.0f);
@@ -208,7 +209,8 @@ void GLRenderer::DrawGlyph(const GlyphInfo& gi, float x, float y,
 void GLRenderer::DrawShapedRun(const FontManager& fm, const ShapedRun& run,
                                 float x, float y, float ascent, const Color& c) {
     for (auto& g : run.glyphs) {
-        const GlyphInfo& gi = fm.EnsureGlyph(g.glyphId, g.faceIdx);
+        // Use cached pointer if available (avoids hash lookup per glyph)
+        const GlyphInfo& gi = g.cached ? *g.cached : fm.EnsureGlyph(g.glyphId, g.faceIdx);
         DrawGlyph(gi, x + g.xPos, y, c, ascent);
     }
 }

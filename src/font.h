@@ -5,7 +5,6 @@
 #include <hb.h>
 #include <hb-ft.h>
 #include <vector>
-#include <unordered_map>
 #include <map>
 #include <memory>
 #include <string>
@@ -22,6 +21,7 @@ struct ShapedGlyph {
     float xAdvance;
     uint32_t cluster;
     int faceIdx;
+    const GlyphInfo* cached = nullptr;  // Direct pointer, avoids hash lookup during draw
 };
 
 struct ShapedRun {
@@ -69,8 +69,17 @@ private:
     int atlasW_ = 2048, atlasH_ = 2048;
     mutable std::vector<uint8_t> atlasData_;
     mutable int curX_ = 1, curY_ = 1, rowH_ = 0;
-    mutable std::unordered_map<uint64_t, GlyphInfo> cache_;
     mutable size_t atlasGen_ = 0;
+
+    // Flat open-addressing glyph cache (replaces unordered_map)
+    // Key = (faceIdx << 32) | glyphId. Robin-hood-style linear probing.
+    static constexpr size_t CACHE_SIZE = 8192;  // Must be power of 2
+    static constexpr size_t CACHE_MASK = CACHE_SIZE - 1;
+    struct CacheSlot {
+        uint64_t key = ~0ULL;  // ~0 = empty
+        GlyphInfo info;
+    };
+    mutable std::vector<CacheSlot> cache_{CACHE_SIZE};
 
     uint64_t Key(uint32_t glyph, int face) const { return ((uint64_t)face << 32) | glyph; }
 
