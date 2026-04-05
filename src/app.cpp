@@ -112,6 +112,10 @@ bool App::Init() {
     // Message input
     messageInput_.placeholder = "Type a message...";
     messageInput_.onSubmit = [&](const std::string&) { SendMessage(); };
+    messageInput_.onPaste = [&]() -> std::string {
+        const char* clip = glfwGetClipboardString(window_.Handle());
+        return clip ? clip : "";
+    };
 
     statusLabel_.text = "Disconnected";
 
@@ -641,6 +645,20 @@ void App::OnKey(int key, int mods, bool pressed) {
         }
         scrollView_.StopAllAnimations();
         AppendSystem("Cancelled");
+        MarkDirty();
+        return;
+    }
+
+    // Ctrl+C: always copy from scroll view selection
+    if ((mods & 4) && (key == 0x63 || key == 0x43)) {
+        scrollView_.OnKey(key, mods);
+        MarkDirty();
+        return;
+    }
+
+    // Ctrl+A: select all in scroll view (unless text input focused)
+    if ((mods & 4) && (key == 0x61 || key == 0x41) && !messageInput_.focused) {
+        scrollView_.OnKey(key, mods);
         MarkDirty();
         return;
     }

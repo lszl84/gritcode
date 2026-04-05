@@ -168,7 +168,21 @@ void TextInput::OnChar(uint32_t codepoint) {
 
 void TextInput::OnKey(int key, int mods) {
     if (!focused) return;
-    (void)mods;
+
+    // Ctrl+V paste
+    if ((mods & 4) && (key == 0x76 || key == 0x56)) {  // 'v' or 'V' + ctrl
+        if (onPaste) {
+            std::string clip = onPaste();
+            if (!clip.empty()) {
+                // Strip newlines for single-line input
+                for (auto& c : clip) if (c == '\n' || c == '\r') c = ' ';
+                text.insert(cursorPos, clip);
+                cursorPos += clip.size();
+                cursorBlink = 0;
+            }
+        }
+        return;
+    }
 
     if (key == XKB_KEY_Return || key == XKB_KEY_KP_Enter) {
         if (onSubmit && !text.empty()) {

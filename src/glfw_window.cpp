@@ -124,6 +124,7 @@ void GlfwWindow::KeyCallbackCb(GLFWwindow* win, int key, int, int action, int mo
     case GLFW_KEY_SPACE:     sym = 0x20; break;
     case GLFW_KEY_A:         sym = (mods & GLFW_MOD_SHIFT) ? 0x41 : 0x61; break;
     case GLFW_KEY_C:         sym = (mods & GLFW_MOD_SHIFT) ? 0x43 : 0x63; break;
+    case GLFW_KEY_V:         sym = (mods & GLFW_MOD_SHIFT) ? 0x56 : 0x76; break;
     default: break;
     }
 

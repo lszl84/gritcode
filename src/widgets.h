@@ -74,6 +74,7 @@ public:
     float cursorBlink = 0;
 
     std::function<void(const std::string&)> onSubmit;  // Enter pressed
+    std::function<std::string()> onPaste;              // Return clipboard text
 
     void Paint(GLRenderer& r, FontManager& fm, float time) const;
     bool OnMouseDown(float x, float y);
