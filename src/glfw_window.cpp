@@ -1,4 +1,5 @@
 #include "glfw_window.h"
+#include "types.h"
 #include <cstdio>
 
 GlfwWindow::GlfwWindow() = default;
@@ -122,15 +123,15 @@ void GlfwWindow::KeyCallbackCb(GLFWwindow* win, int key, int, int action, int mo
     case GLFW_KEY_PAGE_UP:   sym = 0xff55; break;
     case GLFW_KEY_PAGE_DOWN: sym = 0xff56; break;
     case GLFW_KEY_SPACE:     sym = 0x20; break;
-    case GLFW_KEY_A:         sym = (mods & GLFW_MOD_SHIFT) ? 0x41 : 0x61; break;
-    case GLFW_KEY_C:         sym = (mods & GLFW_MOD_SHIFT) ? 0x43 : 0x63; break;
-    case GLFW_KEY_V:         sym = (mods & GLFW_MOD_SHIFT) ? 0x56 : 0x76; break;
+    case GLFW_KEY_A:         sym = Key::A; break;
+    case GLFW_KEY_C:         sym = Key::C; break;
+    case GLFW_KEY_V:         sym = 'V'; break;
     default: break;
     }
 
     int xmods = 0;
-    if (mods & GLFW_MOD_CONTROL) xmods |= 4;  // MOD_CTRL
-    if (mods & GLFW_MOD_SHIFT) xmods |= 1;    // MOD_SHIFT
+    if (mods & GLFW_MOD_CONTROL) xmods |= Mod::Ctrl;
+    if (mods & GLFW_MOD_SHIFT) xmods |= Mod::Shift;
 
     if (sym && pressed) self->keyCb_(sym, xmods, true);
 }

@@ -660,14 +660,14 @@ void App::OnKey(int key, int mods, bool pressed) {
     }
 
     // Ctrl+C: always copy from scroll view selection
-    if ((mods & 4) && (key == 0x63 || key == 0x43)) {
+    if ((mods & Mod::Ctrl) && key == Key::C) {
         scrollView_.OnKey(key, mods);
         MarkDirty();
         return;
     }
 
     // Ctrl+A: select all in scroll view (unless text input focused)
-    if ((mods & 4) && (key == 0x61 || key == 0x41) && !messageInput_.focused) {
+    if ((mods & Mod::Ctrl) && key == Key::A && !messageInput_.focused) {
         scrollView_.OnKey(key, mods);
         MarkDirty();
         return;

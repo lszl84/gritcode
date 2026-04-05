@@ -170,7 +170,7 @@ void TextInput::OnKey(int key, int mods) {
     if (!focused) return;
 
     // Ctrl+V paste
-    if ((mods & 4) && (key == 0x76 || key == 0x56)) {  // 'v' or 'V' + ctrl
+    if ((mods & 1) && key == 'V') {  // Mod::Ctrl + V
         if (onPaste) {
             std::string clip = onPaste();
             if (!clip.empty()) {
