@@ -167,19 +167,17 @@ bool App::Init() {
     session_.SetCwd(cwd);
 
     if (session_.LoadForCwd(cwd)) {
-        // Restore conversation to scroll view
+        // Restore conversation to scroll view (single batch for correct layout)
+        MarkdownRenderer mdRenderer(14);
+        scrollView_.BeginBatch();
         for (auto& m : session_.History()) {
             if (m.role == "user") {
                 scrollView_.AppendStream(BlockType::USER_PROMPT, m.content);
             } else if (m.role == "assistant" && !m.content.empty()) {
-                MarkdownRenderer mdRenderer(14);
-                auto blocks = mdRenderer.Render(m.content, true);
-                scrollView_.BeginBatch();
-                scrollView_.AddBlocks(std::move(blocks));
-                scrollView_.EndBatch();
+                scrollView_.AddBlocks(mdRenderer.Render(m.content, true));
             }
-            // Skip tool calls/results in visual replay — they were part of thinking
         }
+        scrollView_.EndBatch();
         activeProvider_ = session_.Provider();
         if (!session_.Model().empty()) activeModel_ = session_.Model();
         AppendSystem("Session restored (" + std::to_string(session_.History().size()) + " messages)");
