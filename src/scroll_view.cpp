@@ -950,7 +950,9 @@ void ScrollView::Paint(GLRenderer& renderer) {
             // Track expandability and handle collapse
             if (block.type == BlockType::THINKING) {
                 block.isExpandable = (wrappedCache_[i].size() > 1);
-                if (!block.isExpandable) block.isCollapsed = false;  // Single-line: always expanded (no triangle)
+                // Single-line AND done loading: not expandable, show uncollapsed
+                // But keep collapsed while loading (block may grow)
+                if (!block.isExpandable && !block.isLoading) block.isCollapsed = false;
 
                 if (block.isCollapsed && block.isExpandable) {
                     // Collapsed: show only first line, truncated to leave room for dots
