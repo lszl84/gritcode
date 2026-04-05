@@ -77,10 +77,10 @@ private:
     size_t lastMarkdownLen_ = 0;
     double lastMarkdownTime_ = 0;
 
-    // Waiting indicator (shown after 3s if no chunks received)
+    // Waiting indicator (plain dots, not a block)
     double requestStartTime_ = 0;
-    bool waitingIndicatorShown_ = false;
-    size_t waitingBlockIdx_ = 0;
+    bool waitingForResponse_ = false;  // True between send and first chunk
+    float waitingDotAnim_ = 0;
 
     // Layout
     float barHeight_ = 40;

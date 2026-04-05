@@ -34,6 +34,7 @@ public:
     void OnScroll(float yOffset);
     void OnKey(int key, int mods);
     void OnResize(int w, int h);
+    float ContentBottom() const { return cachedTotalH_ - scrollPos_; }
 
     void Paint(GLRenderer& renderer);
     bool NeedsRedraw() const { return needsRedraw_; }

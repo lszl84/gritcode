@@ -349,7 +349,8 @@ void App::SendMessage() {
     sendButton_.enabled = false;
     toolRound_ = 0;
     requestStartTime_ = GetMonotonicTime();
-    waitingIndicatorShown_ = false;
+    waitingForResponse_ = true;
+    waitingDotAnim_ = 0;
     MarkDirty();
 
     DoSendToProvider();
@@ -401,12 +402,8 @@ void App::DoSendToProvider() {
         // onChunk (bg thread)
         [this](const std::string& chunk, bool isThinking) {
             events_.Push([this, chunk, isThinking]() {
-                // Remove waiting indicator on first chunk
-                if (waitingIndicatorShown_) {
-                    scrollView_.StopThinking(waitingBlockIdx_);
-                    scrollView_.RemoveBlocksFrom(waitingBlockIdx_);
-                    waitingIndicatorShown_ = false;
-                }
+                // First chunk received — stop waiting dots
+                waitingForResponse_ = false;
 
                 if (isThinking) {
                     if (!receivingThinking_) {
@@ -449,12 +446,7 @@ void App::DoSendToProvider() {
         [this](bool ok, const std::string& content, const std::string& error,
                const std::vector<json>& toolCalls, int, int) {
             events_.Push([this, ok, content, error, toolCalls]() {
-                // Clean up waiting indicator
-                if (waitingIndicatorShown_) {
-                    scrollView_.StopThinking(waitingBlockIdx_);
-                    scrollView_.RemoveBlocksFrom(waitingBlockIdx_);
-                    waitingIndicatorShown_ = false;
-                }
+                waitingForResponse_ = false;
 
                 if (!ok) {
                     if (!history_.empty() && history_.back().role == "user")
@@ -672,9 +664,9 @@ void App::Run() {
     double lastTime = GetMonotonicTime();
 
     while (!window_.ShouldClose()) {
-        // Block until something happens (but poll during active request for waiting indicator)
-        bool hasAnimation = scrollView_.NeedsRedraw() || (requestInProgress_ && !waitingIndicatorShown_);
-        if (!dirty_ && events_.Empty() && !hasAnimation) {
+        // Block until something happens (poll during waiting animation)
+        bool showingDots = waitingForResponse_ && (GetMonotonicTime() - requestStartTime_ > 3.0);
+        if (!dirty_ && events_.Empty() && !scrollView_.NeedsRedraw() && !showingDots) {
             window_.WaitEvents();
         } else {
             window_.PollEvents();
@@ -690,16 +682,11 @@ void App::Run() {
         messageInput_.Update(dt);
         scrollView_.Update(dt);
 
-        // Show waiting indicator after 3s with no response
-        if (requestInProgress_ && !waitingIndicatorShown_ && !receivingThinking_) {
+        // Animate waiting dots
+        if (waitingForResponse_) {
+            waitingDotAnim_ += dt;
             double elapsed = now - requestStartTime_;
-            if (elapsed > 3.0) {
-                waitingIndicatorShown_ = true;
-                waitingBlockIdx_ = scrollView_.BlockCount();
-                scrollView_.AppendStream(BlockType::THINKING, "");
-                scrollView_.StartThinking(waitingBlockIdx_);
-                MarkDirty();
-            }
+            if (elapsed > 3.0) MarkDirty();  // Keep redrawing for animation
         }
 
         if (!dirty_ && !scrollView_.NeedsRedraw()) continue;
@@ -717,6 +704,23 @@ void App::Run() {
 
         // Scroll view (top portion)
         scrollView_.Paint(renderer_);
+
+        // Waiting dots (plain, below last block, after 3s)
+        if (waitingForResponse_ && (now - requestStartTime_ > 3.0)) {
+            auto& fm = scrollView_.Fonts();
+            float dotR = fm.LineHeight(FontStyle::Regular) * 0.15f;
+            float spacing = dotR * 3;
+            float baseX = 20;
+            // Position below the last block in the scroll view
+            float baseY = scrollView_.ContentBottom() + fm.LineHeight(FontStyle::Regular) * 0.5f;
+            int frame = (int)(waitingDotAnim_ * 4) % 4;  // 0-3 animation frame
+            for (int d = 0; d < 3; d++) {
+                float alpha = (d == (frame % 3)) ? 1.0f : 0.3f;
+                Color c{0.5f, 0.5f, 0.5f, alpha};
+                float cx = baseX + d * spacing;
+                renderer_.DrawRect(cx - dotR, baseY - dotR, dotR * 2, dotR * 2, c);
+            }
+        }
 
         // Bottom bar + input
         PaintBottomBar();
