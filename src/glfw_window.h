@@ -9,6 +9,7 @@ public:
     ~GlfwWindow();
 
     bool Init(int width, int height, const char* title);
+    void Show();
     bool ShouldClose() const;
     void PollEvents();
     void WaitEvents();

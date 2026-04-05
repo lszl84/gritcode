@@ -17,6 +17,7 @@ bool GlfwWindow::Init(int width, int height, const char* title) {
     glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, 3);
     glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR, 3);
     glfwWindowHint(GLFW_OPENGL_PROFILE, GLFW_OPENGL_CORE_PROFILE);
+    glfwWindowHint(GLFW_VISIBLE, GLFW_FALSE);  // Don't show until first frame
 
     window_ = glfwCreateWindow(width, height, title, nullptr, nullptr);
     if (!window_) {
@@ -46,6 +47,8 @@ bool GlfwWindow::Init(int width, int height, const char* title) {
 void GlfwWindow::UpdateScale() {
     scale_ = (winW_ > 0) ? (float)fbW_ / winW_ : 1.0f;
 }
+
+void GlfwWindow::Show() { glfwShowWindow(window_); }
 
 bool GlfwWindow::ShouldClose() const {
     return glfwWindowShouldClose(window_);

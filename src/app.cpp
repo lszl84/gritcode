@@ -144,7 +144,10 @@ bool App::Init() {
 
     LayoutWidgets();
 
-    // Load API key and connect in background to avoid blocking startup
+    // Show window now that everything is initialized — first frame renders immediately
+    window_.Show();
+
+    // Load API key and connect in background
     AppendSystem("Starting...");
     std::thread([this]() {
         std::string savedKey = keychain::LoadApiKey();
