@@ -190,6 +190,7 @@ bool App::Init(bool sessionChooser) {
         chooserSessions_ = SessionManager::ListSessions();
         std::sort(chooserSessions_.begin(), chooserSessions_.end(),
                   [](const SessionInfo& a, const SessionInfo& b) { return a.lastUsed > b.lastUsed; });
+        chooserHovered_ = chooserSessions_.empty() ? 0 : 0;  // Pre-select first item
     } else {
         // Session: load for current working directory (deferred to main loop)
         char cwdBuf[4096];
@@ -927,6 +928,36 @@ void App::OnScroll(float delta) {
 
 void App::OnKey(int key, int mods, bool pressed) {
     if (!pressed) return;
+
+    if (chooserMode_) {
+        int maxIdx = (int)chooserSessions_.size(); // includes "New" row
+        if (key == XKB_KEY_Down || key == XKB_KEY_j) {
+            chooserHovered_ = std::min(chooserHovered_ + 1, maxIdx);
+            MarkDirty();
+        } else if (key == XKB_KEY_Up || key == XKB_KEY_k) {
+            chooserHovered_ = std::max(chooserHovered_ - 1, 0);
+            MarkDirty();
+        } else if (key == XKB_KEY_Return || key == XKB_KEY_KP_Enter) {
+            if (chooserHovered_ >= 0 && chooserHovered_ < (int)chooserSessions_.size()) {
+                ChooserSelect(chooserHovered_);
+            } else if (chooserHovered_ == (int)chooserSessions_.size()) {
+                // "New workspace"
+                chooserMode_ = false;
+                char cwdBuf[4096];
+                std::string cwd = getcwd(cwdBuf, sizeof(cwdBuf)) ? cwdBuf : ".";
+                session_.SetCwd(cwd);
+                session_.LoadForCwd(cwd);
+                window_.SetTitle(("FCN — " + cwd).c_str());
+                PopulateWorkspaceDropdown();
+                RestoreSessionToView();
+                StartConnect();
+            }
+            MarkDirty();
+        } else if (key == XKB_KEY_Escape) {
+            glfwSetWindowShouldClose(window_.Handle(), GLFW_TRUE);
+        }
+        return;
+    }
 
     // Escape cancels request
     if (key == XKB_KEY_Escape && requestInProgress_) {
