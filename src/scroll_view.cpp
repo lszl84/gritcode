@@ -27,7 +27,11 @@ static constexpr double MULTI_CLICK_THRESHOLD = 0.4;
 ScrollView::ScrollView() = default;
 
 void ScrollView::InitColors() {
+#ifdef NDEBUG
     bgColor_ = Color::RGB(30, 30, 30);
+#else
+    bgColor_ = Color::RGB(34, 26, 26);  // Reddish tint in debug
+#endif
     normalColor_ = Color::RGB(220, 220, 220);
     userPromptColor_ = Color::RGB(100, 180, 255);
     thinkingColor_ = Color::RGB(160, 160, 160);

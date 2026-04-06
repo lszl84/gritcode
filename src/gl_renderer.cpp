@@ -151,7 +151,11 @@ void GLRenderer::BeginFrame(int viewportW, int viewportH, const FontManager& fm)
     batch_.reserve(16384);  // Pre-allocate for ~2700 quads (avoids realloc)
 
     glViewport(0, 0, vpW_, vpH_);
+#ifdef NDEBUG
     glClearColor(0.12f, 0.12f, 0.13f, 1.0f);
+#else
+    glClearColor(0.14f, 0.10f, 0.10f, 1.0f);  // Reddish tint in debug
+#endif
     glClear(GL_COLOR_BUFFER_BIT);
 
     UpdateAtlasTexture();
