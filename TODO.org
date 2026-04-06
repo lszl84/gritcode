@@ -13,3 +13,7 @@ Need to detect and render math expressions inline.
 Dual-presentation characters (❤, ☹, ☺) render as text glyphs
 even when followed by VS16 (U+FE0F). Should switch to emoji font
 when VS16 is present.
+
+* TODO VTerm integration
+Embed a terminal emulator (libvterm/libtsm) for inline tool output
+and interactive shell sessions instead of popen-based execution.
