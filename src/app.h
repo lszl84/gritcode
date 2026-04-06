@@ -54,7 +54,7 @@ private:
 
 class App {
 public:
-    bool Init();
+    bool Init(bool sessionChooser = false);
     void Run();
 
 private:
@@ -64,6 +64,7 @@ private:
     EventQueue events_;
 
     // Widgets
+    Dropdown workspaceDropdown_;
     Dropdown providerDropdown_;
     Dropdown modelDropdown_;
     TextInput messageInput_;
@@ -104,8 +105,10 @@ private:
     void SendMessage();
     void DoSendToProvider();
     void OnModelsReceived(std::vector<net::ModelInfo> models);
+    void OnWorkspaceChanged(int idx, const std::string& id);
     void OnProviderChanged(int idx, const std::string& id);
     void OnModelChanged(int idx, const std::string& id);
+    void PopulateWorkspaceDropdown();
     void ShowApiKeyDialog();
     void AppendSystem(const std::string& text);
 
@@ -124,4 +127,15 @@ private:
 
     bool dirty_ = true;
     void MarkDirty() { dirty_ = true; }
+
+    // Session chooser
+    bool chooserMode_ = false;
+    std::vector<SessionInfo> chooserSessions_;
+    int chooserHovered_ = -1;
+    float chooserScroll_ = 0;
+    void PaintChooser();
+    void ChooserSelect(int idx);
+    void ChooserSelectPath(const std::string& path);
+    void RestoreSessionToView();
+    void StartConnect();
 };

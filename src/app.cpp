@@ -19,6 +19,8 @@
 #include <cstring>
 #include <thread>
 #include <array>
+#include <algorithm>
+#include <filesystem>
 #include <unistd.h>
 #include <xkbcommon/xkbcommon-keysyms.h>
 
@@ -94,7 +96,8 @@ static std::string ToolDefsJson() {
 // Init
 // ============================================================================
 
-bool App::Init() {
+bool App::Init(bool sessionChooser) {
+    chooserMode_ = sessionChooser;
     if (!window_.Init(1000, 750, "FastCode Native")) return false;
 
     if (!scrollView_.Init(window_.Width(), window_.Height() - (int)(barHeight_ + inputHeight_) * window_.Scale(),
@@ -112,6 +115,9 @@ bool App::Init() {
         fprintf(stderr, "GL renderer init failed\n");
         return false;
     }
+
+    // Workspace dropdown
+    workspaceDropdown_.onSelect = [&](int i, const std::string& id) { OnWorkspaceChanged(i, id); };
 
     // Provider dropdown
     providerDropdown_.items = {{"zen", "OpenCode Zen"}, {"claude", "Claude (ACP)"}};
@@ -177,16 +183,28 @@ bool App::Init() {
 
     LayoutWidgets();
 
-    // Session: load for current working directory (deferred to main loop)
-    char cwdBuf[4096];
-    std::string cwd = getcwd(cwdBuf, sizeof(cwdBuf)) ? cwdBuf : ".";
-    session_.SetCwd(cwd);
-    session_.LoadForCwd(cwd);
-
     window_.Show();
     messageInput_.focused = true;
 
-    // Defer restore to first frame so fonts/scale are finalized
+    if (chooserMode_) {
+        chooserSessions_ = SessionManager::ListSessions();
+        std::sort(chooserSessions_.begin(), chooserSessions_.end(),
+                  [](const SessionInfo& a, const SessionInfo& b) { return a.lastUsed > b.lastUsed; });
+    } else {
+        // Session: load for current working directory (deferred to main loop)
+        char cwdBuf[4096];
+        std::string cwd = getcwd(cwdBuf, sizeof(cwdBuf)) ? cwdBuf : ".";
+        session_.SetCwd(cwd);
+        session_.LoadForCwd(cwd);
+        PopulateWorkspaceDropdown();
+        RestoreSessionToView();
+        StartConnect();
+    }
+
+    return true;
+}
+
+void App::RestoreSessionToView() {
     if (!session_.History().empty()) {
         events_.Push([this]() {
             MarkdownRenderer mdRenderer(14);
@@ -206,8 +224,9 @@ bool App::Init() {
     } else {
         AppendSystem("Starting...");
     }
+}
 
-    // Load API key and connect in background
+void App::StartConnect() {
     std::thread([this]() {
         std::string savedKey = keychain::LoadApiKey();
         events_.Push([this, savedKey]() {
@@ -220,8 +239,6 @@ bool App::Init() {
             }
         });
     }).detach();
-
-    return true;
 }
 
 // ============================================================================
@@ -243,9 +260,10 @@ void App::LayoutWidgets() {
     sendButton_.bounds = {w - 88, inputY + 5, 80, inp - 10};
 
     float bx = 8;
-    providerDropdown_.bounds = {bx, barY + 5, 170 * s, bar - 10}; bx += 178 * s;
-    modelDropdown_.bounds = {bx, barY + 5, 180 * s, bar - 10}; bx += 188 * s;
-    statusLabel_.bounds = {bx, barY + 5, 220 * s, bar - 10}; bx += 228 * s;
+    workspaceDropdown_.bounds = {bx, barY + 5, 200 * s, bar - 10}; bx += 208 * s;
+    providerDropdown_.bounds = {bx, barY + 5, 140 * s, bar - 10}; bx += 148 * s;
+    modelDropdown_.bounds = {bx, barY + 5, 150 * s, bar - 10}; bx += 158 * s;
+    statusLabel_.bounds = {bx, barY + 5, 180 * s, bar - 10}; bx += 188 * s;
 
     apiKeyButton_.bounds = {w - 110 * s, barY + 5, 100 * s, bar - 10};
     apiKeyButton_.visible = (activeProvider_ == "zen");
@@ -277,6 +295,7 @@ void App::PaintBottomBar() {
     // For now, widgets draw at 1:1 since renderer works in physical pixels
     // and fonts are already scaled. Just offset coordinates.
     // TODO: proper scaling
+    workspaceDropdown_.Paint(renderer_, fm);
     providerDropdown_.Paint(renderer_, fm);
     modelDropdown_.Paint(renderer_, fm);
     statusLabel_.Paint(renderer_, fm);
@@ -286,6 +305,7 @@ void App::PaintBottomBar() {
     sendButton_.Paint(renderer_, fm);
 
     // Dropdown popups last (z-order: on top of everything)
+    workspaceDropdown_.PaintPopup(renderer_, fm);
     providerDropdown_.PaintPopup(renderer_, fm);
     modelDropdown_.PaintPopup(renderer_, fm);
 }
@@ -329,6 +349,64 @@ void App::OnModelsReceived(std::vector<net::ModelInfo> models) {
     modelDropdown_.selectedIndex = defaultIdx;
     activeModel_ = modelDropdown_.SelectedId();
     AppendSystem("Models loaded. Active: " + activeModel_);
+    MarkDirty();
+}
+
+void App::PopulateWorkspaceDropdown() {
+    auto sessions = SessionManager::ListSessions();
+    std::sort(sessions.begin(), sessions.end(),
+              [](const SessionInfo& a, const SessionInfo& b) { return a.lastUsed > b.lastUsed; });
+
+    workspaceDropdown_.items.clear();
+    std::string currentCwd = session_.SessionId().empty() ? "" : session_.SessionId();
+    int sel = 0;
+
+    char cwdBuf[4096];
+    std::string cwd = getcwd(cwdBuf, sizeof(cwdBuf)) ? cwdBuf : ".";
+
+    for (int i = 0; i < (int)sessions.size(); i++) {
+        auto& si = sessions[i];
+        // Shorten path: ~/Developer/fastcode-native → .../Developer/fastcode-native
+        std::string label = si.cwd;
+        const char* home = getenv("HOME");
+        if (home && label.find(home) == 0)
+            label = "~" + label.substr(strlen(home));
+        // Keep last two path components if still long
+        if (label.size() > 30) {
+            size_t last = label.rfind('/');
+            if (last != std::string::npos && last > 0) {
+                size_t prev = label.rfind('/', last - 1);
+                if (prev != std::string::npos)
+                    label = "..." + label.substr(prev);
+            }
+        }
+        workspaceDropdown_.items.push_back({si.cwd, label});
+        if (si.cwd == cwd) sel = i;
+    }
+    workspaceDropdown_.selectedIndex = sel;
+}
+
+void App::OnWorkspaceChanged(int idx, const std::string& id) {
+    // Save current session first
+    session_.Save();
+
+    // Switch to new workspace
+    if (!std::filesystem::is_directory(id)) {
+        AppendSystem("Directory not found: " + id);
+        return;
+    }
+    chdir(id.c_str());
+
+    // Clear current conversation
+    scrollView_.Clear();
+
+    session_.SetCwd(id);
+    session_.LoadForCwd(id);
+    window_.SetTitle(("FCN — " + id).c_str());
+    RestoreSessionToView();
+
+    // Re-connect with current provider
+    StartConnect();
     MarkDirty();
 }
 
@@ -739,13 +817,40 @@ void App::ExecuteToolCalls(const std::vector<json>& toolCalls, const std::string
 // ============================================================================
 
 void App::OnMouseDown(float x, float y, bool shift) {
+    if (chooserMode_) {
+        float s = window_.Scale();
+        float lh = scrollView_.Fonts().LineHeight(FontStyle::Regular);
+        float rowH = lh * 2.8f;
+        float pad = 16 * s;
+        float titleH = scrollView_.Fonts().LineHeight(FontStyle::Heading2) + pad;
+        float startY = titleH + pad;
+        int idx = (int)((y + chooserScroll_ - startY) / rowH);
+        if (idx >= 0 && idx < (int)chooserSessions_.size()) {
+            ChooserSelect(idx);
+        } else if (idx == (int)chooserSessions_.size()) {
+            // "New workspace" - use message input as path input
+            chooserMode_ = false;
+            char cwdBuf[4096];
+            std::string cwd = getcwd(cwdBuf, sizeof(cwdBuf)) ? cwdBuf : ".";
+            session_.SetCwd(cwd);
+            session_.LoadForCwd(cwd);
+            window_.SetTitle(("FCN — " + cwd).c_str());
+            RestoreSessionToView();
+            StartConnect();
+        }
+        MarkDirty();
+        return;
+    }
+
     // All coords are physical pixels from WaylandWindow
 
     // Check dropdowns first (they have popups)
+    if (workspaceDropdown_.OnMouseDown(x, y)) { MarkDirty(); return; }
     if (providerDropdown_.OnMouseDown(x, y)) { MarkDirty(); return; }
     if (modelDropdown_.OnMouseDown(x, y)) { MarkDirty(); return; }
 
     // Close any open dropdowns
+    workspaceDropdown_.Close();
     providerDropdown_.Close();
     modelDropdown_.Close();
 
@@ -776,6 +881,19 @@ void App::OnMouseUp(float x, float y) {
 }
 
 void App::OnMouseMove(float x, float y, bool leftDown) {
+    if (chooserMode_) {
+        float s = window_.Scale();
+        float lh = scrollView_.Fonts().LineHeight(FontStyle::Regular);
+        float rowH = lh * 2.8f;
+        float pad = 16 * s;
+        float titleH = scrollView_.Fonts().LineHeight(FontStyle::Heading2) + pad;
+        float startY = titleH + pad;
+        int idx = (int)((y + chooserScroll_ - startY) / rowH);
+        int maxIdx = (int)chooserSessions_.size(); // includes "New" row
+        int newHov = (idx >= 0 && idx <= maxIdx) ? idx : -1;
+        if (newHov != chooserHovered_) { chooserHovered_ = newHov; MarkDirty(); }
+        return;
+    }
     // Mouse drag in text input — skip all other hover updates
     if (leftDown && messageInput_.focused) {
         messageInput_.OnMouseDrag(x, y, scrollView_.Fonts());
@@ -797,6 +915,12 @@ void App::OnMouseMove(float x, float y, bool leftDown) {
 }
 
 void App::OnScroll(float delta) {
+    if (chooserMode_) {
+        chooserScroll_ -= delta * 40;
+        if (chooserScroll_ < 0) chooserScroll_ = 0;
+        MarkDirty();
+        return;
+    }
     scrollView_.OnScroll(delta);
     MarkDirty();
 }
@@ -864,6 +988,110 @@ void App::OnChar(uint32_t codepoint) {
 // Main loop
 // ============================================================================
 
+// ============================================================================
+// Session Chooser
+// ============================================================================
+
+void App::PaintChooser() {
+    auto& fm = scrollView_.Fonts();
+    float s = window_.Scale();
+    float w = window_.Width();
+    float h = window_.Height();
+    float lh = fm.LineHeight(FontStyle::Regular);
+    float rowH = lh * 2.8f;
+    float pad = 16 * s;
+    float titleH = fm.LineHeight(FontStyle::Heading2) + pad;
+
+    // Background
+    renderer_.DrawRect(0, 0, w, h, {0.1f, 0.1f, 0.12f, 1});
+
+    // Title
+    auto titleRun = fm.Shape("Select a workspace", FontStyle::Heading2);
+    float titleX = (w - titleRun.totalWidth) / 2;
+    renderer_.DrawShapedRun(fm, titleRun, titleX, pad, fm.Ascent(FontStyle::Heading2),
+                            {0.9f, 0.9f, 0.9f, 1});
+
+    float startY = titleH + pad;
+    float listW = std::min(w - pad * 2, 700 * s);
+    float listX = (w - listW) / 2;
+
+    for (int i = 0; i < (int)chooserSessions_.size(); i++) {
+        float y = startY + i * rowH - chooserScroll_;
+        if (y + rowH < 0 || y > h) continue;
+
+        auto& si = chooserSessions_[i];
+        bool hov = (chooserHovered_ == i);
+
+        // Row background
+        Color bg = hov ? Color{0.2f, 0.25f, 0.35f, 1} : Color{0.14f, 0.14f, 0.16f, 1};
+        renderer_.DrawRoundedRect(listX, y, listW, rowH - 4 * s, 6 * s, bg);
+
+        // CWD path (bold)
+        auto pathRun = fm.Shape(si.cwd, FontStyle::Bold);
+        renderer_.DrawShapedRun(fm, pathRun, listX + pad, y + lh * 0.3f,
+                                fm.Ascent(FontStyle::Bold), {0.85f, 0.85f, 0.9f, 1});
+
+        // Secondary info
+        std::string info = si.model;
+        if (si.messageCount > 0) info += "  ·  " + std::to_string(si.messageCount) + " messages";
+        if (!si.lastUsed.empty()) info += "  ·  " + si.lastUsed.substr(0, 16);
+        auto infoRun = fm.Shape(info, FontStyle::Regular);
+        renderer_.DrawShapedRun(fm, infoRun, listX + pad, y + lh * 1.5f,
+                                fm.Ascent(FontStyle::Regular), {0.5f, 0.5f, 0.55f, 1});
+    }
+
+    // "New workspace..." row at the bottom
+    int newIdx = (int)chooserSessions_.size();
+    float newY = startY + newIdx * rowH - chooserScroll_;
+    if (newY + rowH > 0 && newY < h) {
+        bool hov = (chooserHovered_ == newIdx);
+        Color bg = hov ? Color{0.2f, 0.3f, 0.25f, 1} : Color{0.14f, 0.14f, 0.16f, 1};
+        renderer_.DrawRoundedRect(listX, newY, listW, rowH - 4 * s, 6 * s, bg);
+        auto newRun = fm.Shape("+ New workspace...", FontStyle::Bold);
+        renderer_.DrawShapedRun(fm, newRun, listX + pad, newY + lh * 0.8f,
+                                fm.Ascent(FontStyle::Bold), {0.5f, 0.8f, 0.5f, 1});
+    }
+}
+
+void App::ChooserSelect(int idx) {
+    if (idx < 0 || idx >= (int)chooserSessions_.size()) return;
+    std::string dir = chooserSessions_[idx].cwd;
+    if (!std::filesystem::exists(dir)) {
+        AppendSystem("Directory not found: " + dir);
+        return;
+    }
+    chdir(dir.c_str());
+    session_.SetCwd(dir);
+    session_.LoadForCwd(dir);
+    chooserMode_ = false;
+    window_.SetTitle(("FCN — " + dir).c_str());
+    PopulateWorkspaceDropdown();
+    RestoreSessionToView();
+    StartConnect();
+    MarkDirty();
+}
+
+void App::ChooserSelectPath(const std::string& path) {
+    std::string dir = path;
+    // Expand ~ to HOME
+    if (!dir.empty() && dir[0] == '~') {
+        const char* home = getenv("HOME");
+        if (home) dir = std::string(home) + dir.substr(1);
+    }
+    if (!std::filesystem::is_directory(dir)) {
+        AppendSystem("Not a directory: " + dir);
+        return;
+    }
+    chdir(dir.c_str());
+    session_.SetCwd(dir);
+    session_.LoadForCwd(dir);
+    chooserMode_ = false;
+    window_.SetTitle(("FCN — " + dir).c_str());
+    RestoreSessionToView();
+    StartConnect();
+    MarkDirty();
+}
+
 void App::Run() {
     double lastTime = GetMonotonicTime();
 
@@ -883,8 +1111,10 @@ void App::Run() {
         float dt = (float)(now - lastTime);
         lastTime = now;
 
-        messageInput_.Update(dt, scrollView_.Fonts());
-        scrollView_.Update(dt);
+        if (!chooserMode_) {
+            messageInput_.Update(dt, scrollView_.Fonts());
+            scrollView_.Update(dt);
+        }
 
         // Animate waiting dots
         if (waitingForResponse_) {
@@ -906,27 +1136,31 @@ void App::Run() {
 
         renderer_.BeginFrame(window_.Width(), window_.Height(), scrollView_.Fonts());
 
-        // Scroll view (top portion)
-        scrollView_.Paint(renderer_);
+        if (chooserMode_) {
+            PaintChooser();
+        } else {
+            // Scroll view (top portion)
+            scrollView_.Paint(renderer_);
 
-        // Waiting dots (plain, below last block, after 3s)
-        if (waitingForResponse_ && (now - requestStartTime_ > 1.5)) {
-            auto& fm = scrollView_.Fonts();
-            float dotR = fm.LineHeight(FontStyle::Regular) * 0.15f;
-            float spacing = dotR * 3;
-            float baseX = 20;
-            float baseY = scrollView_.ContentBottom() + fm.LineHeight(FontStyle::Regular);
-            int frame = (int)(waitingDotAnim_ * 4) % 4;  // 0-3 animation frame
-            for (int d = 0; d < 3; d++) {
-                float alpha = (d == (frame % 3)) ? 1.0f : 0.3f;
-                Color c{0.5f, 0.5f, 0.5f, alpha};
-                float cx = baseX + d * spacing;
-                renderer_.DrawRect(cx - dotR, baseY - dotR, dotR * 2, dotR * 2, c);
+            // Waiting dots (plain, below last block, after 3s)
+            if (waitingForResponse_ && (now - requestStartTime_ > 1.5)) {
+                auto& fm = scrollView_.Fonts();
+                float dotR = fm.LineHeight(FontStyle::Regular) * 0.15f;
+                float spacing = dotR * 3;
+                float baseX = 20;
+                float baseY = scrollView_.ContentBottom() + fm.LineHeight(FontStyle::Regular);
+                int frame = (int)(waitingDotAnim_ * 4) % 4;  // 0-3 animation frame
+                for (int d = 0; d < 3; d++) {
+                    float alpha = (d == (frame % 3)) ? 1.0f : 0.3f;
+                    Color c{0.5f, 0.5f, 0.5f, alpha};
+                    float cx = baseX + d * spacing;
+                    renderer_.DrawRect(cx - dotR, baseY - dotR, dotR * 2, dotR * 2, c);
+                }
             }
-        }
 
-        // Bottom bar + input
-        PaintBottomBar();
+            // Bottom bar + input
+            PaintBottomBar();
+        }
 
         renderer_.EndFrame();
         window_.SwapBuffers();

@@ -26,6 +26,7 @@ public:
 
     bool Init(int width, int height, const char* title);
     void Show();
+    void SetTitle(const char* title);
     bool ShouldClose() const;
     void PollEvents();
     void WaitEvents();

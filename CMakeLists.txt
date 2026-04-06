@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.24)
-project(fastcode-native VERSION 0.1.0 LANGUAGES CXX C)
+project(fcn VERSION 0.1.0 LANGUAGES CXX C)
 
 set(CMAKE_CXX_STANDARD 23)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -51,7 +51,7 @@ pkg_check_modules(LIBCURL REQUIRED IMPORTED_TARGET libcurl)
 pkg_check_modules(LIBSECRET REQUIRED IMPORTED_TARGET libsecret-1)
 
 # --- Executable ---
-add_executable(fastcode-native
+add_executable(fcn
     src/main.cpp
     src/app.cpp
     src/glfw_window.cpp
@@ -65,13 +65,13 @@ add_executable(fastcode-native
     src/session.cpp
 )
 
-target_include_directories(fastcode-native PRIVATE
+target_include_directories(fcn PRIVATE
     ${cmark_BINARY_DIR}/src
     ${cmark_SOURCE_DIR}/src
     src
 )
 
-target_link_libraries(fastcode-native PRIVATE
+target_link_libraries(fcn PRIVATE
     PkgConfig::GLFW
     OpenGL::GL
     PkgConfig::FREETYPE
@@ -83,17 +83,19 @@ target_link_libraries(fastcode-native PRIVATE
     cmark
 )
 
-target_compile_definitions(fastcode-native PRIVATE
+target_compile_definitions(fcn PRIVATE
     FCN_VERSION="${VERSION_STRING}"
 )
 
-target_compile_options(fastcode-native PRIVATE -Wall -Wextra -Wpedantic)
+target_compile_options(fcn PRIVATE -Wall -Wextra -Wpedantic)
 
 include(CheckIPOSupported)
 check_ipo_supported(RESULT lto_supported)
 if(lto_supported)
-    set_property(TARGET fastcode-native PROPERTY INTERPROCEDURAL_OPTIMIZATION_RELEASE TRUE)
+    set_property(TARGET fcn PROPERTY INTERPROCEDURAL_OPTIMIZATION_RELEASE TRUE)
 endif()
 
-# Install to ~/.local/bin/
-install(TARGETS fastcode-native DESTINATION bin)
+# Install to ~/.local/bin/, desktop file, and icon
+install(TARGETS fcn DESTINATION bin)
+install(FILES fcn.desktop DESTINATION share/applications)
+install(FILES fcn.svg DESTINATION share/icons/hicolor/scalable/apps)

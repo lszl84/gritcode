@@ -69,6 +69,7 @@ void GlfwWindow::UpdateScale() {
 }
 
 void GlfwWindow::Show() { glfwShowWindow(window_); }
+void GlfwWindow::SetTitle(const char* title) { glfwSetWindowTitle(window_, title); }
 
 bool GlfwWindow::ShouldClose() const {
     return glfwWindowShouldClose(window_);

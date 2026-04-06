@@ -1,0 +1,9 @@
+[Desktop Entry]
+Name=FastCode Native
+Comment=GPU-rendered AI coding harness
+Exec=fcn --session-chooser
+Terminal=false
+Type=Application
+Icon=fcn
+Categories=Development;
+Keywords=AI;coding;assistant;

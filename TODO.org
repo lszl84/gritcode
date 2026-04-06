@@ -5,6 +5,10 @@
 Render markdown tables with borders and column alignment.
 Currently tables render as raw text.
 
+* TODO MathML / LaTeX math rendering
+Models sometimes output math markup in markdown responses.
+Need to detect and render math expressions inline.
+
 * TODO VS16 emoji presentation selector
 Dual-presentation characters (❤, ☹, ☺) render as text glyphs
 even when followed by VS16 (U+FE0F). Should switch to emoji font
