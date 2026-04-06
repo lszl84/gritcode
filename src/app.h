@@ -22,6 +22,7 @@
 #include "keychain.h"
 #include "markdown_renderer.h"
 #include "session.h"
+#include "mcp_server.h"
 #include <string>
 #include <vector>
 #include <mutex>
@@ -72,6 +73,10 @@ private:
     Button apiKeyButton_;
     Label statusLabel_;
     Label versionLabel_;
+
+    // MCP server
+    MCPServer mcpServer_;
+    void StartMCP();
 
     // Backend state
     net::CurlHttpClient httpClient_;

@@ -63,6 +63,7 @@ add_executable(fcn
     src/curl_http.cpp
     src/keychain.cpp
     src/session.cpp
+    src/mcp_server.cpp
 )
 
 target_include_directories(fcn PRIVATE

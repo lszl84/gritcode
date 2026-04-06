@@ -17,6 +17,7 @@
 #include "curl_http.h"
 #include <sstream>
 #include <cstring>
+#include <ctime>
 
 namespace net {
 
@@ -42,6 +43,9 @@ struct StreamCtx {
     std::function<void(const std::string&, bool)> onChunk;
     CurlHttpClient* client;
     std::atomic<bool>* aborted;
+
+    // Track last time we received actual content (not just keepalive)
+    std::atomic<double> lastContentTime{0};
 
     // Tool call accumulation (streamed across chunks)
     struct PendingTC { std::string id, name, args; };
@@ -73,6 +77,11 @@ size_t CurlHttpClient::WriteCallback(char* data, size_t size, size_t nmemb, void
                     auto j = json::parse(jsonData);
                     if (!j.contains("choices") || j["choices"].empty()) continue;
                     const auto& choice = j["choices"][0];
+
+                    // Mark that we received actual API data (not just keepalive)
+                    struct timespec ts;
+                    clock_gettime(CLOCK_MONOTONIC, &ts);
+                    ctx->lastContentTime.store(ts.tv_sec + ts.tv_nsec / 1e9);
 
                     // Track finish_reason
                     if (choice.contains("finish_reason") && choice["finish_reason"].is_string()) {
@@ -183,7 +192,8 @@ void CurlHttpClient::SendStreaming(
     const std::string& requestJson,
     std::function<void(const std::string&, bool)> onChunk,
     std::function<void(bool, const std::string&, const std::string&,
-                       const std::vector<json>&, int, int)> onComplete) {
+                       const std::vector<json>&, const std::string&,
+                       int, int)> onComplete) {
 
     // Abort any in-flight request and detach its thread (don't block main thread)
     Abort();
@@ -193,7 +203,7 @@ void CurlHttpClient::SendStreaming(
     requestThread_ = std::thread([this, requestJson, onChunk, onComplete]() {
         CURL* curl = curl_easy_init();
         if (!curl) {
-            onComplete(false, "", "Failed to init curl", {}, 0, 0);
+            onComplete(false, "", "Failed to init curl", {}, "", 0, 0);
             return;
         }
 
@@ -215,13 +225,23 @@ void CurlHttpClient::SendStreaming(
         curl_easy_setopt(curl, CURLOPT_LOW_SPEED_LIMIT, 1L);      // At least 1 byte/s
         curl_easy_setopt(curl, CURLOPT_LOW_SPEED_TIME, 60L);      // ...for 60s, else abort
 
-        // Progress callback for abort during connect/DNS
+        // Progress callback: abort on user cancel OR if no API content for 120s
         curl_easy_setopt(curl, CURLOPT_NOPROGRESS, 0L);
         curl_easy_setopt(curl, CURLOPT_XFERINFOFUNCTION,
             +[](void* p, curl_off_t, curl_off_t, curl_off_t, curl_off_t) -> int {
-                return ((std::atomic<bool>*)p)->load() ? 1 : 0;  // 1 = abort
+                auto* ctx = static_cast<StreamCtx*>(p);
+                if (ctx->aborted->load()) return 1;
+                // Check for content timeout (server sends keepalive but no actual data)
+                double last = ctx->lastContentTime.load();
+                if (last > 0) {
+                    struct timespec ts;
+                    clock_gettime(CLOCK_MONOTONIC, &ts);
+                    double now = ts.tv_sec + ts.tv_nsec / 1e9;
+                    if (now - last > 120.0) return 1;  // 120s without content → abort
+                }
+                return 0;
             });
-        curl_easy_setopt(curl, CURLOPT_XFERINFODATA, &aborted_);
+        curl_easy_setopt(curl, CURLOPT_XFERINFODATA, &ctx);
 
         struct curl_slist* headers = nullptr;
         headers = curl_slist_append(headers, "Content-Type: application/json");
@@ -240,7 +260,7 @@ void CurlHttpClient::SendStreaming(
         curl_easy_cleanup(curl);
 
         if (aborted_.load()) {
-            onComplete(false, ctx.accContent, "Cancelled", {}, 0, 0);
+            onComplete(false, ctx.accContent, "Cancelled", {}, "", 0, 0);
             return;
         }
 
@@ -259,9 +279,9 @@ void CurlHttpClient::SendStreaming(
         if (res != CURLE_OK || httpCode >= 400) {
             std::string err = "HTTP " + std::to_string(httpCode);
             if (res != CURLE_OK) err = curl_easy_strerror(res);
-            onComplete(false, ctx.accContent, err, {}, 0, 0);
+            onComplete(false, ctx.accContent, err, {}, ctx.finishReason, 0, 0);
         } else {
-            onComplete(true, ctx.accContent, "", toolCallsJson, 0, 0);
+            onComplete(true, ctx.accContent, "", toolCallsJson, ctx.finishReason, 0, 0);
         }
     });
 }

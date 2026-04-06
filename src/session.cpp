@@ -80,7 +80,12 @@ bool SessionManager::LoadForCwd(const std::string& cwd) {
     sessionId_ = HashCwd(cwd);
 
     std::string path = SessionPath(sessionId_);
-    if (!fs::exists(path)) return false;
+    if (!fs::exists(path)) {
+        // Register new session in index so workspace dropdown can see it
+        fs::create_directories(DataDir());
+        UpdateIndex();
+        return false;
+    }
 
     try {
         std::ifstream f(path);

@@ -56,6 +56,7 @@ public:
         std::function<void(bool ok, const std::string& content,
                            const std::string& error,
                            const std::vector<json>& toolCalls,
+                           const std::string& finishReason,
                            int inTok, int outTok)> onComplete
     );
 

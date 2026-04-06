@@ -17,26 +17,73 @@
 #include "app.h"
 #include <cstdio>
 #include <cstring>
+#include <fstream>
 #include <thread>
 #include <array>
 #include <algorithm>
 #include <filesystem>
 #include <unistd.h>
+#include <csignal>
+#include <sys/wait.h>
+#include <fcntl.h>
+#include <poll.h>
+#include <chrono>
 #include <xkbcommon/xkbcommon-keysyms.h>
 
-// Tool execution (same as before)
+// Tool execution — uses O_CLOEXEC pipe so backgrounded processes (php -S ... &)
+// don't inherit the pipe fd and block reads forever.  120s timeout via alarm().
 static std::string RunCommand(const std::string& cmd) {
-    std::string fullCmd = cmd + " 2>&1";
-    FILE* pipe = popen(fullCmd.c_str(), "r");
-    if (!pipe) return "Error: failed to execute command";
+    int pfd[2];
+    if (pipe2(pfd, O_CLOEXEC) < 0) return "Error: pipe2 failed";
+
+    pid_t pid = fork();
+    if (pid < 0) { close(pfd[0]); close(pfd[1]); return "Error: fork failed"; }
+
+    if (pid == 0) {
+        // Child: new session so we can kill the group on timeout
+        setsid();
+        close(pfd[0]);
+        dup2(pfd[1], STDOUT_FILENO);
+        dup2(pfd[1], STDERR_FILENO);
+        close(pfd[1]);
+        execl("/bin/bash", "bash", "-c", cmd.c_str(), nullptr);
+        _exit(127);
+    }
+
+    // Parent: read output with 120s timeout
+    close(pfd[1]);
+
     std::string result;
-    std::array<char, 4096> buf;
-    while (fgets(buf.data(), buf.size(), pipe)) {
-        result += buf.data();
+    char buf[4096];
+    auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(120);
+
+    struct pollfd rpfd = {pfd[0], POLLIN, 0};
+    while (true) {
+        auto remaining = std::chrono::duration_cast<std::chrono::milliseconds>(
+            deadline - std::chrono::steady_clock::now()).count();
+        if (remaining <= 0) {
+            result += "\n[killed: command timed out after 120s]";
+            kill(-pid, SIGKILL);  // Kill entire process group
+            break;
+        }
+        int ret = poll(&rpfd, 1, (int)std::min(remaining, (decltype(remaining))1000));
+        if (ret < 0) break;
+        if (ret == 0) continue;
+        ssize_t n = read(pfd[0], buf, sizeof(buf));
+        if (n <= 0) break;
+        result.append(buf, n);
         if (result.size() > 32768) { result += "\n...(truncated)"; break; }
     }
-    int status = pclose(pipe);
-    if (status != 0) result += "\n[exit code: " + std::to_string(WEXITSTATUS(status)) + "]";
+
+    close(pfd[0]);
+    // Reap child (and kill if still running)
+    int status = 0;
+    if (waitpid(pid, &status, WNOHANG) == 0) {
+        kill(-pid, SIGKILL);
+        waitpid(pid, &status, 0);
+    }
+    if (WIFEXITED(status) && WEXITSTATUS(status) != 0)
+        result += "\n[exit code: " + std::to_string(WEXITSTATUS(status)) + "]";
     return result;
 }
 
@@ -49,12 +96,50 @@ static std::string ExpandTilde(const std::string& path) {
     return path;
 }
 
+static std::string WriteFile(const std::string& path, const std::string& content) {
+    std::string expanded = ExpandTilde(path);
+    // Create parent directories if needed
+    auto parent = std::filesystem::path(expanded).parent_path();
+    if (!parent.empty()) {
+        std::error_code ec;
+        std::filesystem::create_directories(parent, ec);
+    }
+    std::ofstream f(expanded);
+    if (!f) return "Error: cannot open " + expanded + " for writing";
+    f << content;
+    f.close();
+    return "Wrote " + std::to_string(content.size()) + " bytes to " + expanded;
+}
+
+static std::string EditFile(const std::string& path, const std::string& oldStr, const std::string& newStr) {
+    std::string expanded = ExpandTilde(path);
+    std::ifstream in(expanded);
+    if (!in) return "Error: cannot read " + expanded;
+    std::string contents((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+    in.close();
+
+    size_t pos = contents.find(oldStr);
+    if (pos == std::string::npos) return "Error: old_string not found in " + expanded;
+    // Check uniqueness
+    if (contents.find(oldStr, pos + 1) != std::string::npos)
+        return "Error: old_string is not unique in " + expanded + " — provide more context";
+    contents.replace(pos, oldStr.size(), newStr);
+
+    std::ofstream out(expanded);
+    if (!out) return "Error: cannot write " + expanded;
+    out << contents;
+    out.close();
+    return "Applied edit to " + expanded;
+}
+
 static std::string ExecuteTool(const std::string& name, const std::string& argsJson) {
     try {
         auto args = json::parse(argsJson);
         if (name == "bash") return RunCommand(args.value("command", ""));
-        if (name == "read_file") return RunCommand("cat -- '" + ExpandTilde(args.value("path", "")) + "'");
+        if (name == "read_file") return RunCommand("cat -n -- '" + ExpandTilde(args.value("path", "")) + "'");
         if (name == "list_directory") return RunCommand("ls -la -- '" + ExpandTilde(args.value("path", ".")) + "'");
+        if (name == "write_file") return WriteFile(args.value("path", ""), args.value("content", ""));
+        if (name == "edit_file") return EditFile(args.value("path", ""), args.value("old_string", ""), args.value("new_string", ""));
     } catch (...) {}
     return "Error: unknown tool " + name;
 }
@@ -78,16 +163,31 @@ static std::string StripAnsi(const std::string& s) {
 static std::string ToolDefsJson() {
     json tools = json::array();
     tools.push_back({{"type","function"},{"function",{
-        {"name","bash"},{"description","Execute a shell command"},
-        {"parameters",{{"type","object"},{"properties",{{"command",{{"type","string"}}}}},{"required",json::array({"command"})}}}
+        {"name","bash"},{"description","Execute a shell command and return stdout+stderr. Use for running tests, git, installing packages, etc."},
+        {"parameters",{{"type","object"},{"properties",{{"command",{{"type","string"},{"description","The command to execute"}}}}},{"required",json::array({"command"})}}}
     }}});
     tools.push_back({{"type","function"},{"function",{
-        {"name","read_file"},{"description","Read file contents"},
-        {"parameters",{{"type","object"},{"properties",{{"path",{{"type","string"}}}}},{"required",json::array({"path"})}}}
+        {"name","read_file"},{"description","Read a file's contents with line numbers"},
+        {"parameters",{{"type","object"},{"properties",{{"path",{{"type","string"},{"description","Absolute or relative file path"}}}}},{"required",json::array({"path"})}}}
     }}});
     tools.push_back({{"type","function"},{"function",{
-        {"name","list_directory"},{"description","List directory contents"},
-        {"parameters",{{"type","object"},{"properties",{{"path",{{"type","string"}}}}},{"required",json::array()}}}
+        {"name","write_file"},{"description","Create or overwrite a file with the given content. Creates parent directories as needed."},
+        {"parameters",{{"type","object"},{"properties",{
+            {"path",{{"type","string"},{"description","File path to write"}}},
+            {"content",{{"type","string"},{"description","Full file content to write"}}}
+        }},{"required",json::array({"path","content"})}}}
+    }}});
+    tools.push_back({{"type","function"},{"function",{
+        {"name","edit_file"},{"description","Replace a unique string in a file. The old_string must appear exactly once. Include enough surrounding context to make it unique."},
+        {"parameters",{{"type","object"},{"properties",{
+            {"path",{{"type","string"},{"description","File path to edit"}}},
+            {"old_string",{{"type","string"},{"description","Exact text to find (must be unique in file)"}}},
+            {"new_string",{{"type","string"},{"description","Replacement text"}}}
+        }},{"required",json::array({"path","old_string","new_string"})}}}
+    }}});
+    tools.push_back({{"type","function"},{"function",{
+        {"name","list_directory"},{"description","List directory contents with details"},
+        {"parameters",{{"type","object"},{"properties",{{"path",{{"type","string"},{"description","Directory path (default: current directory)"}}}}},{"required",json::array()}}}
     }}});
     return tools.dump();
 }
@@ -202,6 +302,7 @@ bool App::Init(bool sessionChooser) {
         StartConnect();
     }
 
+    StartMCP();
     return true;
 }
 
@@ -240,6 +341,55 @@ void App::StartConnect() {
             }
         });
     }).detach();
+}
+
+void App::StartMCP() {
+    MCPCallbacks cb;
+
+    cb.sendMessage = [this](const std::string& msg) {
+        events_.Push([this, msg]() {
+            messageInput_.text = msg;
+            SendMessage();
+        });
+    };
+
+    cb.getStatus = [this]() -> json {
+        return {
+            {"connected", connected_},
+            {"requestInProgress", requestInProgress_},
+            {"provider", activeProvider_},
+            {"model", activeModel_},
+            {"toolRound", toolRound_},
+            {"messageCount", (int)session_.History().size()}
+        };
+    };
+
+    cb.getConversation = [this]() -> json {
+        json msgs = json::array();
+        for (auto& m : session_.History()) {
+            json entry = {{"role", m.role}, {"content", m.content}};
+            if (!m.toolCalls.empty()) {
+                json tcs = json::array();
+                for (auto& tc : m.toolCalls)
+                    tcs.push_back({{"name", tc.value("name", "")}, {"arguments", tc.value("arguments", "")}});
+                entry["tool_calls"] = tcs;
+            }
+            if (!m.toolCallId.empty()) entry["tool_call_id"] = m.toolCallId;
+            msgs.push_back(entry);
+        }
+        return msgs;
+    };
+
+    cb.getLastAssistant = [this]() -> json {
+        for (int i = (int)session_.History().size() - 1; i >= 0; i--) {
+            auto& m = session_.History()[i];
+            if (m.role == "assistant" && !m.content.empty())
+                return {{"text", m.content}, {"index", i}};
+        }
+        return {{"text", ""}, {"index", -1}};
+    };
+
+    mcpServer_.Start(std::move(cb));
 }
 
 // ============================================================================
@@ -458,14 +608,63 @@ std::string App::BuildRequestJson() {
     json j;
     j["model"] = activeModel_;
     j["stream"] = true;
+    j["max_tokens"] = 32000;
+
+    // Prune old tool results to prevent context overflow.
+    // Same approach as opencode: walk backwards, protect ~40K tokens (~120K chars)
+    // of recent tool output, then replace older results with a placeholder.
+    auto& hist = session_.History();
+    int histSize = (int)hist.size();
+
+    const size_t PROTECT_CHARS = 120000;  // ~40K tokens worth of tool output to keep
+    size_t toolCharsAccum = 0;
+    int pruneBeforeIdx = -1;  // tool results at indices <= this get cleared
+    for (int i = histSize - 1; i >= 0; i--) {
+        if (hist[i].role == "tool") {
+            toolCharsAccum += hist[i].content.size();
+            if (toolCharsAccum > PROTECT_CHARS) {
+                pruneBeforeIdx = i;
+                break;
+            }
+        }
+    }
 
     json msgs = json::array();
-    for (auto& m : session_.History()) {
+
+    // System prompt — tells the model what it is and how to behave
+    {
+        char cwdBuf[4096];
+        std::string cwd = getcwd(cwdBuf, sizeof(cwdBuf)) ? cwdBuf : ".";
+        std::string sysPrompt =
+            "You are an AI coding assistant. You help the user with software engineering tasks "
+            "by reading, writing, and editing files, and running shell commands.\n\n"
+            "Working directory: " + cwd + "\n\n"
+            "## Tools\n"
+            "You have these tools: bash, read_file, write_file, edit_file, list_directory.\n"
+            "- Use write_file to create new files or overwrite existing ones.\n"
+            "- Use edit_file to make targeted changes — provide enough context in old_string to be unique.\n"
+            "- Use read_file to read files before editing them.\n"
+            "- Use bash to run commands, tests, install packages, etc.\n\n"
+            "## Behavior\n"
+            "- When given a task, work through it step by step using your tools.\n"
+            "- Do not just describe what you would do — actually do it by calling tools.\n"
+            "- After each tool result, assess whether the task is complete and continue if not.\n"
+            "- When making changes, verify they work (e.g., run tests or the build).\n"
+            "- Keep responses concise. Lead with actions, not explanations.\n";
+        msgs.push_back({{"role", "system"}, {"content", sysPrompt}});
+    }
+
+    for (int i = 0; i < histSize; i++) {
+        auto& m = hist[i];
         json msg;
         msg["role"] = m.role;
         if (m.role == "tool") {
             msg["tool_call_id"] = m.toolCallId;
-            msg["content"] = m.content;
+            if (i <= pruneBeforeIdx) {
+                msg["content"] = "[Old tool result content cleared]";
+            } else {
+                msg["content"] = m.content;
+            }
         } else if (m.role == "assistant" && !m.toolCalls.empty()) {
             msg["content"] = m.content.empty() ? json(nullptr) : json(m.content);
             json tcs = json::array();
@@ -690,8 +889,9 @@ void App::DoSendToProvider() {
         },
         // onComplete (bg thread)
         [this](bool ok, const std::string& content, const std::string& error,
-               const std::vector<json>& toolCalls, int, int) {
-            events_.Push([this, ok, content, error, toolCalls]() {
+               const std::vector<json>& toolCalls, const std::string& finishReason,
+               int, int) {
+            events_.Push([this, ok, content, error, toolCalls, finishReason]() {
                 waitingForResponse_ = false;
 
                 if (!ok) {
@@ -704,8 +904,37 @@ void App::DoSendToProvider() {
                     return;
                 }
 
-                if (!toolCalls.empty() && toolRound_ < 10) {
+                if (!toolCalls.empty() && toolRound_ < 40) {
+                    // Render any accumulated text before switching to tool display
+                    if (!responseBuffer_.empty()) {
+                        RenderMarkdownToBlocks(true);
+                        responseBuffer_.clear();
+                    }
+                    if (receivingThinking_) {
+                        receivingThinking_ = false;
+                        scrollView_.StopThinking(scrollView_.BlockCount() - 1);
+                    }
                     ExecuteToolCalls(toolCalls, content);
+                    return;
+                }
+
+                // Model was cut off by token limit — it may have wanted to call tools.
+                // Add what we got to history and auto-continue so it can keep going.
+                if (finishReason == "length" && toolRound_ < 40) {
+                    if (!content.empty())
+                        session_.History().push_back({"assistant", content, {}, {}});
+                    // Ask it to continue
+                    session_.History().push_back({"user", "[system: your previous response was truncated due to length. Continue where you left off.]", {}, {}});
+                    toolRound_++;
+
+                    // Render what we have so far
+                    if (!responseBuffer_.empty()) {
+                        RenderMarkdownToBlocks(true);
+                        responseBuffer_.clear();
+                    }
+
+                    DoSendToProvider();
+                    MarkDirty();
                     return;
                 }
 
@@ -1127,9 +1356,9 @@ void App::Run() {
     double lastTime = GetMonotonicTime();
 
     while (!window_.ShouldClose()) {
-        // Block until something happens (poll during waiting animation)
+        // Block until something happens (poll during active requests or animations)
         bool showingDots = waitingForResponse_ && (GetMonotonicTime() - requestStartTime_ > 1.5);
-        if (!dirty_ && events_.Empty() && !scrollView_.NeedsRedraw() && !showingDots) {
+        if (!dirty_ && events_.Empty() && !scrollView_.NeedsRedraw() && !showingDots && !requestInProgress_) {
             window_.WaitEvents();
         } else {
             window_.PollEvents();
