@@ -19,7 +19,8 @@
 
 namespace keychain {
 
-// Load API key from system keychain via libsecret.
+// Load API key from system keychain.
+// Uses libsecret on Linux, Security.framework on macOS.
 // Returns empty string if not found.
 std::string LoadApiKey();
 

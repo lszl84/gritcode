@@ -15,6 +15,9 @@
 // along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 #pragma once
+#ifdef __APPLE__
+#define GLFW_INCLUDE_NONE
+#endif
 #include <GLFW/glfw3.h>
 #include <functional>
 #include <string>
@@ -63,6 +66,7 @@ private:
     float scale_ = 1.0f;
     double mouseX_ = 0, mouseY_ = 0;
     bool leftDown_ = false;
+    bool superHeld_ = false;  // Track Cmd/Super for suppressing char events
 
     ResizeCb resizeCb_;
     MouseBtnCb mouseBtnCb_;

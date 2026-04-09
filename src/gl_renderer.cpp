@@ -14,7 +14,6 @@
 // You should have received a copy of the GNU General Public License
 // along with this program. If not, see <https://www.gnu.org/licenses/>.
 
-#define GL_GLEXT_PROTOTYPES
 #include "gl_renderer.h"
 #include <cstdio>
 #include <cstring>

@@ -71,6 +71,19 @@ private:
     TextInput messageInput_;
     Button sendButton_;
     Button apiKeyButton_;
+    TextInput apiKeyInput_;
+    Button apiKeyAccept_;
+    Button apiKeyCancel_;
+    bool apiKeyEditing_ = false;
+    TextInput* FocusedInput() {
+        if (apiKeyInput_.focused) return &apiKeyInput_;
+        if (messageInput_.focused) return &messageInput_;
+        return nullptr;
+    }
+    void UnfocusAllInputs() {
+        apiKeyInput_.focused = false;
+        messageInput_.focused = false;
+    }
     Label statusLabel_;
     Label versionLabel_;
 
@@ -109,7 +122,7 @@ private:
     void Connect(const std::string& apiKey = "");
     void SendMessage();
     void DoSendToProvider();
-    void OnModelsReceived(std::vector<net::ModelInfo> models);
+    void OnModelsReceived(std::vector<net::ModelInfo> models, int httpStatus);
     void OnWorkspaceChanged(int idx, const std::string& id);
     void OnProviderChanged(int idx, const std::string& id);
     void OnModelChanged(int idx, const std::string& id);

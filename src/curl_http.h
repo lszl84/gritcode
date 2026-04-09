@@ -44,10 +44,16 @@ public:
 
     void SetBaseUrl(const std::string& url) { baseUrl_ = url; }
     void SetApiKey(const std::string& key) { apiKey_ = key; }
+    const std::string& ApiKey() const { return apiKey_; }
     bool IsAnonymous() const { return apiKey_.empty(); }
 
     // Fetch models (async, callback on bg thread)
-    void FetchModels(std::function<void(std::vector<ModelInfo>)> cb);
+    // httpStatus: 0 = network error, 200 = ok, 401 = unauthorized, etc.
+    void FetchModels(std::function<void(std::vector<ModelInfo>, int httpStatus)> cb);
+
+    // Quick synchronous key check — returns HTTP status (401 = bad key)
+    // Hits the chat endpoint with a minimal body to test auth.
+    int ValidateKey(const std::string& model = "kimi-k2.5");
 
     // Send streaming chat request (callbacks on bg thread)
     void SendStreaming(

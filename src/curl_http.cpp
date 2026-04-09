@@ -134,14 +134,49 @@ size_t CurlHttpClient::WriteCallback(char* data, size_t size, size_t nmemb, void
     return bytes;
 }
 
-void CurlHttpClient::FetchModels(std::function<void(std::vector<ModelInfo>)> cb) {
+int CurlHttpClient::ValidateKey(const std::string& model) {
+    CURL* curl = curl_easy_init();
+    if (!curl) return 0;
+
+    std::string url = baseUrl_ + "/chat/completions";
+    std::string body = R"({"model":")" + model + R"(","messages":[{"role":"user","content":"hi"}],"max_tokens":1})";
+    std::string response;
+
+    curl_easy_setopt(curl, CURLOPT_URL, url.c_str());
+    curl_easy_setopt(curl, CURLOPT_POST, 1L);
+    curl_easy_setopt(curl, CURLOPT_POSTFIELDS, body.c_str());
+    curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT, 10L);
+    curl_easy_setopt(curl, CURLOPT_TIMEOUT, 10L);
+    curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION,
+        +[](char* d, size_t s, size_t n, void* p) -> size_t {
+            ((std::string*)p)->append(d, s * n);
+            return s * n;
+        });
+    curl_easy_setopt(curl, CURLOPT_WRITEDATA, &response);
+
+    struct curl_slist* headers = nullptr;
+    headers = curl_slist_append(headers, "Content-Type: application/json");
+    if (!apiKey_.empty())
+        headers = curl_slist_append(headers, ("Authorization: Bearer " + apiKey_).c_str());
+    curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers);
+
+    CURLcode res = curl_easy_perform(curl);
+    long httpCode = 0;
+    curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &httpCode);
+    curl_slist_free_all(headers);
+    curl_easy_cleanup(curl);
+
+    return res == CURLE_OK ? (int)httpCode : 0;
+}
+
+void CurlHttpClient::FetchModels(std::function<void(std::vector<ModelInfo>, int)> cb) {
     Abort();
     if (requestThread_.joinable()) requestThread_.detach();
 
     aborted_ = false;
     requestThread_ = std::thread([this, cb]() {
         CURL* curl = curl_easy_init();
-        if (!curl) { cb({}); return; }
+        if (!curl) { cb({}, 0); return; }
 
         std::string url = baseUrl_ + "/models";
         std::string response;
@@ -165,11 +200,13 @@ void CurlHttpClient::FetchModels(std::function<void(std::vector<ModelInfo>)> cb)
         curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers);
 
         CURLcode res = curl_easy_perform(curl);
+        long httpCode = 0;
+        curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &httpCode);
         curl_slist_free_all(headers);
         curl_easy_cleanup(curl);
 
         std::vector<ModelInfo> models;
-        if (res == CURLE_OK) {
+        if (res == CURLE_OK && httpCode == 200) {
             try {
                 auto j = json::parse(response);
                 if (j.contains("data") && j["data"].is_array()) {
@@ -184,7 +221,7 @@ void CurlHttpClient::FetchModels(std::function<void(std::vector<ModelInfo>)> cb)
                 }
             } catch (...) {}
         }
-        cb(std::move(models));
+        cb(std::move(models), res == CURLE_OK ? (int)httpCode : 0);
     });
 }
 

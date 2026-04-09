@@ -15,8 +15,12 @@
 // along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 #pragma once
+#ifdef __APPLE__
+#include <OpenGL/gl3.h>
+#else
 #define GL_GLEXT_PROTOTYPES
 #include <GL/gl.h>
+#endif
 #include "types.h"
 #include "font.h"
 #include <vector>

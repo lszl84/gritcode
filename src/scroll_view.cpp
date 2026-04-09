@@ -104,6 +104,7 @@ void ScrollView::ContinueStream(const std::string& text) {
     if (blocks_.empty()) return;
     auto& last = blocks_.back();
     last->text += text;
+    if (!last->rightToLeft) last->rightToLeft = DetectRTL(last->text);
 
     // Invalidate cache for last block
     size_t idx = blocks_.size() - 1;
@@ -275,7 +276,6 @@ void ScrollView::MeasureSegments(size_t idx) {
     float spW = fonts_.SpaceWidth(style);
     const std::string& text = block.text;
     size_t pos = 0;
-
     while (pos <= text.size()) {
         size_t nl = text.find('\n', pos);
         if (nl == std::string::npos) nl = text.size();
@@ -392,7 +392,6 @@ void ScrollView::LayoutFromSegments(size_t idx, float textAreaW, float clientW,
 
     float effectiveW = textAreaW - indent;
     if (effectiveW < 50) effectiveW = 50;
-
     std::string lineText;
     float lineW = 0, lineH = 0;
     // Track styled runs being built for current line

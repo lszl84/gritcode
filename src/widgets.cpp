@@ -17,7 +17,7 @@
 #include "widgets.h"
 #include <cmath>
 #include <algorithm>
-#include <xkbcommon/xkbcommon-keysyms.h>
+#include "keysyms.h"
 
 // ============================================================================
 // Label
@@ -402,6 +402,7 @@ void TextInput::OnKey(int key, int mods, FontManager& fm) {
             selStart = selEnd = CodepointCount(text, cursorPos);
         }
         cursorBlink = 0;
+        EnsureCursorVisible(fm);
         return;
     }
 
@@ -420,6 +421,7 @@ void TextInput::OnKey(int key, int mods, FontManager& fm) {
             selStart = selEnd = CodepointCount(text, cursorPos);
         }
         cursorBlink = 0;
+        EnsureCursorVisible(fm);
         return;
     }
 
@@ -431,6 +433,7 @@ void TextInput::OnKey(int key, int mods, FontManager& fm) {
             else { selStart = selEnd = cp; }
         }
         cursorBlink = 0;
+        EnsureCursorVisible(fm);
         return;
     }
 
@@ -442,6 +445,7 @@ void TextInput::OnKey(int key, int mods, FontManager& fm) {
             else { selStart = selEnd = cp; }
         }
         cursorBlink = 0;
+        EnsureCursorVisible(fm);
         return;
     }
 
@@ -451,6 +455,7 @@ void TextInput::OnKey(int key, int mods, FontManager& fm) {
         if (shift) { selEnd = cp; }
         else { selStart = selEnd = cp; }
         cursorBlink = 0;
+        EnsureCursorVisible(fm);
         return;
     }
 
@@ -460,6 +465,7 @@ void TextInput::OnKey(int key, int mods, FontManager& fm) {
         if (shift) { selEnd = cp; }
         else { selStart = selEnd = cp; }
         cursorBlink = 0;
+        EnsureCursorVisible(fm);
         return;
     }
 }

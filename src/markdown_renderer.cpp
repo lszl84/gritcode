@@ -228,7 +228,7 @@ std::vector<std::unique_ptr<TextBlock>> MarkdownRenderer::Render(
         }
 
         case CMARK_NODE_SOFTBREAK:
-            state.AddText(" ");
+            state.AddText("\n");
             break;
 
         case CMARK_NODE_LINEBREAK:

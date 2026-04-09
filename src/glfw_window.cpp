@@ -148,6 +148,10 @@ void GlfwWindow::KeyCallbackCb(GLFWwindow* win, int key, int, int action, int mo
 
     int xmods = 0;
     if (mods & GLFW_MOD_CONTROL) xmods |= Mod::Ctrl;
+#ifdef __APPLE__
+    if (mods & GLFW_MOD_SUPER) xmods |= Mod::Ctrl;  // Cmd acts as Ctrl on macOS
+    self->superHeld_ = (mods & GLFW_MOD_SUPER) != 0;
+#endif
     if (mods & GLFW_MOD_SHIFT) xmods |= Mod::Shift;
 
     if (sym && pressed) self->keyCb_(sym, xmods, true);
@@ -155,5 +159,7 @@ void GlfwWindow::KeyCallbackCb(GLFWwindow* win, int key, int, int action, int mo
 
 void GlfwWindow::CharCallbackCb(GLFWwindow* win, unsigned int codepoint) {
     auto* self = (GlfwWindow*)glfwGetWindowUserPointer(win);
+    // On macOS, Cmd+key generates both key and char events — suppress the char
+    if (self->superHeld_) return;
     if (self->charCb_) self->charCb_(codepoint);
 }

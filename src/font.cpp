@@ -15,11 +15,17 @@
 // along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 #include "font.h"
-#include <fontconfig/fontconfig.h>
 #include <algorithm>
 #include <cstring>
 #include <cstdio>
 #include <map>
+
+#if defined(FCN_LINUX)
+#include <fontconfig/fontconfig.h>
+#elif defined(FCN_MACOS)
+#include <CoreText/CoreText.h>
+#include <CoreFoundation/CoreFoundation.h>
+#endif
 
 FontManager::FontManager() = default;
 
@@ -30,6 +36,8 @@ FontManager::~FontManager() {
     }
     if (ft_) FT_Done_FreeType(ft_);
 }
+
+#if defined(FCN_LINUX)
 
 std::string FontManager::FindFont(const char* family, bool bold, bool italic) const {
     FcPattern* pat = FcPatternCreate();
@@ -54,6 +62,185 @@ std::string FontManager::FindFont(const char* family, bool bold, bool italic) co
     FcPatternDestroy(pat);
     return path;
 }
+
+int FontManager::FindFallbackFace(uint32_t codepoint, int sizePx) const {
+    uint64_t key = ((uint64_t)codepoint << 32) | sizePx;
+    auto it = fallbackCache_.find(key);
+    if (it != fallbackCache_.end()) return it->second;
+
+    FcPattern* pat = FcPatternCreate();
+    FcCharSet* cs = FcCharSetCreate();
+    FcCharSetAddChar(cs, codepoint);
+    FcPatternAddCharSet(pat, FC_CHARSET, cs);
+    FcConfigSubstitute(nullptr, pat, FcMatchPattern);
+    FcDefaultSubstitute(pat);
+
+    FcResult res;
+    FcPattern* match = FcFontMatch(nullptr, pat, &res);
+    int faceIdx = -1;
+    if (match) {
+        FcChar8* file = nullptr;
+        if (FcPatternGetString(match, FC_FILE, 0, &file) == FcResultMatch) {
+            // Check if this font file+size was already loaded
+            std::string path((const char*)file);
+            std::string faceKey = path + ":" + std::to_string(sizePx);
+            auto fit = loadedFaces_.find(faceKey);
+            if (fit != loadedFaces_.end()) {
+                faceIdx = fit->second;
+            } else {
+                faceIdx = const_cast<FontManager*>(this)->LoadFace(path, sizePx);
+                if (faceIdx >= 0)
+                    loadedFaces_[faceKey] = faceIdx;
+            }
+        }
+        FcPatternDestroy(match);
+    }
+    FcCharSetDestroy(cs);
+    FcPatternDestroy(pat);
+    fallbackCache_[key] = faceIdx;
+    return faceIdx;
+}
+
+static void InitFontDiscovery() { FcInit(); }
+
+#elif defined(FCN_MACOS)
+
+// Helper: get file path from a CTFont
+static std::string CTFontGetFilePath(CTFontRef font) {
+    CFURLRef url = (CFURLRef)CTFontCopyAttribute(font, kCTFontURLAttribute);
+    if (!url) return {};
+    char buf[1024];
+    std::string path;
+    if (CFURLGetFileSystemRepresentation(url, true, (UInt8*)buf, sizeof(buf)))
+        path = buf;
+    CFRelease(url);
+    return path;
+}
+
+// Helper: get family name from a CTFont as a C++ string
+static std::string CTFontGetFamilyName(CTFontRef font) {
+    CFStringRef name = CTFontCopyFamilyName(font);
+    if (!name) return {};
+    char buf[256];
+    CFStringGetCString(name, buf, sizeof(buf), kCFStringEncodingUTF8);
+    CFRelease(name);
+    return buf;
+}
+
+// Try to find a font by family name + traits. Returns file path or empty string.
+static std::string CTFindByFamily(const char* family, CTFontSymbolicTraits traits) {
+    CFStringRef name = CFStringCreateWithCString(nullptr, family, kCFStringEncodingUTF8);
+
+    CFMutableDictionaryRef attrs = CFDictionaryCreateMutable(
+        nullptr, 0, &kCFTypeDictionaryKeyCallBacks, &kCFTypeDictionaryValueCallBacks);
+    CFDictionarySetValue(attrs, kCTFontFamilyNameAttribute, name);
+
+    if (traits) {
+        CFMutableDictionaryRef traitDict = CFDictionaryCreateMutable(
+            nullptr, 0, &kCFTypeDictionaryKeyCallBacks, &kCFTypeDictionaryValueCallBacks);
+        int32_t t = (int32_t)traits;
+        CFNumberRef traitNum = CFNumberCreate(nullptr, kCFNumberSInt32Type, &t);
+        CFDictionarySetValue(traitDict, kCTFontSymbolicTrait, traitNum);
+        CFDictionarySetValue(attrs, kCTFontTraitsAttribute, traitDict);
+        CFRelease(traitNum);
+        CFRelease(traitDict);
+    }
+
+    CTFontDescriptorRef desc = CTFontDescriptorCreateWithAttributes(attrs);
+    CTFontRef font = CTFontCreateWithFontDescriptor(desc, 12.0, nullptr);
+
+    std::string path;
+    if (font) {
+        // CoreText always returns something — verify the family actually matches
+        std::string foundFamily = CTFontGetFamilyName(font);
+        if (foundFamily == family)
+            path = CTFontGetFilePath(font);
+        CFRelease(font);
+    }
+    CFRelease(desc);
+    CFRelease(attrs);
+    CFRelease(name);
+    return path;
+}
+
+// macOS font family equivalents for fonts the app requests
+static const struct { const char* requested; const char* macos; } FONT_MAP[] = {
+    {"Noto Sans",        "Helvetica Neue"},
+    {"Noto Sans Mono",   "Menlo"},
+    {"Noto Sans Arabic", "Geeza Pro"},
+    {nullptr, nullptr}
+};
+
+std::string FontManager::FindFont(const char* family, bool bold, bool italic) const {
+    CTFontSymbolicTraits traits = 0;
+    if (bold) traits |= kCTFontBoldTrait;
+    if (italic) traits |= kCTFontItalicTrait;
+
+    // Try the exact requested family first
+    std::string path = CTFindByFamily(family, traits);
+    if (!path.empty()) return path;
+
+    // Fall back to macOS equivalents
+    for (auto* m = FONT_MAP; m->requested; m++) {
+        if (strcmp(family, m->requested) == 0) {
+            path = CTFindByFamily(m->macos, traits);
+            if (!path.empty()) return path;
+        }
+    }
+
+    return {};
+}
+
+int FontManager::FindFallbackFace(uint32_t codepoint, int sizePx) const {
+    uint64_t key = ((uint64_t)codepoint << 32) | sizePx;
+    auto it = fallbackCache_.find(key);
+    if (it != fallbackCache_.end()) return it->second;
+
+    // Create a string from the codepoint to ask CoreText for a fallback
+    UniChar utf16[2];
+    int utf16Len;
+    if (codepoint <= 0xFFFF) {
+        utf16[0] = (UniChar)codepoint;
+        utf16Len = 1;
+    } else {
+        codepoint -= 0x10000;
+        utf16[0] = (UniChar)(0xD800 + (codepoint >> 10));
+        utf16[1] = (UniChar)(0xDC00 + (codepoint & 0x3FF));
+        utf16Len = 2;
+    }
+
+    CFStringRef str = CFStringCreateWithCharacters(nullptr, utf16, utf16Len);
+
+    // Use a base font to ask CoreText for a fallback
+    CTFontRef baseFont = CTFontCreateWithName(CFSTR("Helvetica"), (CGFloat)sizePx, nullptr);
+    CTFontRef fallback = CTFontCreateForString(baseFont, str, CFRangeMake(0, utf16Len));
+
+    int faceIdx = -1;
+    if (fallback) {
+        std::string path = CTFontGetFilePath(fallback);
+        if (!path.empty()) {
+            std::string faceKey = path + ":" + std::to_string(sizePx);
+            auto fit = loadedFaces_.find(faceKey);
+            if (fit != loadedFaces_.end()) {
+                faceIdx = fit->second;
+            } else {
+                faceIdx = const_cast<FontManager*>(this)->LoadFace(path, sizePx);
+                if (faceIdx >= 0)
+                    loadedFaces_[faceKey] = faceIdx;
+            }
+        }
+        CFRelease(fallback);
+    }
+    CFRelease(baseFont);
+    CFRelease(str);
+
+    fallbackCache_[key] = faceIdx;
+    return faceIdx;
+}
+
+static void InitFontDiscovery() { /* CoreText needs no init */ }
+
+#endif
 
 int FontManager::LoadFace(const std::string& path, int sizePx) {
     auto& buf = fileCache_[path];
@@ -111,7 +298,7 @@ int FontManager::LoadFace(const std::string& path, int sizePx) {
 
 bool FontManager::Init(int baseSizePx) {
     if (FT_Init_FreeType(&ft_)) return false;
-    FcInit();
+    InitFontDiscovery();
 
     int thinkingSizePx = std::max(10, baseSizePx - 3);
 
@@ -184,44 +371,6 @@ static int DecodeUTF8(const char* p, uint32_t& cp) {
     if (c < 0xF0) { cp = ((c & 0x0F) << 12) | ((p[1] & 0x3F) << 6) | (p[2] & 0x3F); return 3; }
     cp = ((c & 0x07) << 18) | ((p[1] & 0x3F) << 12) | ((p[2] & 0x3F) << 6) | (p[3] & 0x3F);
     return 4;
-}
-
-int FontManager::FindFallbackFace(uint32_t codepoint, int sizePx) const {
-    uint64_t key = ((uint64_t)codepoint << 32) | sizePx;
-    auto it = fallbackCache_.find(key);
-    if (it != fallbackCache_.end()) return it->second;
-
-    FcPattern* pat = FcPatternCreate();
-    FcCharSet* cs = FcCharSetCreate();
-    FcCharSetAddChar(cs, codepoint);
-    FcPatternAddCharSet(pat, FC_CHARSET, cs);
-    FcConfigSubstitute(nullptr, pat, FcMatchPattern);
-    FcDefaultSubstitute(pat);
-
-    FcResult res;
-    FcPattern* match = FcFontMatch(nullptr, pat, &res);
-    int faceIdx = -1;
-    if (match) {
-        FcChar8* file = nullptr;
-        if (FcPatternGetString(match, FC_FILE, 0, &file) == FcResultMatch) {
-            // Check if this font file+size was already loaded
-            std::string path((const char*)file);
-            std::string faceKey = path + ":" + std::to_string(sizePx);
-            auto fit = loadedFaces_.find(faceKey);
-            if (fit != loadedFaces_.end()) {
-                faceIdx = fit->second;
-            } else {
-                faceIdx = const_cast<FontManager*>(this)->LoadFace(path, sizePx);
-                if (faceIdx >= 0)
-                    loadedFaces_[faceKey] = faceIdx;
-            }
-        }
-        FcPatternDestroy(match);
-    }
-    FcCharSetDestroy(cs);
-    FcPatternDestroy(pat);
-    fallbackCache_[key] = faceIdx;
-    return faceIdx;
 }
 
 ShapedRun FontManager::Shape(const std::string& text, FontStyle style, bool rtl) const {

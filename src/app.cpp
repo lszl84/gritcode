@@ -28,13 +28,19 @@
 #include <fcntl.h>
 #include <poll.h>
 #include <chrono>
-#include <xkbcommon/xkbcommon-keysyms.h>
+#include "keysyms.h"
 
 // Tool execution — uses O_CLOEXEC pipe so backgrounded processes (php -S ... &)
 // don't inherit the pipe fd and block reads forever.  120s timeout via alarm().
 static std::string RunCommand(const std::string& cmd) {
     int pfd[2];
+#ifdef __linux__
     if (pipe2(pfd, O_CLOEXEC) < 0) return "Error: pipe2 failed";
+#else
+    if (pipe(pfd) < 0) return "Error: pipe failed";
+    fcntl(pfd[0], F_SETFD, FD_CLOEXEC);
+    fcntl(pfd[1], F_SETFD, FD_CLOEXEC);
+#endif
 
     pid_t pid = fork();
     if (pid < 0) { close(pfd[0]); close(pfd[1]); return "Error: fork failed"; }
@@ -206,8 +212,11 @@ bool App::Init(bool sessionChooser) {
 
     scrollView_.SetAutoScroll(true);
     scrollView_.SetClipboardFunc([&](const std::string& t) {
-        // Use wl-copy for cross-app clipboard on Wayland
+#ifdef FCN_LINUX
         FILE* p = popen("wl-copy 2>/dev/null", "w");
+#else
+        FILE* p = popen("pbcopy 2>/dev/null", "w");
+#endif
         if (p) { fwrite(t.c_str(), 1, t.size(), p); pclose(p); }
     });
 
@@ -232,16 +241,42 @@ bool App::Init(bool sessionChooser) {
     sendButton_.text = "Send";
     sendButton_.onClick = [&]() { SendMessage(); };
 
-    // API Key button
+    // API Key button + inline editor
     apiKeyButton_.text = "API Key...";
     apiKeyButton_.onClick = [&]() { ShowApiKeyDialog(); };
 
-    // Message input
-    messageInput_.placeholder = "Type a message...";
-    messageInput_.onSubmit = [&](const std::string&) { SendMessage(); };
-    messageInput_.onPaste = [&]() -> std::string {
-        // GLFW can't read cross-app clipboard on Wayland, use wl-paste
+    apiKeyInput_.placeholder = "Paste API key...";
+    apiKeyInput_.onSubmit = [&](const std::string&) {
+        if (!apiKeyInput_.text.empty()) {
+            keychain::SaveApiKey(apiKeyInput_.text);
+            Connect(apiKeyInput_.text);
+        }
+        apiKeyInput_.Clear();
+        apiKeyEditing_ = false;
+        LayoutWidgets();
+        MarkDirty();
+    };
+
+    apiKeyAccept_.text = "OK";
+    apiKeyAccept_.onClick = [&]() {
+        if (apiKeyInput_.onSubmit) apiKeyInput_.onSubmit(apiKeyInput_.text);
+    };
+
+    apiKeyCancel_.text = "X";
+    apiKeyCancel_.onClick = [&]() {
+        apiKeyInput_.Clear();
+        apiKeyEditing_ = false;
+        LayoutWidgets();
+        MarkDirty();
+    };
+
+    // Clipboard paste helper (GLFW can't read cross-app clipboard on Wayland)
+    auto pasteFromClipboard = [&]() -> std::string {
+#ifdef FCN_LINUX
         FILE* p = popen("wl-paste --no-newline 2>/dev/null", "r");
+#else
+        FILE* p = popen("pbpaste 2>/dev/null", "r");
+#endif
         if (!p) return "";
         std::string result;
         char buf[4096];
@@ -249,6 +284,13 @@ bool App::Init(bool sessionChooser) {
         pclose(p);
         return result;
     };
+
+    apiKeyInput_.onPaste = pasteFromClipboard;
+
+    // Message input
+    messageInput_.placeholder = "Type a message...";
+    messageInput_.onSubmit = [&](const std::string&) { SendMessage(); };
+    messageInput_.onPaste = pasteFromClipboard;
 
     statusLabel_.text = "Disconnected";
     versionLabel_.text = "v" FCN_VERSION;
@@ -416,9 +458,22 @@ void App::LayoutWidgets() {
     modelDropdown_.bounds = {bx, barY + 5, 150 * s, bar - 10}; bx += 158 * s;
     statusLabel_.bounds = {bx, barY + 5, 180 * s, bar - 10}; bx += 188 * s;
 
-    apiKeyButton_.bounds = {w - 110 * s, barY + 5, 100 * s, bar - 10};
-    apiKeyButton_.visible = (activeProvider_ == "zen");
-    versionLabel_.bounds = {w - 110 * s - 80 * s, barY + 5, 70 * s, bar - 10};
+    bool showApiKey = (activeProvider_ == "zen");
+    if (showApiKey && apiKeyEditing_) {
+        apiKeyButton_.visible = false;
+        float btnW = 40 * s;
+        float inputW = 220 * s;
+        float totalW = inputW + btnW * 2 + 8;
+        float startX = w - totalW - 8;
+        apiKeyInput_.bounds = {startX, barY + 5, inputW, bar - 10};
+        apiKeyAccept_.bounds = {startX + inputW + 4, barY + 5, btnW, bar - 10};
+        apiKeyCancel_.bounds = {startX + inputW + btnW + 8, barY + 5, btnW, bar - 10};
+        versionLabel_.bounds = {startX - 80 * s, barY + 5, 70 * s, bar - 10};
+    } else {
+        apiKeyButton_.bounds = {w - 110 * s, barY + 5, 100 * s, bar - 10};
+        apiKeyButton_.visible = showApiKey;
+        versionLabel_.bounds = {w - 110 * s - 80 * s, barY + 5, 70 * s, bar - 10};
+    }
 }
 
 // ============================================================================
@@ -451,7 +506,13 @@ void App::PaintBottomBar() {
     modelDropdown_.Paint(renderer_, fm);
     statusLabel_.Paint(renderer_, fm);
     versionLabel_.Paint(renderer_, fm);
-    apiKeyButton_.Paint(renderer_, fm);
+    if (apiKeyEditing_) {
+        apiKeyInput_.Paint(renderer_, fm, 0);
+        apiKeyAccept_.Paint(renderer_, fm);
+        apiKeyCancel_.Paint(renderer_, fm);
+    } else {
+        apiKeyButton_.Paint(renderer_, fm);
+    }
     messageInput_.Paint(renderer_, fm, 0);
     sendButton_.Paint(renderer_, fm);
 
@@ -469,15 +530,49 @@ void App::Connect(const std::string& apiKey) {
     httpClient_.SetBaseUrl("https://opencode.ai/zen/v1");
     httpClient_.SetApiKey(apiKey);
     connected_ = true;
-    statusLabel_.text = apiKey.empty() ? "Zen (Anonymous)" : "Zen (API Key)";
+    statusLabel_.text = apiKey.empty() ? "Zen (Anonymous)" : "Validating key...";
     MarkDirty();
 
-    httpClient_.FetchModels([this](std::vector<net::ModelInfo> models) {
-        events_.Push([this, models]() { OnModelsReceived(models); });
+    httpClient_.FetchModels([this, apiKey](std::vector<net::ModelInfo> models, int httpStatus) {
+        // If we have an API key, validate it against an authenticated endpoint
+        int authStatus = 0;
+        if (!apiKey.empty()) {
+            std::string testModel = models.empty() ? "kimi-k2.5" : models[0].id;
+            authStatus = httpClient_.ValidateKey(testModel);
+            if (authStatus == 401) {
+                events_.Push([this, apiKey]() {
+                    AppendSystem("Invalid API key (" + apiKey + "). Please set a new key.");
+                    keychain::ClearApiKey();
+                    httpClient_.SetApiKey("");
+                    statusLabel_.text = "Invalid key";
+                    connected_ = false;
+                    MarkDirty();
+                });
+                return;
+            }
+        }
+        events_.Push([this, models, httpStatus]() { OnModelsReceived(models, httpStatus); });
     });
 }
 
-void App::OnModelsReceived(std::vector<net::ModelInfo> models) {
+void App::OnModelsReceived(std::vector<net::ModelInfo> models, int httpStatus) {
+    if (httpStatus == 401) {
+        AppendSystem("Invalid API key. Please check your key and try again.");
+        statusLabel_.text = "Unauthorized";
+        keychain::ClearApiKey();
+        httpClient_.SetApiKey("");
+        connected_ = false;
+        MarkDirty();
+        return;
+    }
+    if (httpStatus == 0) {
+        AppendSystem("Connection failed. Check your network.");
+        statusLabel_.text = "Disconnected";
+        connected_ = false;
+        MarkDirty();
+        return;
+    }
+
     modelDropdown_.items.clear();
     int defaultIdx = 0;
 
@@ -590,9 +685,12 @@ void App::OnModelChanged(int, const std::string& id) {
 }
 
 void App::ShowApiKeyDialog() {
-    // For now just toggle — full dialog needs text input popup
-    // TODO: modal dialog
-    AppendSystem("Use the message input to type your API key, then click API Key button again to save.");
+    apiKeyEditing_ = true;
+    apiKeyInput_.Clear();
+    apiKeyInput_.focused = true;
+    messageInput_.focused = false;
+    LayoutWidgets();
+    MarkDirty();
 }
 
 void App::AppendSystem(const std::string& text) {
@@ -897,7 +995,14 @@ void App::DoSendToProvider() {
                 if (!ok) {
                     if (!session_.History().empty() && session_.History().back().role == "user")
                         session_.History().pop_back();
-                    AppendSystem("Error: " + error);
+                    if (error.find("401") != std::string::npos) {
+                        AppendSystem("API key is invalid or expired (" + httpClient_.ApiKey() + "). Please set a new key.");
+                        keychain::ClearApiKey();
+                        httpClient_.SetApiKey("");
+                        statusLabel_.text = "Unauthorized";
+                    } else {
+                        AppendSystem("Error: " + error);
+                    }
                     requestInProgress_ = false;
                     sendButton_.enabled = true;
                     MarkDirty();
@@ -1085,11 +1190,23 @@ void App::OnMouseDown(float x, float y, bool shift) {
     modelDropdown_.Close();
 
     if (sendButton_.OnMouseDown(x, y)) { MarkDirty(); return; }
-    if (apiKeyButton_.OnMouseDown(x, y)) { MarkDirty(); return; }
-    if (messageInput_.OnMouseDown(x, y, scrollView_.Fonts())) {
-        scrollView_.ClearSelection();
-        MarkDirty();
-        return;
+    if (apiKeyEditing_) {
+        if (apiKeyAccept_.OnMouseDown(x, y)) { MarkDirty(); return; }
+        if (apiKeyCancel_.OnMouseDown(x, y)) { MarkDirty(); return; }
+    } else {
+        if (apiKeyButton_.OnMouseDown(x, y)) { MarkDirty(); return; }
+    }
+
+    // Try each text input — clicking one unfocuses the other
+    TextInput* inputs[] = {&apiKeyInput_, &messageInput_};
+    for (auto* inp : inputs) {
+        if (inp->OnMouseDown(x, y, scrollView_.Fonts())) {
+            for (auto* other : inputs)
+                if (other != inp) other->focused = false;
+            if (inp == &messageInput_) scrollView_.ClearSelection();
+            MarkDirty();
+            return;
+        }
     }
 
     // Scroll view
@@ -1097,15 +1214,15 @@ void App::OnMouseDown(float x, float y, bool shift) {
     float viewH = window_.Height() - (barHeight_ + inputHeight_) * s;
     if (y < viewH) {
         scrollView_.OnMouseDown(x, y, shift);
-        messageInput_.focused = false;
-        messageInput_.selStart = messageInput_.selEnd = 0;  // Clear text input selection
+        UnfocusAllInputs();
         MarkDirty();
     }
 }
 
 void App::OnMouseUp(float x, float y) {
     sendButton_.OnMouseUp(x, y);
-    apiKeyButton_.OnMouseUp(x, y);
+    if (apiKeyEditing_) { apiKeyAccept_.OnMouseUp(x, y); apiKeyCancel_.OnMouseUp(x, y); }
+    else apiKeyButton_.OnMouseUp(x, y);
     scrollView_.OnMouseUp(x, y);
     MarkDirty();
 }
@@ -1124,15 +1241,17 @@ void App::OnMouseMove(float x, float y, bool leftDown) {
         if (newHov != chooserHovered_) { chooserHovered_ = newHov; MarkDirty(); }
         return;
     }
-    // Mouse drag in text input — skip all other hover updates
-    if (leftDown && messageInput_.focused) {
-        messageInput_.OnMouseDrag(x, y, scrollView_.Fonts());
+    // Mouse drag in text input
+    auto* focused = FocusedInput();
+    if (leftDown && focused) {
+        focused->OnMouseDrag(x, y, scrollView_.Fonts());
         MarkDirty();
         return;
     }
 
     sendButton_.OnMouseMove(x, y);
-    apiKeyButton_.OnMouseMove(x, y);
+    if (apiKeyEditing_) { apiKeyAccept_.OnMouseMove(x, y); apiKeyCancel_.OnMouseMove(x, y); }
+    else apiKeyButton_.OnMouseMove(x, y);
     providerDropdown_.OnMouseMove(x, y);
     modelDropdown_.OnMouseMove(x, y);
 
@@ -1188,6 +1307,15 @@ void App::OnKey(int key, int mods, bool pressed) {
         return;
     }
 
+    // Escape closes API key editor
+    if (key == XKB_KEY_Escape && apiKeyEditing_) {
+        apiKeyInput_.Clear();
+        apiKeyEditing_ = false;
+        LayoutWidgets();
+        MarkDirty();
+        return;
+    }
+
     // Escape cancels request
     if (key == XKB_KEY_Escape && requestInProgress_) {
         httpClient_.Abort();
@@ -1203,12 +1331,17 @@ void App::OnKey(int key, int mods, bool pressed) {
         return;
     }
 
-    // Ctrl+C: copy from whichever has a selection
+    // Ctrl+C: copy from focused input, or scroll view
     if ((mods & Mod::Ctrl) && key == Key::C) {
-        if (messageInput_.focused && messageInput_.selStart != messageInput_.selEnd) {
-            std::string sel = messageInput_.GetSelectedText();
+        auto* inp = FocusedInput();
+        if (inp && inp->selStart != inp->selEnd) {
+            std::string sel = inp->GetSelectedText();
             if (!sel.empty()) {
+#ifdef FCN_LINUX
                 FILE* p = popen("wl-copy 2>/dev/null", "w");
+#else
+                FILE* p = popen("pbcopy 2>/dev/null", "w");
+#endif
                 if (p) { fwrite(sel.c_str(), 1, sel.size(), p); pclose(p); }
             }
         } else {
@@ -1219,15 +1352,16 @@ void App::OnKey(int key, int mods, bool pressed) {
     }
 
     // Ctrl+A: select all in scroll view (unless text input focused)
-    if ((mods & Mod::Ctrl) && key == Key::A && !messageInput_.focused) {
+    if ((mods & Mod::Ctrl) && key == Key::A && !FocusedInput()) {
         scrollView_.OnKey(key, mods);
         MarkDirty();
         return;
     }
 
-    // Forward to text input if focused
-    if (messageInput_.focused) {
-        messageInput_.OnKey(key, mods, scrollView_.Fonts());
+    // Forward to focused text input
+    auto* inp = FocusedInput();
+    if (inp) {
+        inp->OnKey(key, mods, scrollView_.Fonts());
         MarkDirty();
         return;
     }
@@ -1238,8 +1372,9 @@ void App::OnKey(int key, int mods, bool pressed) {
 }
 
 void App::OnChar(uint32_t codepoint) {
-    if (messageInput_.focused) {
-        messageInput_.OnChar(codepoint, scrollView_.Fonts());
+    auto* inp = FocusedInput();
+    if (inp) {
+        inp->OnChar(codepoint, scrollView_.Fonts());
         MarkDirty();
     }
 }
@@ -1373,6 +1508,8 @@ void App::Run() {
 
         if (!chooserMode_) {
             messageInput_.Update(dt, scrollView_.Fonts());
+            if (apiKeyEditing_)
+                apiKeyInput_.Update(dt, scrollView_.Fonts());
             scrollView_.Update(dt);
         }
 

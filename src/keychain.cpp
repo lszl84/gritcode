@@ -15,6 +15,81 @@
 // along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 #include "keychain.h"
+
+#if defined(FCN_MACOS)
+
+#include <Security/Security.h>
+#include <CoreFoundation/CoreFoundation.h>
+
+namespace keychain {
+
+static const char* SERVICE = "FastCodeNative/OpenCodeZen";
+static const char* ACCOUNT = "api-key";
+
+std::string LoadApiKey() {
+    CFStringRef service = CFStringCreateWithCString(nullptr, SERVICE, kCFStringEncodingUTF8);
+    CFStringRef account = CFStringCreateWithCString(nullptr, ACCOUNT, kCFStringEncodingUTF8);
+
+    const void* keys[] = {kSecClass, kSecAttrService, kSecAttrAccount, kSecReturnData, kSecMatchLimit};
+    const void* vals[] = {kSecClassGenericPassword, service, account, kCFBooleanTrue, kSecMatchLimitOne};
+    CFDictionaryRef query = CFDictionaryCreate(nullptr, keys, vals, 5,
+        &kCFTypeDictionaryKeyCallBacks, &kCFTypeDictionaryValueCallBacks);
+
+    CFDataRef data = nullptr;
+    OSStatus status = SecItemCopyMatching(query, (CFTypeRef*)&data);
+    CFRelease(query);
+    CFRelease(service);
+    CFRelease(account);
+
+    std::string result;
+    if (status == errSecSuccess && data) {
+        result.assign((const char*)CFDataGetBytePtr(data), CFDataGetLength(data));
+        CFRelease(data);
+    }
+    return result;
+}
+
+bool SaveApiKey(const std::string& key) {
+    // Delete existing entry first
+    ClearApiKey();
+
+    CFStringRef service = CFStringCreateWithCString(nullptr, SERVICE, kCFStringEncodingUTF8);
+    CFStringRef account = CFStringCreateWithCString(nullptr, ACCOUNT, kCFStringEncodingUTF8);
+    CFDataRef data = CFDataCreate(nullptr, (const UInt8*)key.data(), key.size());
+
+    const void* keys[] = {kSecClass, kSecAttrService, kSecAttrAccount, kSecValueData};
+    const void* vals[] = {kSecClassGenericPassword, service, account, data};
+    CFDictionaryRef attrs = CFDictionaryCreate(nullptr, keys, vals, 4,
+        &kCFTypeDictionaryKeyCallBacks, &kCFTypeDictionaryValueCallBacks);
+
+    OSStatus status = SecItemAdd(attrs, nullptr);
+    CFRelease(attrs);
+    CFRelease(data);
+    CFRelease(service);
+    CFRelease(account);
+    return status == errSecSuccess;
+}
+
+bool ClearApiKey() {
+    CFStringRef service = CFStringCreateWithCString(nullptr, SERVICE, kCFStringEncodingUTF8);
+    CFStringRef account = CFStringCreateWithCString(nullptr, ACCOUNT, kCFStringEncodingUTF8);
+
+    const void* keys[] = {kSecClass, kSecAttrService, kSecAttrAccount};
+    const void* vals[] = {kSecClassGenericPassword, service, account};
+    CFDictionaryRef query = CFDictionaryCreate(nullptr, keys, vals, 3,
+        &kCFTypeDictionaryKeyCallBacks, &kCFTypeDictionaryValueCallBacks);
+
+    OSStatus status = SecItemDelete(query);
+    CFRelease(query);
+    CFRelease(service);
+    CFRelease(account);
+    return status == errSecSuccess || status == errSecItemNotFound;
+}
+
+} // namespace keychain
+
+#elif defined(FCN_LINUX)
+
 #include <libsecret/secret.h>
 
 namespace keychain {
@@ -86,3 +161,10 @@ bool ClearApiKey() {
 }
 
 } // namespace keychain
+
+#elif defined(FCN_WINDOWS)
+
+// TODO: implement with wincred.h
+#error "Windows keychain not yet implemented"
+
+#endif
