@@ -613,30 +613,33 @@ void App::LayoutWidgets() {
     float barY = h - bar;
     float inputY = barY - inp;
 
-    messageInput_.bounds = {8, inputY + 5, w - 101, inp - 10};
+    messageInput_.bounds = {8, inputY + 5, w - 102, inp - 10};
     sendButton_.bounds = {w - 88, inputY + 5, 80, inp - 10};
 
     float bx = 8;
-    workspaceDropdown_.bounds = {bx, barY + 5, 200 * s, bar - 10}; bx += 206 * s;
-    providerDropdown_.bounds = {bx, barY + 5, 140 * s, bar - 10}; bx += 146 * s;
-    modelDropdown_.bounds = {bx, barY + 5, 150 * s, bar - 10}; bx += 156 * s;
-    statusLabel_.bounds = {bx, barY + 5, 180 * s, bar - 10}; bx += 186 * s;
+    workspaceDropdown_.bounds = {bx, barY + 5, 200 * s, bar - 10}; bx += 205 * s;
+    providerDropdown_.bounds = {bx, barY + 5, 140 * s, bar - 10}; bx += 145 * s;
+    modelDropdown_.bounds = {bx, barY + 5, 150 * s, bar - 10}; bx += 155 * s;
+    statusLabel_.bounds = {bx, barY + 5, 180 * s, bar - 10}; bx += 185 * s;
 
+    // Right-edge of the bottom bar matches sendButton right edge above (w - 8).
+    float rightEdge = w - 8;
     bool showApiKey = (activeProvider_ == "zen");
     if (showApiKey && apiKeyEditing_) {
         apiKeyButton_.visible = false;
         float btnW = 40 * s;
         float inputW = 220 * s;
         float totalW = inputW + btnW * 2 + 8;
-        float startX = w - totalW - 8;
+        float startX = rightEdge - totalW;
         apiKeyInput_.bounds = {startX, barY + 5, inputW, bar - 10};
         apiKeyAccept_.bounds = {startX + inputW + 4, barY + 5, btnW, bar - 10};
         apiKeyCancel_.bounds = {startX + inputW + btnW + 8, barY + 5, btnW, bar - 10};
         versionLabel_.bounds = {startX - 80 * s, barY + 5, 70 * s, bar - 10};
     } else {
-        apiKeyButton_.bounds = {w - 110 * s, barY + 5, 100 * s, bar - 10};
+        float apiW = 100 * s;
+        apiKeyButton_.bounds = {rightEdge - apiW, barY + 5, apiW, bar - 10};
         apiKeyButton_.visible = showApiKey;
-        versionLabel_.bounds = {w - 110 * s - 80 * s, barY + 5, 70 * s, bar - 10};
+        versionLabel_.bounds = {rightEdge - apiW - 80 * s, barY + 5, 70 * s, bar - 10};
     }
 }
 
