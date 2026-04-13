@@ -602,8 +602,11 @@ void App::StartMCP() {
 void App::LayoutWidgets() {
     // All coordinates in physical pixels (matching WaylandWindow and ScrollView)
     float w = window_.Width();
-    float h = window_.Height();
     float s = window_.Scale();
+    // Leave a small gutter below the bottom bar so the rounded controls
+    // don't kiss the window edge.
+    float bottomMargin = 3 * s;
+    float h = window_.Height() - bottomMargin;
     float bar = barHeight_ * s;
     float inp = inputHeight_ * s;
 

@@ -36,7 +36,7 @@ void Label::Paint(GLRenderer& r, FontManager& fm) const {
 
 void Button::Paint(GLRenderer& r, FontManager& fm) const {
     if (!visible) return;
-    float radius = 10;
+    float radius = 14;
     float padX = 12;  // Horizontal padding
     Color bg = !enabled ? bgColor : pressed ? pressColor : hovered ? hoverColor : bgColor;
     r.DrawRoundedRect(bounds.x, bounds.y, bounds.w, bounds.h, radius, bg);
@@ -145,7 +145,7 @@ void TextInput::EnsureCursorVisible(FontManager& fm) {
 }
 
 void TextInput::Paint(GLRenderer& r, FontManager& fm, float time) const {
-    float radius = 10;
+    float radius = 14;
     float pad = 8;
 
     // Border (rounded rect outline)
@@ -487,7 +487,7 @@ WidgetRect Dropdown::PopupRect() const {
 
 void Dropdown::Paint(GLRenderer& r, FontManager& fm) const {
     if (!enabled) return;
-    float radius = 10;
+    float radius = 14;
 
     Color bg = open ? hoverColor : hovered ? hoverColor : bgColor;
     r.DrawRoundedRect(bounds.x, bounds.y, bounds.w, bounds.h, radius, bg);
@@ -510,7 +510,7 @@ void Dropdown::Paint(GLRenderer& r, FontManager& fm) const {
 
 void Dropdown::PaintPopup(GLRenderer& r, FontManager& fm) const {
     if (!open || items.empty()) return;
-    float radius = 10;
+    float radius = 14;
 
     WidgetRect pr = PopupRect();
     r.DrawRoundedRect(pr.x, pr.y, pr.w, pr.h, radius, popupBg);
