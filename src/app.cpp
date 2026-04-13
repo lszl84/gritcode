@@ -42,6 +42,118 @@ static int CloexecPipe(int pfd[2]) {
 #endif
 }
 
+// Resolve the user's login-shell environment in a background thread and
+// apply the interesting vars to our own process env. Why: on macOS, GUI
+// launches (Finder/Dock/open) inherit launchd's minimal env — no
+// ~/.local/bin, no /opt/homebrew/bin, no nvm — so `claude`, `ffmpeg` and
+// anything the agent tries to run can't be found. Linux GUI launches via
+// .desktop miss rc-file PATH edits (nvm, pyenv, cargo, linuxbrew) for the
+// same reason.
+//
+// Approach: same trick VS Code and t3code use — spawn `$SHELL -ilc` with a
+// tiny printf that wraps the vars we care about in markers so rc-file
+// noise (banners, MOTD) can be parsed around. Runs in a detached thread
+// at Init, so window creation isn't blocked; setenv() happens on the main
+// thread via the event queue to stay clear of the usual setenv/fork race
+// warnings in libc.
+static void ResolveShellEnvAsync(EventQueue& events) {
+    std::thread([&events]() {
+        const char* shell = getenv("SHELL");
+        if (!shell || !*shell) shell = "/bin/zsh";
+
+        // Vars worth importing. PATH is the headline; the rest help agent
+        // tool calls and subprocess behavior.
+        static const char* kVars[] = {
+            "PATH", "SSH_AUTH_SOCK", "HOMEBREW_PREFIX", "MANPATH",
+            "LANG", "LC_ALL", "NVM_DIR", "PYENV_ROOT", "RBENV_ROOT",
+        };
+        const int NVARS = (int)(sizeof(kVars) / sizeof(kVars[0]));
+
+        // printf '__FCNENV_START__\n%s\n%s\n...\n__FCNENV_END__\n' "$PATH" "$SSH_AUTH_SOCK" ...
+        std::string cmd = "printf '__FCNENV_START__\\n";
+        for (int i = 0; i < NVARS; i++) cmd += "%s\\n";
+        cmd += "__FCNENV_END__\\n'";
+        for (int i = 0; i < NVARS; i++) {
+            cmd += " \"$";
+            cmd += kVars[i];
+            cmd += "\"";
+        }
+
+        int pfd[2];
+        if (CloexecPipe(pfd) < 0) return;
+
+        pid_t pid = fork();
+        if (pid < 0) { close(pfd[0]); close(pfd[1]); return; }
+
+        if (pid == 0) {
+            setsid();
+            dup2(pfd[1], STDOUT_FILENO);
+            int devnull = open("/dev/null", O_WRONLY);
+            if (devnull >= 0) { dup2(devnull, STDERR_FILENO); close(devnull); }
+            // Original pfd fds are CLOEXEC so they auto-close on exec.
+            // Hint rc-files to skip heavy work (some users check this).
+            setenv("FCN_RESOLVING_ENVIRONMENT", "1", 1);
+            execl(shell, shell, "-ilc", cmd.c_str(), (char*)nullptr);
+            _exit(127);
+        }
+
+        close(pfd[1]);
+
+        std::string output;
+        char buf[4096];
+        auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+        struct pollfd rpfd = {pfd[0], POLLIN, 0};
+        while (true) {
+            auto remaining = std::chrono::duration_cast<std::chrono::milliseconds>(
+                deadline - std::chrono::steady_clock::now()).count();
+            if (remaining <= 0) { kill(-pid, SIGKILL); break; }
+            int ret = poll(&rpfd, 1, (int)std::min(remaining, (decltype(remaining))500));
+            if (ret < 0) break;
+            if (ret == 0) continue;
+            ssize_t n = read(pfd[0], buf, sizeof(buf));
+            if (n <= 0) break;
+            output.append(buf, n);
+            if (output.size() > 65536) break;  // sanity cap
+        }
+        close(pfd[0]);
+        int status = 0;
+        waitpid(pid, &status, 0);
+
+        // Locate the last START/END pair — rc-files sometimes echo during
+        // sourcing, and we want the final clean block.
+        size_t start = output.rfind("__FCNENV_START__\n");
+        size_t end = output.rfind("\n__FCNENV_END__");
+        if (start == std::string::npos || end == std::string::npos || end <= start) {
+            fprintf(stderr, "shell-env: no markers in %zu bytes of output\n", output.size());
+            return;
+        }
+        start += strlen("__FCNENV_START__\n");
+        std::string body = output.substr(start, end - start);
+
+        std::vector<std::string> values;
+        size_t pos = 0;
+        while (pos <= body.size()) {
+            size_t nl = body.find('\n', pos);
+            if (nl == std::string::npos) { values.push_back(body.substr(pos)); break; }
+            values.push_back(body.substr(pos, nl - pos));
+            pos = nl + 1;
+        }
+        if ((int)values.size() < NVARS) {
+            fprintf(stderr, "shell-env: expected %d vars, got %zu\n", NVARS, values.size());
+            return;
+        }
+
+        std::vector<std::pair<std::string, std::string>> kvs;
+        for (int i = 0; i < NVARS; i++) {
+            if (!values[i].empty()) kvs.emplace_back(kVars[i], values[i]);
+        }
+        events.Push([kvs]() {
+            for (auto& kv : kvs) setenv(kv.first.c_str(), kv.second.c_str(), 1);
+            fprintf(stderr, "shell-env: applied %zu vars from login shell\n", kvs.size());
+        });
+    }).detach();
+}
+
 // Tool execution — uses O_CLOEXEC pipe so backgrounded processes (php -S ... &)
 // don't inherit the pipe fd and block reads forever.  120s timeout via alarm().
 static std::string RunCommand(const std::string& cmd) {
@@ -330,6 +442,13 @@ bool App::Init(bool sessionChooser) {
     });
 
     LayoutWidgets();
+
+    // Kick off async shell env resolution — PATH and friends from the
+    // user's login shell, needed so GUI-launched fcn can find claude,
+    // ffmpeg, etc. Runs in a detached thread; result is applied on the
+    // main thread via events_ before any user-triggered subprocess is
+    // likely to run.
+    ResolveShellEnvAsync(events_);
 
     window_.Show();
     messageInput_.focused = true;
