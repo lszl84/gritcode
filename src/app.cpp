@@ -431,6 +431,22 @@ void App::StartMCP() {
         return {{"text", ""}, {"index", -1}};
     };
 
+    cb.setProvider = [this](const std::string& provider, const std::string& model) {
+        events_.Push([this, provider, model]() {
+            OnProviderChanged(0, provider);
+            if (!model.empty()) {
+                activeModel_ = model;
+                for (size_t i = 0; i < modelDropdown_.items.size(); i++) {
+                    if (modelDropdown_.items[i].id == model) {
+                        modelDropdown_.selectedIndex = (int)i;
+                        break;
+                    }
+                }
+            }
+            MarkDirty();
+        });
+    };
+
     mcpServer_.Start(std::move(cb));
 }
 
@@ -807,7 +823,21 @@ void App::SendMessage() {
 
 void App::DoSendToProvider() {
     if (activeProvider_ == "claude") {
-        // Claude ACP: spawn claude binary with stream-json output
+        // Claude ACP: spawn `claude --print` with stream-json output.
+        //
+        // popen() is unsafe here: the read pipe fd gets inherited by every
+        // descendant claude spawns, so if a tool backgrounds a process
+        // (php -S ... &, dev servers, etc.) the pipe's write end stays open
+        // forever and fgets blocks — UI stuck in "thinking" with no way to
+        // send more messages. Same class of bug as RunCommand had before
+        // commit 17f0bec fixed it.
+        //
+        // Fix: pipe2(O_CLOEXEC) + fork + exec claude directly in a new
+        // session, write prompt via a second pipe to its stdin, read stdout
+        // with a buffered line reader that correctly handles lines longer
+        // than any single read() chunk. Track pid so Escape can kill the
+        // whole process group. A per-request generation counter prevents a
+        // stale finalizer from clobbering state of a newer request.
         std::string prompt;
         if (session_.History().size() > 1) {
             prompt = "<conversation_history>\n";
@@ -819,44 +849,125 @@ void App::DoSendToProvider() {
         if (!session_.History().empty() && session_.History().back().role == "user")
             prompt += session_.History().back().content;
 
-        std::string cmd = "claude --print --verbose --output-format stream-json --include-partial-messages --dangerously-skip-permissions --model " + activeModel_;
+        uint64_t gen = ++requestGen_;
+        std::string model = activeModel_;
 
-        std::thread([this, cmd, prompt]() {
-            // Spawn with redirected stdin/stdout
-            FILE* pipe = popen(("echo " + json(prompt).dump() + " | " + cmd).c_str(), "r");
-            if (!pipe) {
-                events_.Push([this]() {
-                    AppendSystem("Error: failed to spawn claude binary");
+        std::thread([this, prompt, model, gen]() {
+            int inPipe[2];   // parent -> child stdin
+            int outPipe[2];  // child stdout -> parent
+            if (pipe2(inPipe, O_CLOEXEC) < 0) {
+                events_.Push([this, gen]() {
+                    if (gen != requestGen_.load()) return;
+                    AppendSystem("Error: pipe2 failed");
                     requestInProgress_ = false;
+                    sendButton_.enabled = true;
+                    MarkDirty();
+                });
+                return;
+            }
+            if (pipe2(outPipe, O_CLOEXEC) < 0) {
+                close(inPipe[0]); close(inPipe[1]);
+                events_.Push([this, gen]() {
+                    if (gen != requestGen_.load()) return;
+                    AppendSystem("Error: pipe2 failed");
+                    requestInProgress_ = false;
+                    sendButton_.enabled = true;
                     MarkDirty();
                 });
                 return;
             }
 
-            // Write prompt via stdin (already piped via echo above)
-            // Read stdout line by line, parse stream-json
+            pid_t pid = fork();
+            if (pid < 0) {
+                close(inPipe[0]); close(inPipe[1]);
+                close(outPipe[0]); close(outPipe[1]);
+                events_.Push([this, gen]() {
+                    if (gen != requestGen_.load()) return;
+                    AppendSystem("Error: fork failed");
+                    requestInProgress_ = false;
+                    sendButton_.enabled = true;
+                    MarkDirty();
+                });
+                return;
+            }
+
+            if (pid == 0) {
+                // Child
+                setsid();  // New process group so we can SIGTERM everything
+                dup2(inPipe[0], STDIN_FILENO);
+                dup2(outPipe[1], STDOUT_FILENO);
+                dup2(outPipe[1], STDERR_FILENO);
+                // Original fds are O_CLOEXEC so they auto-close on execvp
+                execlp("claude", "claude",
+                       "--print", "--verbose",
+                       "--output-format", "stream-json",
+                       "--include-partial-messages",
+                       "--dangerously-skip-permissions",
+                       "--model", model.c_str(),
+                       (char*)nullptr);
+                _exit(127);
+            }
+
+            // Parent
+            claudePid_.store(pid);
+            close(inPipe[0]);
+            close(outPipe[1]);
+
+            // Write the prompt to child's stdin, then close it so claude
+            // sees EOF and starts processing. Use a blocking write loop.
+            const char* pbuf = prompt.data();
+            size_t premaining = prompt.size();
+            while (premaining > 0) {
+                ssize_t w = write(inPipe[1], pbuf, premaining);
+                if (w <= 0) break;
+                pbuf += w; premaining -= w;
+            }
+            close(inPipe[1]);
+
+            // Read stdout with a buffered line reader. read() chunks of
+            // ~8KB and split on newlines — lines can be arbitrarily long
+            // (tool_use inputs or tool_result outputs easily exceed 4KB).
             std::string fullResponse;
-            bool inThinking = false;
-            char buf[4096];
+            std::string lineBuf;
+            char chunk[8192];
 
-            while (fgets(buf, sizeof(buf), pipe)) {
-                std::string line(buf);
-                if (!line.empty() && line.back() == '\n') line.pop_back();
-                if (line.empty()) continue;
+            while (true) {
+                ssize_t n = read(outPipe[0], chunk, sizeof(chunk));
+                if (n < 0) {
+                    if (errno == EINTR) continue;
+                    break;
+                }
+                if (n == 0) break;  // EOF — child closed stdout
+                lineBuf.append(chunk, n);
 
-                try {
-                    auto j = json::parse(line);
+                size_t start = 0;
+                while (true) {
+                    size_t nl = lineBuf.find('\n', start);
+                    if (nl == std::string::npos) break;
+                    std::string line = lineBuf.substr(start, nl - start);
+                    start = nl + 1;
+                    if (line.empty()) continue;
+
+                    json j;
+                    try { j = json::parse(line); } catch (...) { continue; }
+
                     std::string type = j.value("type", "");
-
                     if (type == "stream_event" && j.contains("event")) {
                         auto& evt = j["event"];
                         std::string evtType = evt.value("type", "");
 
-                        if (evtType == "content_block_start" && evt.contains("content_block")) {
-                            std::string blockType = evt["content_block"].value("type", "");
-                            inThinking = (blockType == "thinking");
-                        } else if (evtType == "content_block_stop") {
-                            inThinking = false;
+                        if (evtType == "content_block_stop") {
+                            // End of a thinking block — clear thinking state
+                            // so the next text_delta starts a fresh text run
+                            // without animating the old thinking block.
+                            events_.Push([this, gen]() {
+                                if (gen != requestGen_.load()) return;
+                                if (receivingThinking_) {
+                                    receivingThinking_ = false;
+                                    scrollView_.StopAllAnimations();
+                                }
+                                MarkDirty();
+                            });
                         } else if (evtType == "content_block_delta" && evt.contains("delta")) {
                             auto& delta = evt["delta"];
                             std::string deltaType = delta.value("type", "");
@@ -865,8 +976,15 @@ void App::DoSendToProvider() {
                                 std::string text = delta.value("text", "");
                                 if (!text.empty()) {
                                     fullResponse += text;
-                                    events_.Push([this, text]() {
+                                    events_.Push([this, text, gen]() {
+                                        if (gen != requestGen_.load()) return;
                                         waitingForResponse_ = false;
+                                        if (receivingThinking_) {
+                                            receivingThinking_ = false;
+                                            scrollView_.StopAllAnimations();
+                                            responseBuffer_.clear();
+                                            lastMarkdownLen_ = 0;
+                                        }
                                         if (responseBuffer_.empty())
                                             responseStartBlock_ = scrollView_.BlockCount();
                                         responseBuffer_ += text;
@@ -884,7 +1002,8 @@ void App::DoSendToProvider() {
                             } else if (deltaType == "thinking_delta") {
                                 std::string thinking = delta.value("thinking", "");
                                 if (!thinking.empty()) {
-                                    events_.Push([this, thinking]() {
+                                    events_.Push([this, thinking, gen]() {
+                                        if (gen != requestGen_.load()) return;
                                         waitingForResponse_ = false;
                                         if (!receivingThinking_) {
                                             receivingThinking_ = true;
@@ -902,20 +1021,38 @@ void App::DoSendToProvider() {
                         bool isError = j.value("is_error", false);
                         if (isError) {
                             std::string err = j.value("error", "Unknown error");
-                            events_.Push([this, err]() { AppendSystem("Error: " + err); });
+                            events_.Push([this, err, gen]() {
+                                if (gen != requestGen_.load()) return;
+                                AppendSystem("Error: " + err);
+                            });
                         }
                         std::string result = j.value("result", "");
                         if (!result.empty() && fullResponse.empty()) fullResponse = result;
                     }
-                } catch (...) {}
+                }
+                if (start > 0) lineBuf.erase(0, start);
             }
-            pclose(pipe);
 
-            events_.Push([this, fullResponse]() {
+            close(outPipe[0]);
+
+            // Reap child. If still running (e.g. we were cancelled and
+            // SIGTERM'd the group), give it a moment then force kill.
+            int status = 0;
+            for (int attempt = 0; attempt < 50; attempt++) {
+                pid_t r = waitpid(pid, &status, WNOHANG);
+                if (r == pid || r < 0) break;
+                if (attempt == 10) kill(-pid, SIGTERM);
+                if (attempt == 40) kill(-pid, SIGKILL);
+                std::this_thread::sleep_for(std::chrono::milliseconds(20));
+            }
+            claudePid_.store(-1);
+
+            events_.Push([this, fullResponse, gen]() {
+                if (gen != requestGen_.load()) return;
                 if (receivingThinking_) {
                     receivingThinking_ = false;
-                    scrollView_.StopThinking(scrollView_.BlockCount() - 1);
                 }
+                scrollView_.StopAllAnimations();
                 if (!responseBuffer_.empty()) {
                     RenderMarkdownToBlocks(true);
                     responseBuffer_.clear();
@@ -923,7 +1060,7 @@ void App::DoSendToProvider() {
                 if (!fullResponse.empty())
                     session_.History().push_back({"assistant", fullResponse, {}, {}});
                 requestInProgress_ = false;
-                scrollView_.StopAllAnimations();
+                sendButton_.enabled = true;
                 session_.SetProvider(activeProvider_);
                 session_.SetModel(activeModel_);
                 session_.Save();
@@ -1318,7 +1455,15 @@ void App::OnKey(int key, int mods, bool pressed) {
 
     // Escape cancels request
     if (key == XKB_KEY_Escape && requestInProgress_) {
+        // Bump generation so any finalizer from the cancelled request is
+        // dropped when it eventually arrives.
+        ++requestGen_;
         httpClient_.Abort();
+        // Claude ACP: signal the child process group so fgets unblocks and
+        // the reader thread can finish and reap. Otherwise the detached
+        // thread lives on holding a pipe to an orphaned claude child.
+        pid_t cpid = claudePid_.exchange(-1);
+        if (cpid > 0) kill(-cpid, SIGTERM);
         requestInProgress_ = false;
         sendButton_.enabled = true;
         if (!session_.History().empty() && session_.History().back().role == "user") {
@@ -1326,6 +1471,8 @@ void App::OnKey(int key, int mods, bool pressed) {
             session_.History().push_back({"assistant", "[cancelled]", {}, {}});
         }
         scrollView_.StopAllAnimations();
+        receivingThinking_ = false;
+        responseBuffer_.clear();
         AppendSystem("Cancelled");
         MarkDirty();
         return;

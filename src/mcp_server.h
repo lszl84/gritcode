@@ -30,6 +30,7 @@ struct MCPCallbacks {
     std::function<json()> getStatus;
     std::function<json()> getConversation;     // Full conversation blocks text
     std::function<json()> getLastAssistant;    // Just the last assistant response
+    std::function<void(const std::string& provider, const std::string& model)> setProvider;
 };
 
 // Simple TCP-based JSON-RPC server for controlling FCN programmatically.

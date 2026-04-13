@@ -27,6 +27,7 @@
 #include <vector>
 #include <mutex>
 #include <queue>
+#include <atomic>
 #include <functional>
 #include <nlohmann/json.hpp>
 
@@ -99,6 +100,12 @@ private:
     bool connected_ = false;
     bool requestInProgress_ = false;
     int toolRound_ = 0;
+
+    // Claude ACP: child pid of running `claude --print` (so Escape can kill it),
+    // and per-request generation so a stale finalizer from a cancelled request
+    // doesn't clobber the UI state of a newer one.
+    std::atomic<pid_t> claudePid_{-1};
+    std::atomic<uint64_t> requestGen_{0};
 
     // Streaming state
     std::string responseBuffer_;

@@ -161,6 +161,20 @@ json MCPServer::HandleRequest(const json& request) {
         if (cb_.getLastAssistant) result = cb_.getLastAssistant();
         else result = {{"text", ""}};
 
+    } else if (method == "setProvider") {
+        std::string provider = params.value("provider", "");
+        std::string model = params.value("model", "");
+        if (provider.empty()) {
+            return {{"error", {{"code", -32602}, {"message", "missing 'provider' param"}}}, {"id", id}};
+        }
+        std::lock_guard<std::mutex> lock(cbMutex_);
+        if (cb_.setProvider) {
+            cb_.setProvider(provider, model);
+            result = {{"set", true}};
+        } else {
+            result = {{"error", "not ready"}};
+        }
+
     } else {
         return {{"error", {{"code", -32601}, {"message", "unknown method: " + method}}}, {"id", id}};
     }
