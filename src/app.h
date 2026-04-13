@@ -97,6 +97,9 @@ private:
     SessionManager session_;
     std::string activeProvider_ = "zen";
     std::string activeModel_;
+    // Set when a session is restored so OnModelsReceived can prefer the
+    // restored model over the dropdown default. Cleared after first use.
+    std::string restoredModelPref_;
     bool connected_ = false;
     bool requestInProgress_ = false;
     int toolRound_ = 0;

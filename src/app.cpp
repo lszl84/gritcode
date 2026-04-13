@@ -366,9 +366,29 @@ void App::RestoreSessionToView() {
                     scrollView_.AddBlocks(mdRenderer.Render(m.content, true));
             }
             scrollView_.EndBatch();
-            activeProvider_ = session_.Provider();
-            if (!session_.Model().empty()) activeModel_ = session_.Model();
             AppendSystem("Session restored (" + std::to_string(session_.History().size()) + " messages)");
+
+            // Sync UI state to the restored provider. Without this, dropdowns
+            // stay on the Init() defaults while activeProvider_/activeModel_
+            // point somewhere else — every send goes to the wrong backend.
+            std::string savedProvider = session_.Provider();
+            std::string savedModel = session_.Model();
+            if (!savedProvider.empty() &&
+                (savedProvider == "zen" || savedProvider == "claude")) {
+                // Select in dropdown so the UI reflects reality.
+                for (size_t i = 0; i < providerDropdown_.items.size(); i++) {
+                    if (providerDropdown_.items[i].id == savedProvider) {
+                        providerDropdown_.selectedIndex = (int)i;
+                        break;
+                    }
+                }
+                // Remember the restored model so the async zen model-fetch
+                // (or the claude dropdown install) doesn't clobber it.
+                restoredModelPref_ = savedModel;
+                OnProviderChanged(0, savedProvider);
+            } else if (!savedModel.empty()) {
+                activeModel_ = savedModel;
+            }
             MarkDirty();
         });
     } else {
@@ -614,8 +634,22 @@ void App::OnModelsReceived(std::vector<net::ModelInfo> models, int httpStatus) {
         };
     }
 
+    // Prefer a restored session model if it's in the fetched list.
+    if (!restoredModelPref_.empty()) {
+        for (size_t i = 0; i < modelDropdown_.items.size(); i++) {
+            if (modelDropdown_.items[i].id == restoredModelPref_) {
+                defaultIdx = (int)i;
+                break;
+            }
+        }
+        restoredModelPref_.clear();
+    }
+
     modelDropdown_.selectedIndex = defaultIdx;
     activeModel_ = modelDropdown_.SelectedId();
+    // Success: move status label off "Validating key..." — without this it
+    // sticks forever because Connect() set it and OnModelsReceived never did.
+    statusLabel_.text = httpClient_.IsAnonymous() ? "Zen (Anonymous)" : "Zen";
     AppendSystem("Models loaded. Active: " + activeModel_);
     MarkDirty();
 }
@@ -695,8 +729,15 @@ void App::OnProviderChanged(int, const std::string& id) {
             {"claude-sonnet-4-6", "Claude Sonnet 4.6"},
             {"claude-haiku-4-5", "Claude Haiku 4.5"},
         };
-        modelDropdown_.selectedIndex = 1;
-        activeModel_ = "claude-sonnet-4-6";
+        int sel = 1;  // default sonnet
+        if (!restoredModelPref_.empty()) {
+            for (size_t i = 0; i < modelDropdown_.items.size(); i++) {
+                if (modelDropdown_.items[i].id == restoredModelPref_) { sel = (int)i; break; }
+            }
+            restoredModelPref_.clear();
+        }
+        modelDropdown_.selectedIndex = sel;
+        activeModel_ = modelDropdown_.items[sel].id;
     }
     MarkDirty();
 }
