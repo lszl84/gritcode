@@ -605,7 +605,7 @@ void App::LayoutWidgets() {
     float s = window_.Scale();
     // Leave a small gutter below the bottom bar so the rounded controls
     // don't kiss the window edge.
-    float bottomMargin = 3 * s;
+    float bottomMargin = 2 * s;
     float h = window_.Height() - bottomMargin;
     float bar = barHeight_ * s;
     float inp = inputHeight_ * s;
@@ -613,14 +613,14 @@ void App::LayoutWidgets() {
     float barY = h - bar;
     float inputY = barY - inp;
 
-    messageInput_.bounds = {8, inputY + 5, w - 100, inp - 10};
+    messageInput_.bounds = {8, inputY + 5, w - 101, inp - 10};
     sendButton_.bounds = {w - 88, inputY + 5, 80, inp - 10};
 
     float bx = 8;
-    workspaceDropdown_.bounds = {bx, barY + 5, 200 * s, bar - 10}; bx += 208 * s;
-    providerDropdown_.bounds = {bx, barY + 5, 140 * s, bar - 10}; bx += 148 * s;
-    modelDropdown_.bounds = {bx, barY + 5, 150 * s, bar - 10}; bx += 158 * s;
-    statusLabel_.bounds = {bx, barY + 5, 180 * s, bar - 10}; bx += 188 * s;
+    workspaceDropdown_.bounds = {bx, barY + 5, 200 * s, bar - 10}; bx += 206 * s;
+    providerDropdown_.bounds = {bx, barY + 5, 140 * s, bar - 10}; bx += 146 * s;
+    modelDropdown_.bounds = {bx, barY + 5, 150 * s, bar - 10}; bx += 156 * s;
+    statusLabel_.bounds = {bx, barY + 5, 180 * s, bar - 10}; bx += 186 * s;
 
     bool showApiKey = (activeProvider_ == "zen");
     if (showApiKey && apiKeyEditing_) {
