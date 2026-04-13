@@ -1490,15 +1490,31 @@ void App::OnMouseDown(float x, float y, bool shift) {
 
     // All coords are physical pixels from WaylandWindow
 
-    // Check dropdowns first (they have popups)
-    if (workspaceDropdown_.OnMouseDown(x, y)) { MarkDirty(); return; }
-    if (providerDropdown_.OnMouseDown(x, y)) { MarkDirty(); return; }
-    if (modelDropdown_.OnMouseDown(x, y)) { MarkDirty(); return; }
-
-    // Close any open dropdowns
-    workspaceDropdown_.Close();
-    providerDropdown_.Close();
-    modelDropdown_.Close();
+    // Dropdowns: only one can be open at a time. If any popup is open and
+    // the click landed inside it, let that dropdown handle it (select item
+    // or dismiss). Otherwise close all and let the click fall through —
+    // including the case where it falls onto a different dropdown's
+    // closed bar, which would otherwise open a second dropdown while the
+    // first stayed visible.
+    Dropdown* dds[] = {&workspaceDropdown_, &providerDropdown_, &modelDropdown_};
+    Dropdown* openDd = nullptr;
+    for (auto* d : dds) if (d->open) { openDd = d; break; }
+    if (openDd) {
+        WidgetRect pr = openDd->PopupRect();
+        if (PointInRect(x, y, pr)) {
+            openDd->OnMouseDown(x, y);
+            MarkDirty();
+            return;
+        }
+        openDd->Close();
+    }
+    for (auto* d : dds) {
+        if (PointInRect(x, y, d->bounds)) {
+            d->OnMouseDown(x, y);
+            MarkDirty();
+            return;
+        }
+    }
 
     if (sendButton_.OnMouseDown(x, y)) { MarkDirty(); return; }
     if (apiKeyEditing_) {
@@ -1563,6 +1579,7 @@ void App::OnMouseMove(float x, float y, bool leftDown) {
     sendButton_.OnMouseMove(x, y);
     if (apiKeyEditing_) { apiKeyAccept_.OnMouseMove(x, y); apiKeyCancel_.OnMouseMove(x, y); }
     else apiKeyButton_.OnMouseMove(x, y);
+    workspaceDropdown_.OnMouseMove(x, y);
     providerDropdown_.OnMouseMove(x, y);
     modelDropdown_.OnMouseMove(x, y);
 

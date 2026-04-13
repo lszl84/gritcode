@@ -156,7 +156,5 @@ public:
 
     float PopupHeight() const { return items.size() * ItemHeight(); }
     float ItemHeight() const { return 32; }
-
-private:
     WidgetRect PopupRect() const;
 };
