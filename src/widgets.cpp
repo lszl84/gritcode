@@ -516,13 +516,44 @@ void Dropdown::PaintPopup(GLRenderer& r, FontManager& fm) const {
     r.DrawRoundedRect(pr.x, pr.y, pr.w, pr.h, radius, popupBg);
 
     float itemH = ItemHeight();
+    int last = (int)items.size() - 1;
+    Color selColor{0.39f, 0.71f, 1.0f};
     for (int i = 0; i < (int)items.size(); i++) {
         float iy = pr.y + i * itemH;
+        bool isFirst = (i == 0);
+        bool isLast = (i == last);
+
         if (i == hoveredItem) {
-            r.DrawRect(pr.x + 2, iy, pr.w - 4, itemH, popupHover);
+            // Hover rows on the edges need their outer corners rounded to
+            // match the popup's rounded background — otherwise the hover
+            // rectangle peeks out of the corner radius. We do it by drawing
+            // a rounded rect that extends past the row by `radius` and
+            // clipping to the row bounds, so the bleeding side becomes
+            // square and the visible side stays round.
+            if (isFirst && isLast) {
+                r.DrawRoundedRect(pr.x, iy, pr.w, itemH, radius, popupHover);
+            } else if (isFirst) {
+                r.PushClip(pr.x, iy, pr.w, itemH);
+                r.DrawRoundedRect(pr.x, iy, pr.w, itemH + radius, radius, popupHover);
+                r.PopClip();
+            } else if (isLast) {
+                r.PushClip(pr.x, iy, pr.w, itemH);
+                r.DrawRoundedRect(pr.x, iy - radius, pr.w, itemH + radius, radius, popupHover);
+                r.PopClip();
+            } else {
+                r.DrawRect(pr.x, iy, pr.w, itemH, popupHover);
+            }
         }
         if (i == selectedIndex) {
-            r.DrawRect(pr.x, iy, 3, itemH, {0.39f, 0.71f, 1.0f});
+            // Selection indicator: 3 px bar at the left edge, shortened on
+            // the first/last rows so it does not paint over the rounded
+            // corner of the popup background.
+            float bx = pr.x;
+            float by = iy;
+            float bh = itemH;
+            if (isFirst) { by += radius; bh -= radius; }
+            if (isLast) { bh -= radius; }
+            if (bh > 0) r.DrawRect(bx, by, 3, bh, selColor);
         }
         auto irun = fm.Shape(items[i].label, style);
         float ity = iy + (itemH - fm.LineHeight(style)) / 2;
