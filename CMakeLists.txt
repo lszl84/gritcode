@@ -111,7 +111,13 @@ else()
 endif()
 
 # --- Executable ---
-add_executable(fcn
+if(APPLE)
+    set(FCN_BUNDLE_FLAG MACOSX_BUNDLE)
+else()
+    set(FCN_BUNDLE_FLAG "")
+endif()
+
+add_executable(fcn ${FCN_BUNDLE_FLAG}
     src/main.cpp
     src/app.cpp
     src/glfw_window.cpp
@@ -125,6 +131,17 @@ add_executable(fcn
     src/session.cpp
     src/mcp_server.cpp
 )
+
+if(APPLE)
+    set_target_properties(fcn PROPERTIES
+        MACOSX_BUNDLE TRUE
+        MACOSX_BUNDLE_INFO_PLIST ${CMAKE_SOURCE_DIR}/cmake/Info.plist.in
+        MACOSX_BUNDLE_BUNDLE_NAME "FastCode Native"
+        MACOSX_BUNDLE_GUI_IDENTIFIER "com.devmindscape.fastcode-native"
+        MACOSX_BUNDLE_BUNDLE_VERSION "${VERSION_STRING}"
+        MACOSX_BUNDLE_SHORT_VERSION_STRING "${PROJECT_VERSION_MAJOR}.${PROJECT_VERSION_MINOR}.${PROJECT_VERSION_PATCH}"
+    )
+endif()
 
 target_include_directories(fcn PRIVATE
     ${cmark_BINARY_DIR}/src
