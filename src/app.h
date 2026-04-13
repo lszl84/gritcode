@@ -125,7 +125,7 @@ private:
     // Layout
     float barHeight_ = 40;
     float inputHeight_ = 50;
-    float chromeTopPad_ = 8;  // Padding above the message row inside the bottom chrome
+    float chromeTopPad_ = 4;  // Padding above the message row inside the bottom chrome
     void LayoutWidgets();
     void PaintBottomBar();
 
