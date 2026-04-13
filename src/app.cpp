@@ -30,17 +30,23 @@
 #include <chrono>
 #include "keysyms.h"
 
+// pipe2(O_CLOEXEC) is Linux-only; on macOS fall back to pipe + fcntl.
+static int CloexecPipe(int pfd[2]) {
+#ifdef __linux__
+    return pipe2(pfd, O_CLOEXEC);
+#else
+    if (pipe(pfd) < 0) return -1;
+    fcntl(pfd[0], F_SETFD, FD_CLOEXEC);
+    fcntl(pfd[1], F_SETFD, FD_CLOEXEC);
+    return 0;
+#endif
+}
+
 // Tool execution — uses O_CLOEXEC pipe so backgrounded processes (php -S ... &)
 // don't inherit the pipe fd and block reads forever.  120s timeout via alarm().
 static std::string RunCommand(const std::string& cmd) {
     int pfd[2];
-#ifdef __linux__
-    if (pipe2(pfd, O_CLOEXEC) < 0) return "Error: pipe2 failed";
-#else
-    if (pipe(pfd) < 0) return "Error: pipe failed";
-    fcntl(pfd[0], F_SETFD, FD_CLOEXEC);
-    fcntl(pfd[1], F_SETFD, FD_CLOEXEC);
-#endif
+    if (CloexecPipe(pfd) < 0) return "Error: pipe failed";
 
     pid_t pid = fork();
     if (pid < 0) { close(pfd[0]); close(pfd[1]); return "Error: fork failed"; }
@@ -855,21 +861,21 @@ void App::DoSendToProvider() {
         std::thread([this, prompt, model, gen]() {
             int inPipe[2];   // parent -> child stdin
             int outPipe[2];  // child stdout -> parent
-            if (pipe2(inPipe, O_CLOEXEC) < 0) {
+            if (CloexecPipe(inPipe) < 0) {
                 events_.Push([this, gen]() {
                     if (gen != requestGen_.load()) return;
-                    AppendSystem("Error: pipe2 failed");
+                    AppendSystem("Error: pipe failed");
                     requestInProgress_ = false;
                     sendButton_.enabled = true;
                     MarkDirty();
                 });
                 return;
             }
-            if (pipe2(outPipe, O_CLOEXEC) < 0) {
+            if (CloexecPipe(outPipe) < 0) {
                 close(inPipe[0]); close(inPipe[1]);
                 events_.Push([this, gen]() {
                     if (gen != requestGen_.load()) return;
-                    AppendSystem("Error: pipe2 failed");
+                    AppendSystem("Error: pipe failed");
                     requestInProgress_ = false;
                     sendButton_.enabled = true;
                     MarkDirty();
