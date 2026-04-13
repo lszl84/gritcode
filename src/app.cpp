@@ -324,7 +324,7 @@ bool App::Init(bool sessionChooser) {
     chooserMode_ = sessionChooser;
     if (!window_.Init(1000, 750, "FastCode Native")) return false;
 
-    if (!scrollView_.Init(window_.Width(), window_.Height() - (int)(barHeight_ + inputHeight_) * window_.Scale(),
+    if (!scrollView_.Init(window_.Width(), window_.Height() - (int)((barHeight_ + inputHeight_ + chromeTopPad_) * window_.Scale()),
                           window_.Scale()))
         return false;
 
@@ -417,7 +417,7 @@ bool App::Init(bool sessionChooser) {
     // Window callbacks
     float currentScale = window_.Scale();
     window_.OnResize([&, currentScale](int w, int h, float scale) mutable {
-        int viewH = h - (int)((barHeight_ + inputHeight_) * scale);
+        int viewH = h - (int)((barHeight_ + inputHeight_ + chromeTopPad_) * scale);
         if (viewH < 1) viewH = 1;
         if (scale != currentScale) {
             currentScale = scale;
@@ -613,7 +613,7 @@ void App::LayoutWidgets() {
     float barY = h - bar;
     float inputY = barY - inp;
 
-    messageInput_.bounds = {8, inputY + 5, w - 102, inp - 10};
+    messageInput_.bounds = {8, inputY + 5, w - 103, inp - 10};
     sendButton_.bounds = {w - 88, inputY + 5, 80, inp - 10};
 
     float bx = 8;
@@ -653,16 +653,18 @@ void App::PaintBottomBar() {
     float h = window_.Height();
     auto& fm = scrollView_.Fonts();
 
-    Color barBg{0.10f, 0.10f, 0.11f};
-    Color inputAreaBg{0.13f, 0.13f, 0.14f};
+    // Single unified dark chrome behind both the message row and the
+    // dropdown bar, extending a few pixels above the message row so
+    // there's breathing space between the scroll content and the input.
+    Color chromeBg{0.10f, 0.10f, 0.11f};
 
     float bar = barHeight_ * s;
     float inp = inputHeight_ * s;
     float barY = h - bar;
     float inputY = barY - inp;
+    float topPad = chromeTopPad_ * s;
 
-    renderer_.DrawRect(0, inputY, w, inp, inputAreaBg);
-    renderer_.DrawRect(0, barY, w, bar, barBg);
+    renderer_.DrawRect(0, inputY - topPad, w, inp + bar + topPad, chromeBg);
 
     // Scale transform: widgets use logical coords, renderer uses physical
     // For now, widgets draw at 1:1 since renderer works in physical pixels
@@ -1520,7 +1522,7 @@ void App::OnMouseDown(float x, float y, bool shift) {
 
     // Scroll view
     float s = window_.Scale();
-    float viewH = window_.Height() - (barHeight_ + inputHeight_) * s;
+    float viewH = window_.Height() - (barHeight_ + inputHeight_ + chromeTopPad_) * s;
     if (y < viewH) {
         scrollView_.OnMouseDown(x, y, shift);
         UnfocusAllInputs();
@@ -1565,7 +1567,7 @@ void App::OnMouseMove(float x, float y, bool leftDown) {
     modelDropdown_.OnMouseMove(x, y);
 
     float s = window_.Scale();
-    float viewH = window_.Height() - (barHeight_ + inputHeight_) * s;
+    float viewH = window_.Height() - (barHeight_ + inputHeight_ + chromeTopPad_) * s;
     if (y < viewH) {
         scrollView_.OnMouseMove(x, y, leftDown);
     }
