@@ -18,6 +18,10 @@
 #include "types.h"
 #include <cstdio>
 
+#ifdef FCN_MACOS
+extern "C" void MacStyleWindowChrome(GLFWwindow* gw, float r, float g, float b);
+#endif
+
 GlfwWindow::GlfwWindow() = default;
 
 GlfwWindow::~GlfwWindow() {
@@ -60,6 +64,12 @@ bool GlfwWindow::Init(int width, int height, const char* title) {
     glfwGetWindowSize(window_, &winW_, &winH_);
     glfwGetFramebufferSize(window_, &fbW_, &fbH_);
     UpdateScale();
+
+#ifdef FCN_MACOS
+    // Match the title bar to the GL clear color in gl_renderer.cpp so the
+    // window reads as one surface, Terminal.app-style.
+    MacStyleWindowChrome(window_, 0.12f, 0.12f, 0.13f);
+#endif
 
     return true;
 }

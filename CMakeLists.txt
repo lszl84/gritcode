@@ -111,13 +111,7 @@ else()
 endif()
 
 # --- Executable ---
-if(APPLE)
-    set(FCN_BUNDLE_FLAG MACOSX_BUNDLE)
-else()
-    set(FCN_BUNDLE_FLAG "")
-endif()
-
-add_executable(fcn ${FCN_BUNDLE_FLAG}
+set(FCN_SOURCES
     src/main.cpp
     src/app.cpp
     src/glfw_window.cpp
@@ -133,6 +127,21 @@ add_executable(fcn ${FCN_BUNDLE_FLAG}
 )
 
 if(APPLE)
+    # Generate fcn.icns from fcn.svg using built-in sips + iconutil.
+    set(FCN_ICNS ${CMAKE_BINARY_DIR}/fcn.icns)
+    add_custom_command(
+        OUTPUT ${FCN_ICNS}
+        COMMAND ${CMAKE_SOURCE_DIR}/scripts/gen-icns.sh
+                ${CMAKE_SOURCE_DIR}/fcn.svg ${FCN_ICNS}
+        DEPENDS ${CMAKE_SOURCE_DIR}/fcn.svg ${CMAKE_SOURCE_DIR}/scripts/gen-icns.sh
+        COMMENT "Generating fcn.icns from fcn.svg"
+    )
+    set_source_files_properties(${FCN_ICNS} PROPERTIES
+        MACOSX_PACKAGE_LOCATION "Resources")
+    list(APPEND FCN_SOURCES src/macos_chrome.mm ${FCN_ICNS})
+
+    add_executable(fcn MACOSX_BUNDLE ${FCN_SOURCES})
+
     set_target_properties(fcn PROPERTIES
         MACOSX_BUNDLE TRUE
         MACOSX_BUNDLE_INFO_PLIST ${CMAKE_SOURCE_DIR}/cmake/Info.plist.in
@@ -140,7 +149,10 @@ if(APPLE)
         MACOSX_BUNDLE_GUI_IDENTIFIER "com.devmindscape.fastcode-native"
         MACOSX_BUNDLE_BUNDLE_VERSION "${VERSION_STRING}"
         MACOSX_BUNDLE_SHORT_VERSION_STRING "${PROJECT_VERSION_MAJOR}.${PROJECT_VERSION_MINOR}.${PROJECT_VERSION_PATCH}"
+        MACOSX_BUNDLE_ICON_FILE fcn.icns
     )
+else()
+    add_executable(fcn ${FCN_SOURCES})
 endif()
 
 target_include_directories(fcn PRIVATE
@@ -176,6 +188,7 @@ else()
             "-framework Security"
             "-framework CoreText"
             "-framework CoreFoundation"
+            "-framework Cocoa"
         )
     endif()
 endif()
