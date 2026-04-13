@@ -544,20 +544,18 @@ void Dropdown::PaintPopup(GLRenderer& r, FontManager& fm) const {
                 r.DrawRect(pr.x, iy, pr.w, itemH, popupHover);
             }
         }
-        if (i == selectedIndex) {
-            // Selection indicator: 3 px bar at the left edge, shortened on
-            // the first/last rows so it does not paint over the rounded
-            // corner of the popup background.
-            float bx = pr.x;
-            float by = iy;
-            float bh = itemH;
-            if (isFirst) { by += radius; bh -= radius; }
-            if (isLast) { bh -= radius; }
-            if (bh > 0) r.DrawRect(bx, by, 3, bh, selColor);
-        }
         auto irun = fm.Shape(items[i].label, style);
         float ity = iy + (itemH - fm.LineHeight(style)) / 2;
         r.DrawShapedRun(fm, irun, pr.x + 10, ity, fm.Ascent(style), textColor);
+
+        if (i == selectedIndex) {
+            // Selection indicator: a checkmark glyph on the right edge of
+            // the row in the accent color. Beats a clipped left bar on
+            // rounded-corner rows and matches the macOS popup-menu idiom.
+            auto mark = fm.Shape("\u2713", style);  // ✓
+            float mx = pr.x + pr.w - 12 - mark.totalWidth;
+            r.DrawShapedRun(fm, mark, mx, ity, fm.Ascent(style), selColor);
+        }
     }
 }
 
