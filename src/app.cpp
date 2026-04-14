@@ -1307,9 +1307,11 @@ void App::DoSendToProvider() {
                     if (!session_.History().empty() && session_.History().back().role == "user")
                         session_.History().pop_back();
                     if (error.find("401") != std::string::npos) {
-                        AppendSystem("API key is invalid or expired (" + httpClient_.ApiKey() + "). Please set a new key.");
-                        keychain::ClearApiKey();
-                        httpClient_.SetApiKey("");
+                        // Don't auto-clear the saved key: 401 can be transient
+                        // (quota/rate-limit/billing blips on Zen) and a single
+                        // failed request is not enough reason to nuke a secret
+                        // the user may not have backed up anywhere else.
+                        AppendSystem("Unauthorized (HTTP 401). Key was not cleared — retry, or replace it manually via the key button if it's really invalid.");
                         statusLabel_.text = "Unauthorized";
                     } else {
                         AppendSystem("Error: " + error);

@@ -46,6 +46,10 @@ struct StreamCtx {
 
     // Track last time we received actual content (not just keepalive)
     std::atomic<double> lastContentTime{0};
+    // Time the request was handed to curl_easy_perform — used for the
+    // pre-first-byte timeout (kimi on Zen can sit silent for >60s thinking
+    // on heavy prompts).
+    double startTime{0};
 
     // Tool call accumulation (streamed across chunks)
     struct PendingTC { std::string id, name, args; };
@@ -257,24 +261,31 @@ void CurlHttpClient::SendStreaming(
         curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, WriteCallback);
         curl_easy_setopt(curl, CURLOPT_WRITEDATA, &ctx);
 
-        // Timeouts: don't hang forever
-        curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT, 15L);      // 15s to connect
-        curl_easy_setopt(curl, CURLOPT_LOW_SPEED_LIMIT, 1L);      // At least 1 byte/s
-        curl_easy_setopt(curl, CURLOPT_LOW_SPEED_TIME, 60L);      // ...for 60s, else abort
+        // 15s to establish the TCP+TLS connection. Past that, we rely on the
+        // progress callback below — LOW_SPEED_TIME was too aggressive (60s of
+        // silence killed kimi prompts that legitimately took longer than a
+        // minute to first token).
+        curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT, 15L);
 
-        // Progress callback: abort on user cancel OR if no API content for 120s
+        struct timespec tsStart;
+        clock_gettime(CLOCK_MONOTONIC, &tsStart);
+        ctx.startTime = tsStart.tv_sec + tsStart.tv_nsec / 1e9;
+
+        // Progress callback: abort on user cancel, if no first byte for 240s,
+        // or if we stop receiving content for 120s after streaming started.
         curl_easy_setopt(curl, CURLOPT_NOPROGRESS, 0L);
         curl_easy_setopt(curl, CURLOPT_XFERINFOFUNCTION,
             +[](void* p, curl_off_t, curl_off_t, curl_off_t, curl_off_t) -> int {
                 auto* ctx = static_cast<StreamCtx*>(p);
                 if (ctx->aborted->load()) return 1;
-                // Check for content timeout (server sends keepalive but no actual data)
+                struct timespec ts;
+                clock_gettime(CLOCK_MONOTONIC, &ts);
+                double now = ts.tv_sec + ts.tv_nsec / 1e9;
                 double last = ctx->lastContentTime.load();
                 if (last > 0) {
-                    struct timespec ts;
-                    clock_gettime(CLOCK_MONOTONIC, &ts);
-                    double now = ts.tv_sec + ts.tv_nsec / 1e9;
-                    if (now - last > 120.0) return 1;  // 120s without content → abort
+                    if (now - last > 120.0) return 1;  // stalled mid-stream
+                } else {
+                    if (now - ctx->startTime > 240.0) return 1;  // no first byte
                 }
                 return 0;
             });

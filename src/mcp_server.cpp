@@ -21,6 +21,7 @@
 #include <cstring>
 #include <cstdio>
 #include <poll.h>
+#include <fcntl.h>
 
 MCPServer::MCPServer() {}
 
@@ -43,7 +44,15 @@ void MCPServer::Stop() {
 }
 
 void MCPServer::ServerLoop() {
+    // SOCK_CLOEXEC so spawned tool subprocesses (wl-copy, etc.) don't inherit
+    // the listen fd. Without this, backgrounded helpers daemonize holding the
+    // port and block the next fcn instance from binding.
+#ifdef SOCK_CLOEXEC
+    serverFd_ = socket(AF_INET, SOCK_STREAM | SOCK_CLOEXEC, 0);
+#else
     serverFd_ = socket(AF_INET, SOCK_STREAM, 0);
+    if (serverFd_ >= 0) fcntl(serverFd_, F_SETFD, FD_CLOEXEC);
+#endif
     if (serverFd_ < 0) { fprintf(stderr, "MCP: socket failed\n"); return; }
 
     int opt = 1;
@@ -76,7 +85,12 @@ void MCPServer::ServerLoop() {
 
         struct sockaddr_in clientAddr{};
         socklen_t len = sizeof(clientAddr);
+#ifdef SOCK_CLOEXEC
+        int clientFd = accept4(serverFd_, (struct sockaddr*)&clientAddr, &len, SOCK_CLOEXEC);
+#else
         int clientFd = accept(serverFd_, (struct sockaddr*)&clientAddr, &len);
+        if (clientFd >= 0) fcntl(clientFd, F_SETFD, FD_CLOEXEC);
+#endif
         if (clientFd < 0) continue;
 
         HandleClient(clientFd);
