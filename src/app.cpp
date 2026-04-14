@@ -457,6 +457,13 @@ bool App::Init(bool sessionChooser) {
     window_.Show();
     messageInput_.focused = true;
 
+    // Registry fetch is independent of which session (or none) we end up on —
+    // kick it off unconditionally so the chooser-path sessions also get their
+    // model list. Previously this only ran in the direct-launch branch, so
+    // picking opencode-go from the chooser left Connect() parked forever on
+    // "Go (loading models...)" with an empty dropdown.
+    StartFetchRegistry();
+
     if (chooserMode_) {
         chooserSessions_ = SessionManager::ListSessions();
         std::sort(chooserSessions_.begin(), chooserSessions_.end(),
@@ -470,7 +477,6 @@ bool App::Init(bool sessionChooser) {
         session_.LoadForCwd(cwd);
         PopulateWorkspaceDropdown();
         RestoreSessionToView();
-        StartFetchRegistry();
         StartConnect();
     }
 
@@ -797,7 +803,17 @@ void App::OnModelsReceived(std::vector<net::ModelInfo> models, int httpStatus) {
         };
     }
 
-    // Prefer a restored session model if it's in the fetched list.
+    // Selection priority mirrors the registry path: restoredModelPref_ >
+    // activeModel_ > kimi-k2.5 > 0. Preserving activeModel_ keeps a second
+    // Connect() from clobbering a session's restored selection.
+    if (!activeModel_.empty()) {
+        for (size_t i = 0; i < modelDropdown_.items.size(); i++) {
+            if (modelDropdown_.items[i].id == activeModel_) {
+                defaultIdx = (int)i;
+                break;
+            }
+        }
+    }
     if (!restoredModelPref_.empty()) {
         for (size_t i = 0; i < modelDropdown_.items.size(); i++) {
             if (modelDropdown_.items[i].id == restoredModelPref_) {
@@ -879,6 +895,18 @@ void App::OnRegistryReceived(json registry, int httpStatus) {
     // or the cache had.
     if (activeProvider_ == "zen" || activeProvider_ == "opencode-go") {
         PopulateModelsFromRegistry(activeProvider_);
+        // Connect() parked the status label at "Go (loading models...)" while
+        // waiting for the registry. Now that it's here, move it to the normal
+        // connected state so the user isn't stuck staring at a loading string.
+        if (connected_) {
+            bool anon = httpClient_.IsAnonymous();
+            if (activeProvider_ == "opencode-go") {
+                statusLabel_.text = anon ? "Go (no key — add one)" : "Go";
+            } else {
+                statusLabel_.text = anon ? "Zen (Anonymous)" : "Zen";
+            }
+            MarkDirty();
+        }
     }
 }
 
@@ -933,12 +961,25 @@ void App::PopulateModelsFromRegistry(const std::string& providerId) {
         return;
     }
 
+    // Selection priority:
+    //   1. restoredModelPref_ — explicit session-restore hint.
+    //   2. activeModel_        — whatever is already selected (keeps a
+    //      second Connect() from clobbering the first one's session restore).
+    //   3. kimi-k2.5           — legacy default.
+    //   4. index 0.
     int defaultIdx = 0;
-    // Prefer kimi-k2.5 as the default where available — matches old behavior.
     for (size_t i = 0; i < modelDropdown_.items.size(); i++) {
         if (modelDropdown_.items[i].id == "kimi-k2.5") {
             defaultIdx = (int)i;
             break;
+        }
+    }
+    if (!activeModel_.empty()) {
+        for (size_t i = 0; i < modelDropdown_.items.size(); i++) {
+            if (modelDropdown_.items[i].id == activeModel_) {
+                defaultIdx = (int)i;
+                break;
+            }
         }
     }
     if (!restoredModelPref_.empty()) {
