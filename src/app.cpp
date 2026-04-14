@@ -310,6 +310,249 @@ static std::string EditFile(const std::string& path, const std::string& oldStr, 
     return "Applied edit to " + expanded;
 }
 
+// Wrap a string in single quotes for /bin/sh, escaping embedded single quotes.
+static std::string ShellQuote(const std::string& s) {
+    std::string out = "'";
+    for (char c : s) {
+        if (c == '\'') out += "'\\''";
+        else out += c;
+    }
+    out += "'";
+    return out;
+}
+
+// Case-insensitive find for HTML tag stripping.
+static size_t FindICase(const std::string& hay, const std::string& needle, size_t from) {
+    if (needle.empty() || needle.size() > hay.size()) return std::string::npos;
+    for (size_t i = from; i + needle.size() <= hay.size(); ++i) {
+        bool match = true;
+        for (size_t k = 0; k < needle.size(); ++k) {
+            char a = (char)std::tolower((unsigned char)hay[i + k]);
+            char b = (char)std::tolower((unsigned char)needle[k]);
+            if (a != b) { match = false; break; }
+        }
+        if (match) return i;
+    }
+    return std::string::npos;
+}
+
+// Delete <tag ...>...</tag> blocks from s (case-insensitive, handles attrs).
+static void RemoveHtmlBlock(std::string& s, const std::string& tag) {
+    std::string openPrefix = "<" + tag;
+    std::string closeTag = "</" + tag + ">";
+    size_t pos = 0;
+    while (true) {
+        size_t p = FindICase(s, openPrefix, pos);
+        if (p == std::string::npos) break;
+        // Ensure the char after prefix is space, '>', or '/' — else skip.
+        char after = (p + openPrefix.size() < s.size()) ? s[p + openPrefix.size()] : '>';
+        if (after != ' ' && after != '>' && after != '/' && after != '\t' && after != '\n') {
+            pos = p + 1;
+            continue;
+        }
+        size_t endOpen = s.find('>', p);
+        if (endOpen == std::string::npos) { s.erase(p); break; }
+        size_t r = FindICase(s, closeTag, endOpen + 1);
+        if (r == std::string::npos) { s.erase(p); break; }
+        s.erase(p, r + closeTag.size() - p);
+        pos = p;
+    }
+}
+
+// Encode a unicode codepoint as UTF-8.
+static void AppendUtf8(std::string& out, int cp) {
+    if (cp <= 0) return;
+    if (cp < 0x80) out += (char)cp;
+    else if (cp < 0x800) {
+        out += (char)(0xC0 | (cp >> 6));
+        out += (char)(0x80 | (cp & 0x3F));
+    } else if (cp < 0x10000) {
+        out += (char)(0xE0 | (cp >> 12));
+        out += (char)(0x80 | ((cp >> 6) & 0x3F));
+        out += (char)(0x80 | (cp & 0x3F));
+    } else {
+        out += (char)(0xF0 | (cp >> 18));
+        out += (char)(0x80 | ((cp >> 12) & 0x3F));
+        out += (char)(0x80 | ((cp >> 6) & 0x3F));
+        out += (char)(0x80 | (cp & 0x3F));
+    }
+}
+
+// Very small HTML → plain-text converter. Strips script/style/head, drops
+// tags (inserting newlines at tag boundaries), decodes the common entities,
+// and collapses runs of whitespace. Not a full parser — enough to turn a
+// search result or doc page into something a model can read.
+static std::string StripHtml(const std::string& html) {
+    std::string s = html;
+    RemoveHtmlBlock(s, "script");
+    RemoveHtmlBlock(s, "style");
+    RemoveHtmlBlock(s, "head");
+    RemoveHtmlBlock(s, "noscript");
+    RemoveHtmlBlock(s, "svg");
+
+    // Drop tags; leave a newline behind each closing '>' so block structure survives.
+    std::string notags;
+    notags.reserve(s.size());
+    bool inTag = false;
+    for (char c : s) {
+        if (inTag) {
+            if (c == '>') { inTag = false; notags += '\n'; }
+        } else {
+            if (c == '<') inTag = true;
+            else notags += c;
+        }
+    }
+
+    // Decode entities.
+    std::string decoded;
+    decoded.reserve(notags.size());
+    for (size_t i = 0; i < notags.size(); ++i) {
+        if (notags[i] == '&') {
+            size_t semi = notags.find(';', i);
+            if (semi != std::string::npos && semi - i <= 8) {
+                std::string ent = notags.substr(i + 1, semi - i - 1);
+                bool handled = true;
+                if (ent == "amp") decoded += '&';
+                else if (ent == "lt") decoded += '<';
+                else if (ent == "gt") decoded += '>';
+                else if (ent == "quot") decoded += '"';
+                else if (ent == "apos") decoded += '\'';
+                else if (ent == "nbsp") decoded += ' ';
+                else if (!ent.empty() && ent[0] == '#') {
+                    int code = 0;
+                    try {
+                        if (ent.size() > 1 && (ent[1] == 'x' || ent[1] == 'X'))
+                            code = std::stoi(ent.substr(2), nullptr, 16);
+                        else
+                            code = std::stoi(ent.substr(1));
+                    } catch (...) { code = 0; handled = false; }
+                    if (handled) AppendUtf8(decoded, code);
+                } else {
+                    handled = false;
+                }
+                if (handled) { i = semi; continue; }
+            }
+        }
+        decoded += notags[i];
+    }
+
+    // Collapse whitespace: single spaces within a line, cap blank lines at 1.
+    std::string out;
+    out.reserve(decoded.size());
+    int nl = 0;
+    bool spaceQueued = false;
+    for (char c : decoded) {
+        if (c == '\n' || c == '\r') {
+            ++nl;
+            if (nl <= 2) { if (!out.empty() && out.back() != '\n') out += '\n'; else if (nl == 2) out += '\n'; }
+            spaceQueued = false;
+        } else if (c == ' ' || c == '\t') {
+            spaceQueued = true;
+        } else {
+            if (spaceQueued && !out.empty() && out.back() != '\n') out += ' ';
+            spaceQueued = false;
+            nl = 0;
+            out += c;
+        }
+    }
+    // Trim leading/trailing whitespace.
+    size_t a = out.find_first_not_of(" \n\t");
+    size_t b = out.find_last_not_of(" \n\t");
+    if (a == std::string::npos) return "";
+    return out.substr(a, b - a + 1);
+}
+
+// Chrome UA — many sites (Cloudflare, Mediawiki, etc.) 403 anything that
+// looks like a bot. Matches what opencode ships.
+static constexpr const char* kBrowserUA =
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36";
+
+static std::string WebFetch(const std::string& url) {
+    if (url.empty()) return "Error: url required";
+    if (url.compare(0, 7, "http://") != 0 && url.compare(0, 8, "https://") != 0)
+        return "Error: url must start with http:// or https://";
+    std::string cmd = "curl -sSL --max-time 30 "
+                      "-A " + ShellQuote(kBrowserUA) + " "
+                      "-H 'Accept: text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8' "
+                      "-H 'Accept-Language: en-US,en;q=0.9' "
+                      "-- " + ShellQuote(url);
+    std::string raw = RunCommand(cmd);
+    if (raw.empty()) return "Error: empty response from " + url;
+    std::string text = StripHtml(raw);
+    if (text.size() > 30000) {
+        text.resize(30000);
+        text += "\n...(truncated at 30000 chars)";
+    }
+    return text;
+}
+
+// Parse the SSE stream returned by https://mcp.exa.ai/mcp. Each event is
+// "event: <name>\ndata: <json>\n\n". We care about data lines whose JSON has
+// result.content[] entries of type "text" — Exa packs each search result as
+// a preformatted "Title: ... URL: ... Highlights: ..." string in that field.
+static std::string ParseExaSse(const std::string& sse) {
+    std::string combined;
+    size_t i = 0;
+    while (i < sse.size()) {
+        size_t eol = sse.find('\n', i);
+        if (eol == std::string::npos) eol = sse.size();
+        std::string line = sse.substr(i, eol - i);
+        i = eol + 1;
+        if (!line.empty() && line.back() == '\r') line.pop_back();
+        if (line.compare(0, 6, "data: ") != 0) continue;
+        std::string payload = line.substr(6);
+        try {
+            auto j = json::parse(payload);
+            if (j.contains("result") && j["result"].contains("content")) {
+                for (auto& c : j["result"]["content"]) {
+                    if (c.value("type", "") == "text") {
+                        if (!combined.empty()) combined += "\n\n";
+                        combined += c.value("text", "");
+                    }
+                }
+            } else if (j.contains("error")) {
+                return "Error: " + j["error"].dump();
+            }
+        } catch (...) {
+            // Not JSON or malformed — skip.
+        }
+    }
+    return combined;
+}
+
+// Search the web via Exa's public MCP endpoint (no API key). Same mechanism
+// opencode uses; avoids DuckDuckGo's aggressive captcha wall.
+static std::string WebSearch(const std::string& query) {
+    if (query.empty()) return "Error: query required";
+    json body = {
+        {"jsonrpc", "2.0"},
+        {"id", 1},
+        {"method", "tools/call"},
+        {"params", {
+            {"name", "web_search_exa"},
+            {"arguments", {
+                {"query", query},
+                {"numResults", 5}
+            }}
+        }}
+    };
+    std::string cmd = "curl -sS --max-time 30 -X POST "
+                      "-H 'accept: application/json, text/event-stream' "
+                      "-H 'content-type: application/json' "
+                      "-d " + ShellQuote(body.dump()) + " "
+                      "-- 'https://mcp.exa.ai/mcp'";
+    std::string raw = RunCommand(cmd);
+    if (raw.empty()) return "Error: empty response from Exa MCP";
+    std::string text = ParseExaSse(raw);
+    if (text.empty()) return "Error: no results parsed from Exa response:\n" + raw.substr(0, 1000);
+    if (text.size() > 20000) {
+        text.resize(20000);
+        text += "\n...(truncated at 20000 chars)";
+    }
+    return text;
+}
+
 static std::string ExecuteTool(const std::string& name, const std::string& argsJson) {
     try {
         auto args = json::parse(argsJson);
@@ -318,6 +561,8 @@ static std::string ExecuteTool(const std::string& name, const std::string& argsJ
         if (name == "list_directory") return RunCommand("ls -la -- '" + ExpandTilde(args.value("path", ".")) + "'");
         if (name == "write_file") return WriteFile(args.value("path", ""), args.value("content", ""));
         if (name == "edit_file") return EditFile(args.value("path", ""), args.value("old_string", ""), args.value("new_string", ""));
+        if (name == "web_fetch") return WebFetch(args.value("url", ""));
+        if (name == "web_search") return WebSearch(args.value("query", ""));
     } catch (...) {}
     return "Error: unknown tool " + name;
 }
@@ -366,6 +611,18 @@ static std::string ToolDefsJson() {
     tools.push_back({{"type","function"},{"function",{
         {"name","list_directory"},{"description","List directory contents with details"},
         {"parameters",{{"type","object"},{"properties",{{"path",{{"type","string"},{"description","Directory path (default: current directory)"}}}}},{"required",json::array()}}}
+    }}});
+    tools.push_back({{"type","function"},{"function",{
+        {"name","web_fetch"},{"description","Fetch a web page by URL and return its readable text content (HTML tags stripped). Use for reading docs, articles, or any HTTP(S) resource. Output is truncated to 30000 chars."},
+        {"parameters",{{"type","object"},{"properties",{
+            {"url",{{"type","string"},{"description","Absolute http:// or https:// URL to fetch"}}}
+        }},{"required",json::array({"url"})}}}
+    }}});
+    tools.push_back({{"type","function"},{"function",{
+        {"name","web_search"},{"description","Search the web via DuckDuckGo and return result titles, URLs, and snippets as plain text. Use to find current information, documentation, or pages to follow up on with web_fetch."},
+        {"parameters",{{"type","object"},{"properties",{
+            {"query",{{"type","string"},{"description","Search query"}}}
+        }},{"required",json::array({"query"})}}}
     }}});
     return tools.dump();
 }
