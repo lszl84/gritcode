@@ -17,6 +17,7 @@
 #include "markdown_renderer.h"
 #include <cmark.h>
 #include <stack>
+#include <cstring>
 
 MarkdownRenderer::MarkdownRenderer(int baseSizePt) : baseSizePt_(baseSizePt) {}
 
@@ -108,14 +109,10 @@ struct WalkState {
     }
 };
 
-} // namespace
-
-std::vector<std::unique_ptr<TextBlock>> MarkdownRenderer::Render(
-    const std::string& markdown, bool isDarkTheme) const {
-    cmark_node* doc = cmark_parse_document(markdown.c_str(), markdown.size(), CMARK_OPT_DEFAULT);
-    if (!doc) return {};
-
-    WalkState state(this, isDarkTheme);
+// Walk a cmark document into the shared WalkState. Used both for the main
+// non-table markdown regions and — with a fresh state — for parsing the
+// inline formatting inside a single table cell.
+void WalkDocument(cmark_node* doc, WalkState& state, bool isDarkTheme) {
     cmark_iter* iter = cmark_iter_new(doc);
     cmark_event_type evType;
 
@@ -211,11 +208,9 @@ std::vector<std::unique_ptr<TextBlock>> MarkdownRenderer::Render(
                 state.FlushBlock();
                 auto* hr = new TextBlock(BlockType::NORMAL, "");
                 hr->isCollapsed = false;
-                std::string line(40, '\xe2');
-                // U+2500 box drawing horizontal
-                line.clear();
-                for (int i = 0; i < 40; i++) line += "\xe2\x94\x80";
-                hr->runs.push_back({line, FontStyle::Regular, TextColour(isDarkTheme)});
+                std::string line;
+                for (int i = 0; i < 40; i++) line += "\xe2\x94\x80";  // U+2500
+                hr->runs.push_back({line, FontStyle::Regular, MarkdownRenderer::TextColour(isDarkTheme)});
                 hr->text = hr->GetFullText();
                 state.blocks.push_back(std::unique_ptr<TextBlock>(hr));
             }
@@ -280,7 +275,258 @@ std::vector<std::unique_ptr<TextBlock>> MarkdownRenderer::Render(
 
     state.FlushBlock();
     cmark_iter_free(iter);
+}
+
+// Parse a chunk of markdown through cmark and return the resulting blocks.
+// Used for every region of the input that isn't a GFM table.
+std::vector<std::unique_ptr<TextBlock>> RenderNonTable(const MarkdownRenderer* renderer,
+                                                       const std::string& markdown,
+                                                       bool isDarkTheme) {
+    if (markdown.empty()) return {};
+    cmark_node* doc = cmark_parse_document(markdown.c_str(), markdown.size(), CMARK_OPT_DEFAULT);
+    if (!doc) return {};
+
+    WalkState state(renderer, isDarkTheme);
+    WalkDocument(doc, state, isDarkTheme);
+    cmark_node_free(doc);
+    return std::move(state.blocks);
+}
+
+// Parse the inline formatting inside a single table cell. The cell's text is
+// fed to cmark as a one-paragraph document; the first resulting block's runs
+// are what we want. Falls back to a single plain-text run on anything weird.
+std::vector<StyledTextRun> ParseCellRuns(const std::string& cellText, bool isDarkTheme) {
+    if (cellText.empty()) return {};
+    cmark_node* doc = cmark_parse_document(cellText.c_str(), cellText.size(), CMARK_OPT_DEFAULT);
+    if (!doc) {
+        return {{cellText, FontStyle::Regular, MarkdownRenderer::TextColour(isDarkTheme)}};
+    }
+    WalkState state(nullptr, isDarkTheme);
+    WalkDocument(doc, state, isDarkTheme);
     cmark_node_free(doc);
 
-    return std::move(state.blocks);
+    if (state.blocks.empty() || state.blocks[0]->runs.empty()) {
+        return {{cellText, FontStyle::Regular, MarkdownRenderer::TextColour(isDarkTheme)}};
+    }
+    return std::move(state.blocks[0]->runs);
+}
+
+// --- GFM table detection + parsing ----------------------------------------
+//
+// We hand-parse GFM tables before cmark ever sees them. Base cmark treats the
+// whole thing as a paragraph with pipes and dashes as literal text, so to get
+// a table block out we need to identify the span and pull it aside.
+//
+// The parser is intentionally tolerant: leading/trailing pipes optional,
+// escaped pipes (\|) survive the cell split, alignment colons on the delimiter
+// row drive per-column alignment, and rows with a wrong number of cells are
+// padded or truncated rather than rejected.
+
+std::vector<std::string> SplitInputIntoLines(const std::string& s) {
+    std::vector<std::string> out;
+    size_t pos = 0;
+    while (pos <= s.size()) {
+        size_t nl = s.find('\n', pos);
+        if (nl == std::string::npos) {
+            out.push_back(s.substr(pos));
+            break;
+        }
+        out.push_back(s.substr(pos, nl - pos));
+        pos = nl + 1;
+    }
+    return out;
+}
+
+// Trim leading/trailing ASCII whitespace (and \r).
+std::string Trim(const std::string& s) {
+    size_t a = 0, b = s.size();
+    while (a < b && (s[a] == ' ' || s[a] == '\t' || s[a] == '\r')) a++;
+    while (b > a && (s[b - 1] == ' ' || s[b - 1] == '\t' || s[b - 1] == '\r')) b--;
+    return s.substr(a, b - a);
+}
+
+// Split a table row on unescaped `|`. Strips one leading and one trailing
+// pipe (GFM tolerates either). Returns cell strings with outer whitespace
+// trimmed, backslash-pipe escapes unescaped to a literal pipe.
+std::vector<std::string> SplitTableRow(const std::string& line) {
+    std::string trimmed = Trim(line);
+    size_t start = 0;
+    size_t end = trimmed.size();
+    if (start < end && trimmed[start] == '|') start++;
+    if (end > start && trimmed[end - 1] == '|') {
+        // Only strip a trailing pipe if it's not escaped.
+        if (end - start < 2 || trimmed[end - 2] != '\\') end--;
+    }
+
+    std::vector<std::string> cells;
+    std::string cur;
+    for (size_t i = start; i < end; i++) {
+        char c = trimmed[i];
+        if (c == '\\' && i + 1 < end && trimmed[i + 1] == '|') {
+            cur += '|';
+            i++;
+        } else if (c == '|') {
+            cells.push_back(Trim(cur));
+            cur.clear();
+        } else {
+            cur += c;
+        }
+    }
+    cells.push_back(Trim(cur));
+    return cells;
+}
+
+// Test whether a line can be a GFM delimiter row and, if so, report its
+// per-column alignment into `alignOut`. Each cell must be non-empty and
+// contain only dashes with optional leading/trailing `:`.
+bool IsDelimiterRow(const std::string& line, std::vector<int>& alignOut) {
+    std::string t = Trim(line);
+    if (t.empty()) return false;
+    // Must contain a pipe OR at least match the --- pattern between pipes.
+    // Strip outer pipes.
+    size_t a = 0, b = t.size();
+    if (a < b && t[a] == '|') a++;
+    if (b > a && t[b - 1] == '|') b--;
+    if (b <= a) return false;
+
+    alignOut.clear();
+    std::string inner = t.substr(a, b - a);
+    std::string cur;
+    auto process = [&](const std::string& cell) -> bool {
+        std::string c = Trim(cell);
+        if (c.empty()) return false;
+        bool leftColon = (c.front() == ':');
+        bool rightColon = (c.back() == ':');
+        size_t s = leftColon ? 1 : 0;
+        size_t e = rightColon ? c.size() - 1 : c.size();
+        if (e <= s) return false;
+        for (size_t i = s; i < e; i++) if (c[i] != '-') return false;
+        int al = -1;
+        if (leftColon && rightColon) al = 0;
+        else if (rightColon) al = 1;
+        else al = -1;
+        alignOut.push_back(al);
+        return true;
+    };
+    for (size_t i = 0; i < inner.size(); i++) {
+        if (inner[i] == '|') {
+            if (!process(cur)) return false;
+            cur.clear();
+        } else {
+            cur += inner[i];
+        }
+    }
+    if (!process(cur)) return false;
+    return !alignOut.empty();
+}
+
+// A line is "table-shaped" if after trimming it contains at least one pipe
+// outside of backticks. This is the gate used to grow body rows.
+bool LineLooksTabular(const std::string& line) {
+    std::string t = Trim(line);
+    if (t.empty()) return false;
+    bool inCode = false;
+    for (size_t i = 0; i < t.size(); i++) {
+        char c = t[i];
+        if (c == '`') { inCode = !inCode; continue; }
+        if (c == '\\' && i + 1 < t.size()) { i++; continue; }
+        if (c == '|' && !inCode) return true;
+    }
+    return false;
+}
+
+// Try to parse a GFM table starting at `startIdx`. On success fills `outBlock`
+// with a TABLE-typed TextBlock and sets `endIdx` to the first line after the
+// table. On failure, returns false and leaves outputs untouched.
+bool TryParseTable(const std::vector<std::string>& lines,
+                   size_t startIdx,
+                   size_t& endIdx,
+                   std::unique_ptr<TextBlock>& outBlock,
+                   bool isDarkTheme) {
+    if (startIdx + 1 >= lines.size()) return false;
+    const std::string& headerLine = lines[startIdx];
+    const std::string& delimLine = lines[startIdx + 1];
+    if (!LineLooksTabular(headerLine)) return false;
+
+    std::vector<int> alignment;
+    if (!IsDelimiterRow(delimLine, alignment)) return false;
+
+    auto headerCells = SplitTableRow(headerLine);
+    if (headerCells.empty()) return false;
+
+    int numCols = (int)headerCells.size();
+    // Normalize alignment length to numCols: pad left-aligned or truncate.
+    while ((int)alignment.size() < numCols) alignment.push_back(-1);
+    if ((int)alignment.size() > numCols) alignment.resize(numCols);
+
+    auto block = std::make_unique<TextBlock>(BlockType::TABLE, "");
+    block->tableCols = numCols;
+    block->tableAlign = std::move(alignment);
+
+    auto addRow = [&](const std::vector<std::string>& cells) {
+        std::vector<TableCell> row;
+        row.reserve(numCols);
+        for (int c = 0; c < numCols; c++) {
+            TableCell cell;
+            if (c < (int)cells.size()) {
+                cell.runs = ParseCellRuns(cells[c], isDarkTheme);
+            }
+            row.push_back(std::move(cell));
+        }
+        block->tableRows.push_back(std::move(row));
+    };
+
+    addRow(headerCells);
+
+    size_t i = startIdx + 2;
+    while (i < lines.size()) {
+        const std::string& ln = lines[i];
+        if (Trim(ln).empty()) break;
+        if (!LineLooksTabular(ln)) break;
+        addRow(SplitTableRow(ln));
+        i++;
+    }
+
+    endIdx = i;
+    outBlock = std::move(block);
+    return true;
+}
+
+}  // namespace
+
+std::vector<std::unique_ptr<TextBlock>> MarkdownRenderer::Render(
+    const std::string& markdown, bool isDarkTheme) const {
+    // Fast path: no pipes anywhere → no tables possible, one cmark call.
+    if (markdown.find('|') == std::string::npos) {
+        return RenderNonTable(this, markdown, isDarkTheme);
+    }
+
+    auto lines = SplitInputIntoLines(markdown);
+    std::vector<std::unique_ptr<TextBlock>> blocks;
+    std::string buffer;
+
+    auto flushBuffer = [&]() {
+        if (buffer.empty()) return;
+        auto sub = RenderNonTable(this, buffer, isDarkTheme);
+        for (auto& b : sub) blocks.push_back(std::move(b));
+        buffer.clear();
+    };
+
+    size_t i = 0;
+    while (i < lines.size()) {
+        size_t tableEnd = 0;
+        std::unique_ptr<TextBlock> tableBlock;
+        if (TryParseTable(lines, i, tableEnd, tableBlock, isDarkTheme)) {
+            flushBuffer();
+            blocks.push_back(std::move(tableBlock));
+            i = tableEnd;
+            continue;
+        }
+        buffer += lines[i];
+        buffer += '\n';
+        i++;
+    }
+    flushBuffer();
+
+    return blocks;
 }

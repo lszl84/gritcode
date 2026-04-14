@@ -175,6 +175,11 @@ json MCPServer::HandleRequest(const json& request) {
         if (cb_.getLastAssistant) result = cb_.getLastAssistant();
         else result = {{"text", ""}};
 
+    } else if (method == "selectAllText") {
+        std::lock_guard<std::mutex> lock(cbMutex_);
+        if (cb_.selectAllText) result = {{"text", cb_.selectAllText()}};
+        else result = {{"text", ""}};
+
     } else if (method == "setProvider") {
         std::string provider = params.value("provider", "");
         std::string model = params.value("model", "");

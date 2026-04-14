@@ -101,6 +101,19 @@ private:
     std::vector<float> blockHeightCache_;
     std::vector<float> charHeightCache_;
     std::vector<float> blockTopCache_;
+
+    // Per-block table chrome info — populated only for BlockType::TABLE blocks
+    // so Paint can draw the background, header rule, and column dividers
+    // without re-deriving column geometry from scratch.
+    struct TableLayoutInfo {
+        std::vector<float> colX;   // left edge of each column, relative to block's text area
+        std::vector<float> colW;   // per-column content widths
+        float hPad = 0;            // horizontal padding inside each cell
+        float vPad = 0;            // vertical padding inside each cell
+        float headerBottomY = 0;   // y of the rule under the header row, relative to block top
+        float totalW = 0;          // full table width (from colX[0] to right edge of last col)
+    };
+    std::vector<TableLayoutInfo> tableLayoutCache_;
     float cachedTotalH_ = 0;
     int cachedW_ = -1;
     bool needsFullRebuild_ = true;
@@ -134,6 +147,8 @@ private:
     void MeasureStyledSegments(size_t idx);
     void LayoutFromSegments(size_t idx, float textAreaW, float clientW,
                             std::vector<WrappedLine>& out, float& outH);
+    void LayoutTable(size_t idx, float textAreaW, float clientW,
+                     std::vector<WrappedLine>& out, float& outH);
     WrappedLine MakeLine(const std::string& text, bool rtl, float textW,
                          float textH, float margin, float clientW, int indent = 0);
 

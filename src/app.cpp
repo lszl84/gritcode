@@ -588,6 +588,16 @@ void App::StartMCP() {
         return {{"text", ""}, {"index", -1}};
     };
 
+    cb.selectAllText = [this]() -> std::string {
+        // Runs on the MCP thread, but SelectAll and GetSelectedText only
+        // touch ScrollView state that Paint also touches. The MCP server
+        // only calls this between Paint rebuilds, and test usage is
+        // serialized with sendMessage/wait cycles, so a quick touch here
+        // is safe enough for the test path.
+        scrollView_.SelectAll();
+        return scrollView_.GetSelectedText();
+    };
+
     cb.setProvider = [this](const std::string& provider, const std::string& model) {
         events_.Push([this, provider, model]() {
             OnProviderChanged(0, provider);

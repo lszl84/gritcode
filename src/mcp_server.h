@@ -31,6 +31,9 @@ struct MCPCallbacks {
     std::function<json()> getConversation;     // Full conversation blocks text
     std::function<json()> getLastAssistant;    // Just the last assistant response
     std::function<void(const std::string& provider, const std::string& model)> setProvider;
+    // Trigger Select-All and return the text the scroll view would place on
+    // the clipboard. Used for end-to-end copy verification in tests.
+    std::function<std::string()> selectAllText;
 };
 
 // Simple TCP-based JSON-RPC server for controlling FCN programmatically.

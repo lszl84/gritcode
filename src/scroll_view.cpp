@@ -518,6 +518,344 @@ void ScrollView::LayoutFromSegments(size_t idx, float textAreaW, float clientW,
     }
 }
 
+// --- Table layout ----------------------------------------------------------
+//
+// Lays out a BlockType::TABLE block into WrappedLines that the existing paint
+// path can draw. Each row expands to N wrapped lines where N = max line count
+// among its cells after wrapping to the cell's column width. Each resulting
+// WrappedLine's `.text` is the tab-joined cell portions on that visual line,
+// `styledRuns` is the concatenation of cells' runs on that line (no separator
+// runs — the tab characters live only in `.text`), `runXOffsets` carries the
+// per-cell column X so cells land in the right column, and `caretX` is
+// precomputed so hit-testing jumps cleanly across the gap between cells.
+//
+// Copy-to-clipboard falls out for free: the `.text` already contains tabs,
+// which is what selection extraction emits.
+
+namespace {
+
+// One run, sliced down to a portion that fits on one visual line of a cell.
+struct CellChunk {
+    std::string text;      // word or whitespace run
+    float width;           // measured width
+    FontStyle style;
+    Color color;
+    bool isSpace;          // whitespace chunk (dropped at start of new cell line)
+};
+
+// Split a single StyledTextRun into word/space chunks, measuring each word's
+// width in its own style. Hard newlines inside cell runs are treated like a
+// space (cells don't support multi-line runs in v1).
+void ChunkCellRun(const StyledTextRun& run, FontManager& fonts, std::vector<CellChunk>& out) {
+    const std::string& text = run.text;
+    if (text.empty()) return;
+    float spW = fonts.SpaceWidth(run.style);
+    size_t i = 0;
+    while (i < text.size()) {
+        char c = text[i];
+        if (c == ' ' || c == '\t' || c == '\n' || c == '\r') {
+            out.push_back({" ", spW, run.style, run.color, true});
+            i++;
+            continue;
+        }
+        size_t j = i;
+        while (j < text.size()) {
+            char cc = text[j];
+            if (cc == ' ' || cc == '\t' || cc == '\n' || cc == '\r') break;
+            j++;
+        }
+        std::string word = text.substr(i, j - i);
+        float w = fonts.MeasureWidth(word, run.style, false);
+        out.push_back({word, w, run.style, run.color, false});
+        i = j;
+    }
+}
+
+// Greedy word-wrap a cell's chunk list into visual lines. Each output line is
+// a list of styled runs (adjacent same-style chunks get merged). Returns the
+// max line width actually used.
+struct CellVisualLine {
+    std::vector<StyledTextRun> runs;
+    float width = 0;
+};
+
+float WrapCellChunks(const std::vector<CellChunk>& chunks, float maxW,
+                     FontManager& fonts, std::vector<CellVisualLine>& out) {
+    out.clear();
+    if (chunks.empty()) return 0;
+
+    auto pushRun = [](CellVisualLine& line, const CellChunk& ch) {
+        if (!line.runs.empty() && line.runs.back().style == ch.style &&
+            line.runs.back().color.r == ch.color.r &&
+            line.runs.back().color.g == ch.color.g &&
+            line.runs.back().color.b == ch.color.b) {
+            line.runs.back().text += ch.text;
+        } else {
+            line.runs.push_back({ch.text, ch.style, ch.color});
+        }
+        line.width += ch.width;
+    };
+
+    CellVisualLine current;
+    bool lineEmpty = true;
+    float maxUsed = 0;
+    for (const auto& ch : chunks) {
+        if (ch.isSpace) {
+            if (lineEmpty) continue;  // drop leading whitespace
+            // Tentatively keep the space; a following word may force a wrap.
+            if (current.width + ch.width > maxW) {
+                // Wrap here, dropping the trailing space.
+                if (current.width > maxUsed) maxUsed = current.width;
+                out.push_back(std::move(current));
+                current = {};
+                lineEmpty = true;
+                continue;
+            }
+            pushRun(current, ch);
+            continue;
+        }
+
+        // Word chunk. If it doesn't fit and line isn't empty, wrap first.
+        // A word wider than the column overflows rather than getting chopped
+        // mid-word — keeps code identifiers and URLs readable.
+        if (!lineEmpty && current.width + ch.width > maxW) {
+            if (current.width > maxUsed) maxUsed = current.width;
+            out.push_back(std::move(current));
+            current = {};
+            lineEmpty = true;
+        }
+        pushRun(current, ch);
+        lineEmpty = false;
+
+        // If a single word alone already fills the column, force-wrap after it
+        // so subsequent words start on a fresh line.
+        if (current.width >= maxW) {
+            if (current.width > maxUsed) maxUsed = current.width;
+            out.push_back(std::move(current));
+            current = {};
+            lineEmpty = true;
+        }
+    }
+    if (!lineEmpty || out.empty()) {
+        // Strip any trailing pure-whitespace run to keep widths tight.
+        while (!current.runs.empty()) {
+            auto& last = current.runs.back();
+            bool allSpace = true;
+            for (char c : last.text) if (c != ' ' && c != '\t') { allSpace = false; break; }
+            if (!allSpace) break;
+            current.width -= fonts.MeasureWidth(last.text, last.style, false);
+            current.runs.pop_back();
+        }
+        if (current.width > maxUsed) maxUsed = current.width;
+        out.push_back(std::move(current));
+    }
+    return maxUsed;
+}
+
+// Measure the max-content width (full unwrapped) and min-content width
+// (widest single word) of a cell. Both need to be known to do reasonable
+// column fitting under a tight width budget.
+void MeasureCellContent(const std::vector<CellChunk>& chunks,
+                        float& minContentOut, float& maxContentOut) {
+    float maxContent = 0;
+    float minContent = 0;
+    for (const auto& ch : chunks) {
+        maxContent += ch.width;
+        if (!ch.isSpace && ch.width > minContent) minContent = ch.width;
+    }
+    minContentOut = minContent;
+    maxContentOut = maxContent;
+}
+
+}  // namespace
+
+void ScrollView::LayoutTable(size_t idx, float textAreaW, float,
+                              std::vector<WrappedLine>& out, float& outH) {
+    out.clear();
+    outH = 0;
+
+    auto& block = *blocks_[idx];
+    int numCols = block.tableCols;
+    if (numCols <= 0 || block.tableRows.empty()) return;
+
+    // Table padding + chrome sizing. Keep it subtle to match the rest of the app.
+    const float hPad = 10;             // horizontal padding inside each cell
+    const float vPad = 4;              // vertical padding above/below each cell line
+    const float rowGap = 0;            // rows touch; the rule lines separate them visually
+
+    FontStyle bodyStyle = FontStyle::Regular;
+    float lineH = fonts_.LineHeight(bodyStyle);
+
+    // Step 1: chunk every cell so we can measure and wrap against a column
+    // width without re-parsing runs.
+    std::vector<std::vector<std::vector<CellChunk>>> chunkGrid(block.tableRows.size());
+    for (size_t r = 0; r < block.tableRows.size(); r++) {
+        auto& row = block.tableRows[r];
+        chunkGrid[r].resize(numCols);
+        for (int c = 0; c < numCols && c < (int)row.size(); c++) {
+            for (auto& run : row[c].runs) ChunkCellRun(run, fonts_, chunkGrid[r][c]);
+        }
+    }
+
+    // Step 2: per-column min/max content widths.
+    std::vector<float> colMin(numCols, 0), colMax(numCols, 0);
+    for (int c = 0; c < numCols; c++) {
+        for (size_t r = 0; r < chunkGrid.size(); r++) {
+            float mn = 0, mx = 0;
+            MeasureCellContent(chunkGrid[r][c], mn, mx);
+            if (mn > colMin[c]) colMin[c] = mn;
+            if (mx > colMax[c]) colMax[c] = mx;
+        }
+    }
+
+    // Step 3: fit columns into textAreaW. Budget = textAreaW minus all cell
+    // padding (2 * hPad per column).
+    float paddingTotal = numCols * hPad * 2;
+    float budget = textAreaW - paddingTotal;
+    if (budget < numCols * 20) budget = (float)(numCols * 20);  // floor
+
+    std::vector<float> colW(numCols, 0);
+    float maxSum = 0;
+    for (int c = 0; c < numCols; c++) maxSum += colMax[c];
+
+    if (maxSum <= budget) {
+        // Everything fits — use max-content widths and let the table be
+        // narrower than the viewport.
+        for (int c = 0; c < numCols; c++) colW[c] = colMax[c];
+    } else {
+        // Need to shrink. Start with max-content, then proportionally shrink
+        // columns whose width is above their min-content, pulling down until
+        // the sum fits. A couple of passes handle most cases cleanly.
+        for (int c = 0; c < numCols; c++) colW[c] = colMax[c];
+        for (int pass = 0; pass < 4; pass++) {
+            float curSum = 0;
+            for (int c = 0; c < numCols; c++) curSum += colW[c];
+            if (curSum <= budget + 0.5f) break;
+            float shrinkable = 0;
+            for (int c = 0; c < numCols; c++) {
+                if (colW[c] > colMin[c]) shrinkable += (colW[c] - colMin[c]);
+            }
+            if (shrinkable <= 0.5f) break;
+            float excess = curSum - budget;
+            float factor = std::min(1.0f, excess / shrinkable);
+            for (int c = 0; c < numCols; c++) {
+                float slack = colW[c] - colMin[c];
+                if (slack > 0) colW[c] -= slack * factor;
+            }
+        }
+        // Final clamp to the budget in case min-content still overflows.
+        float curSum = 0;
+        for (int c = 0; c < numCols; c++) curSum += colW[c];
+        if (curSum > budget) {
+            float scale = budget / curSum;
+            for (int c = 0; c < numCols; c++) colW[c] *= scale;
+        }
+    }
+
+    // Step 4: column X positions (relative to the line's left edge).
+    std::vector<float> colX(numCols, 0);
+    float xAccum = 0;
+    for (int c = 0; c < numCols; c++) {
+        colX[c] = xAccum;
+        xAccum += colW[c] + hPad * 2;
+    }
+    float totalW = xAccum;
+
+    // Step 5: per-row wrap and visual line emission.
+    if (idx >= tableLayoutCache_.size()) tableLayoutCache_.resize(idx + 1);
+    TableLayoutInfo& info = tableLayoutCache_[idx];
+    info = {};
+    info.colX = colX;
+    info.colW = colW;
+    info.hPad = hPad;
+    info.vPad = vPad;
+    info.totalW = totalW;
+
+    for (size_t r = 0; r < block.tableRows.size(); r++) {
+        // Wrap every cell independently to its column width.
+        std::vector<std::vector<CellVisualLine>> cellLines(numCols);
+        size_t rowVisLines = 1;
+        for (int c = 0; c < numCols; c++) {
+            WrapCellChunks(chunkGrid[r][c], colW[c], fonts_, cellLines[c]);
+            if (cellLines[c].size() > rowVisLines) rowVisLines = cellLines[c].size();
+        }
+
+        for (size_t v = 0; v < rowVisLines; v++) {
+            WrappedLine wl;
+            wl.rightToLeft = false;
+            wl.x = leftMargin_;
+            wl.y = outH;
+            wl.width = totalW;
+            wl.height = lineH + vPad * 2;
+            wl.tableRow = (int)r;
+
+            std::string flatText;
+            std::vector<StyledTextRun> flatRuns;
+            std::vector<float> flatOffsets;
+            std::vector<int> runStarts;
+            std::vector<float> caretX;
+            caretX.push_back(0.0f);
+            int charAccum = 0;
+
+            for (int c = 0; c < numCols; c++) {
+                float cellLeft = colX[c] + hPad;
+
+                // Does this cell have content on visual line v?
+                if (v < cellLines[c].size()) {
+                    auto& cvl = cellLines[c][v];
+                    // Alignment offset: left=0, center=slack/2, right=slack.
+                    float slack = colW[c] - cvl.width;
+                    if (slack < 0) slack = 0;
+                    int al = (c < (int)block.tableAlign.size()) ? block.tableAlign[c] : -1;
+                    float alignOffset = (al == 0) ? slack / 2 : (al == 1 ? slack : 0);
+                    float cellRunX = cellLeft + alignOffset;
+
+                    float cellCumX = 0;
+                    for (auto& run : cvl.runs) {
+                        runStarts.push_back(charAccum);
+                        flatRuns.push_back(run);
+                        flatOffsets.push_back(cellRunX + cellCumX);
+
+                        auto positions = fonts_.CaretPositions(run.text, run.style, false);
+                        int rc = utf8_codepoint_count(run.text);
+                        for (int i = 1; i <= rc; i++) {
+                            caretX.push_back(cellRunX + cellCumX + positions[i]);
+                        }
+                        if (!positions.empty()) cellCumX += positions.back();
+                        flatText += run.text;
+                        charAccum += rc;
+                    }
+                }
+
+                // Tab separator between cells (not after the last column).
+                // Lives in .text so selection copy gets cell separators for
+                // free; no styled run, so nothing draws at the gap.
+                if (c + 1 < numCols) {
+                    flatText += '\t';
+                    // Caret position after the tab lands at the next cell's left edge.
+                    caretX.push_back(colX[c + 1] + hPad);
+                    charAccum += 1;
+                }
+            }
+
+            wl.text = std::move(flatText);
+            wl.styledRuns = std::move(flatRuns);
+            wl.runXOffsets = std::move(flatOffsets);
+            wl.runCharStarts = std::move(runStarts);
+            wl.caretX = std::move(caretX);
+            wl.caretXValid = true;
+
+            out.push_back(std::move(wl));
+            outH += lineH + vPad * 2;
+        }
+
+        // Remember where the header rule should sit.
+        if (r == 0) info.headerBottomY = outH;
+
+        outH += rowGap;
+    }
+}
+
 void ScrollView::RebuildBlockTopCache() {
     size_t n = blockHeightCache_.size();
     blockTopCache_.resize(n + 1);
@@ -597,6 +935,34 @@ std::string ScrollView::TextBetween(const TextPosition& start, const TextPositio
         auto& lines = wrappedCache_[bi];
         int firstL = (bi == start.block) ? start.line : 0;
         int lastL = (bi == end.block) ? end.line : (int)lines.size() - 1;
+
+        // Table blocks: rebuild rows from the source data rather than
+        // reassembling the wrapped visual-line pieces. This avoids the
+        // ugly "\n\t<continuation>" artefact that falls out of a cell that
+        // wrapped across multiple visual lines, and matches the Excel /
+        // Sheets clipboard convention (one row per line, tab between cells).
+        if (bi < (int)blocks_.size() && blocks_[bi]->type == BlockType::TABLE) {
+            auto& block = *blocks_[bi];
+            int rowMin = -1, rowMax = -1;
+            for (int li = firstL; li <= lastL && li < (int)lines.size(); li++) {
+                int tr = lines[li].tableRow;
+                if (tr < 0) continue;
+                if (rowMin < 0 || tr < rowMin) rowMin = tr;
+                if (tr > rowMax) rowMax = tr;
+            }
+            if (rowMax >= 0) {
+                for (int r = rowMin; r <= rowMax && r < (int)block.tableRows.size(); r++) {
+                    auto& row = block.tableRows[r];
+                    for (size_t c = 0; c < row.size(); c++) {
+                        if (c > 0) result += '\t';
+                        for (auto& run : row[c].runs) result += run.text;
+                    }
+                    if (r < rowMax || bi < end.block) result += '\n';
+                }
+            }
+            continue;
+        }
+
         for (int li = firstL; li <= lastL && li < (int)lines.size(); li++) {
             auto& wl = lines[li];
             int charLen = utf8_codepoint_count(wl.text);
@@ -955,9 +1321,20 @@ void ScrollView::Paint(GLRenderer& renderer) {
         segCache_.resize(blockCount);
         segValid_.assign(blockCount, false);    // Force re-measure ALL
         segTextLen_.assign(blockCount, 0);
+        tableLayoutCache_.clear();
+        tableLayoutCache_.resize(blockCount);
 
         for (size_t i = 0; i < blockCount; i++) {
             auto& block = *blocks_[i];
+            float h = 0;
+            if (block.type == BlockType::TABLE) {
+                LayoutTable(i, textAreaW, clientW, wrappedCache_[i], h);
+                shapedCache_[i].clear();
+                segValid_[i] = true;
+                blockHeightCache_[i] = h;
+                charHeightCache_[i] = fonts_.LineHeight(FontStyle::Regular);
+                continue;
+            }
             if (!segValid_[i]) {
                 if (block.HasStyledRuns())
                     MeasureStyledSegments(i);
@@ -965,7 +1342,6 @@ void ScrollView::Paint(GLRenderer& renderer) {
                     MeasureSegments(i);
             }
 
-            float h = 0;
             LayoutFromSegments(i, textAreaW, clientW, wrappedCache_[i], h);
             shapedCache_[i].clear(); // New lines need fresh shapes
 
@@ -1067,6 +1443,30 @@ void ScrollView::Paint(GLRenderer& renderer) {
             renderer.DrawRect(leftMargin_ - 8, blockTop - bgPad, 3, blockH + bgPad * 2, userPromptColor_);
         }
 
+        // Table chrome: subtle background panel, thin rule under the header,
+        // and faint vertical dividers between columns. Drawn before the text
+        // so per-line glyphs render on top.
+        if (block.type == BlockType::TABLE && i < tableLayoutCache_.size()) {
+            auto& tinfo = tableLayoutCache_[i];
+            if (!tinfo.colX.empty() && !wrappedCache_[i].empty()) {
+                Color tableBg = Color::RGB(40, 40, 43);
+                Color ruleColor = Color::RGB(90, 90, 95);
+                Color dividerColor = Color::RGB(60, 60, 64);
+                renderer.DrawRect(leftMargin_ - 4, blockTop - 2,
+                                  tinfo.totalW + 8, blockH + 4, tableBg);
+                // Column dividers (skip the leftmost edge).
+                for (size_t c = 1; c < tinfo.colX.size(); c++) {
+                    float dx = leftMargin_ + tinfo.colX[c];
+                    renderer.DrawRect(dx - 0.5f, blockTop - 2, 1, blockH + 4, dividerColor);
+                }
+                // Header rule.
+                if (tinfo.headerBottomY > 0) {
+                    renderer.DrawRect(leftMargin_ - 4, blockTop + tinfo.headerBottomY - 1,
+                                      tinfo.totalW + 8, 1.5f, ruleColor);
+                }
+            }
+        }
+
         // Thinking collapse/expand triangle (only for expandable blocks)
         if (block.type == BlockType::THINKING && block.isExpandable && !wrappedCache_[i].empty()) {
             float ch = fonts_.LineHeight(FontStyle::ThinkingItalic);
@@ -1131,7 +1531,13 @@ void ScrollView::Paint(GLRenderer& renderer) {
 
             // Draw text using cached shapes with per-glyph selection coloring
             if (!wl.styledRuns.empty() && shapes.size() == wl.styledRuns.size()) {
-                // Build byte-to-char map for selection coloring
+                // Build byte-to-char map for selection coloring. Table rows
+                // carry explicit per-run starting char offsets (runCharStarts)
+                // because the tab characters between cells live in `.text`
+                // but have no matching styled run, which desynchronises the
+                // default running accumulator.
+                bool useExplicitStarts = !wl.runCharStarts.empty() &&
+                                         wl.runCharStarts.size() == wl.styledRuns.size();
                 int charAcc = 0;
                 for (size_t ri = 0; ri < wl.styledRuns.size(); ri++) {
                     auto& run = wl.styledRuns[ri];
@@ -1139,6 +1545,7 @@ void ScrollView::Paint(GLRenderer& renderer) {
                     float runX = wl.x + (ri < wl.runXOffsets.size() ? wl.runXOffsets[ri] : 0);
                     float runAsc = fonts_.Ascent(run.style);
                     int runChars = utf8_codepoint_count(run.text);
+                    int runStartChar = useExplicitStarts ? wl.runCharStarts[ri] : charAcc;
 
                     if (!lineSelected || (selFromChar == 0 && selToChar == lineCharLen)) {
                         // Full line: single color
@@ -1148,7 +1555,7 @@ void ScrollView::Paint(GLRenderer& renderer) {
                     } else {
                         // Per-glyph coloring for partial selection
                         for (auto& g : shaped.glyphs) {
-                            int gc = charAcc + utf8_byte_to_char(run.text, g.cluster);
+                            int gc = runStartChar + utf8_byte_to_char(run.text, g.cluster);
                             Color c = (gc >= selFromChar && gc < selToChar) ? selTextColor_ : run.color;
                             const GlyphInfo& gi = fonts_.EnsureGlyph(g.glyphId, g.faceIdx);
                             renderer.DrawGlyph(gi, runX + g.xPos, absY, c, runAsc);

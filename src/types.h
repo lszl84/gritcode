@@ -21,7 +21,7 @@
 #include <cstddef>
 #include <ctime>
 
-enum class BlockType { NORMAL, USER_PROMPT, THINKING, CODE, LOADING };
+enum class BlockType { NORMAL, USER_PROMPT, THINKING, CODE, LOADING, TABLE };
 
 // Platform-independent key/modifier constants
 namespace Key {
@@ -61,10 +61,20 @@ struct StyledTextRun {
     Color color;
 };
 
+// GFM table data. Only populated when BlockType::TABLE. Each cell carries its
+// own styled runs (bold/italic/code inside the cell). Alignment is per column:
+// -1 left, 0 center, 1 right.
+struct TableCell {
+    std::vector<StyledTextRun> runs;
+};
+
 struct TextBlock {
     BlockType type;
     std::string text;
     std::vector<StyledTextRun> runs;
+    std::vector<std::vector<TableCell>> tableRows;
+    std::vector<int> tableAlign;
+    int tableCols = 0;
     bool isLoading = false;
     bool rightToLeft = false;
     int leftIndent = 0;
@@ -114,6 +124,19 @@ struct WrappedLine {
 
     std::vector<StyledTextRun> styledRuns;
     std::vector<float> runXOffsets;
+
+    // Set only by table layout. When non-empty, paint's per-glyph selection
+    // loop uses these as the explicit starting char offset of each run in
+    // `text` — overriding the default "sum of prior run char counts"
+    // accumulator. Table rows need this because the tab characters between
+    // cells live in `text` but have no corresponding styled run.
+    std::vector<int> runCharStarts;
+
+    // Index of the source table row this visual line belongs to (only set
+    // for BlockType::TABLE). -1 for non-table lines. Used by TextBetween to
+    // rebuild clean tab-separated row output from `TextBlock::tableRows`
+    // instead of stitching the visual-line pieces back together.
+    int tableRow = -1;
 
     mutable std::vector<float> caretX;
     mutable bool caretXValid = false;
