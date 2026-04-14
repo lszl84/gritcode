@@ -156,6 +156,14 @@ static void ResolveShellEnvAsync(EventQueue& events) {
 
 // Tool execution — uses O_CLOEXEC pipe so backgrounded processes (php -S ... &)
 // don't inherit the pipe fd and block reads forever.  120s timeout via alarm().
+// Process-group id of the currently-executing bash tool, published by
+// RunCommand for the duration of the child's lifetime. The Escape handler
+// reads this to deliver SIGKILL to the whole group, which unblocks the read
+// loop fast and lets the tool thread drop its (now-stale) result.
+// File scope so RunCommand can stay a free function (simpler than making it
+// a method for one atomic).
+static std::atomic<pid_t> g_toolPgid{0};
+
 static std::string RunCommand(const std::string& cmd) {
     int pfd[2];
     if (CloexecPipe(pfd) < 0) return "Error: pipe failed";
@@ -164,7 +172,7 @@ static std::string RunCommand(const std::string& cmd) {
     if (pid < 0) { close(pfd[0]); close(pfd[1]); return "Error: fork failed"; }
 
     if (pid == 0) {
-        // Child: new session so we can kill the group on timeout
+        // Child: new session so we can kill the group on timeout or cancel.
         setsid();
         close(pfd[0]);
         dup2(pfd[1], STDOUT_FILENO);
@@ -174,38 +182,84 @@ static std::string RunCommand(const std::string& cmd) {
         _exit(127);
     }
 
-    // Parent: read output with 120s timeout
+    // Parent.
     close(pfd[1]);
+    g_toolPgid.store(pid);
 
+    // Read loop. The old version waited for pipe EOF, which meant any
+    // orphaned grandchild that kept the stdout fd (e.g. `hugo serve -D &`)
+    // would hold the pipe open and stall the tool for the full 120 s
+    // timeout. New version treats bash's own exit as the primary "return
+    // now" signal — same behaviour Bun's spawn gives opencode for free —
+    // and drains any remaining buffered bytes before returning. Orphan
+    // holders don't matter once bash is gone.
     std::string result;
     char buf[4096];
     auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(120);
+    bool timedOut = false;
+    int status = 0;
+    bool reaped = false;
 
-    struct pollfd rpfd = {pfd[0], POLLIN, 0};
     while (true) {
-        auto remaining = std::chrono::duration_cast<std::chrono::milliseconds>(
-            deadline - std::chrono::steady_clock::now()).count();
-        if (remaining <= 0) {
-            result += "\n[killed: command timed out after 120s]";
-            kill(-pid, SIGKILL);  // Kill entire process group
+        if (!reaped) {
+            pid_t w = waitpid(pid, &status, WNOHANG);
+            if (w == pid) reaped = true;
+            else if (w < 0 && errno != EINTR) break;
+        }
+
+        auto now = std::chrono::steady_clock::now();
+        auto remainingMs = std::chrono::duration_cast<std::chrono::milliseconds>(
+            deadline - now).count();
+        if (!reaped && remainingMs <= 0) {
+            timedOut = true;
+            kill(-pid, SIGKILL);
+            // Fall through to keep draining / let waitpid catch the exit.
+            remainingMs = 200;
+        }
+
+        // Short poll: lets us detect bash exit within ~100 ms of it happening
+        // even if the pipe has nothing to read, and lets a SIGKILL from
+        // Escape or timeout take effect fast.
+        int pollMs = reaped ? 50 : 100;
+        if (!reaped && remainingMs >= 0 && remainingMs < pollMs)
+            pollMs = (int)remainingMs;
+        if (pollMs < 1) pollMs = 1;
+
+        struct pollfd rpfd = {pfd[0], POLLIN, 0};
+        int pret = poll(&rpfd, 1, pollMs);
+        if (pret > 0 && (rpfd.revents & POLLIN)) {
+            ssize_t n = read(pfd[0], buf, sizeof(buf));
+            if (n > 0) {
+                result.append(buf, n);
+                if (result.size() > 32768) { result += "\n...(truncated)"; break; }
+                continue;
+            }
+            if (n == 0) break;  // Pipe EOF (no holders left).
+            if (errno == EINTR) continue;
             break;
         }
-        int ret = poll(&rpfd, 1, (int)std::min(remaining, (decltype(remaining))1000));
-        if (ret < 0) break;
-        if (ret == 0) continue;
-        ssize_t n = read(pfd[0], buf, sizeof(buf));
-        if (n <= 0) break;
-        result.append(buf, n);
-        if (result.size() > 32768) { result += "\n...(truncated)"; break; }
+        if (pret < 0) {
+            if (errno == EINTR) continue;
+            break;
+        }
+
+        // poll timed out with no data this iteration.
+        if (reaped) break;  // bash done, pipe idle → nothing more to wait for.
     }
 
     close(pfd[0]);
-    // Reap child (and kill if still running)
-    int status = 0;
-    if (waitpid(pid, &status, WNOHANG) == 0) {
-        kill(-pid, SIGKILL);
-        waitpid(pid, &status, 0);
+
+    // Final reap (may have been killed by Escape; in that case it's usually
+    // already exited by the time we get here).
+    if (!reaped) {
+        if (waitpid(pid, &status, WNOHANG) == 0) {
+            kill(-pid, SIGKILL);
+            waitpid(pid, &status, 0);
+        }
     }
+    g_toolPgid.store(0);
+
+    if (timedOut) result += "\n[killed: command timed out after 120s]";
     if (WIFEXITED(status) && WEXITSTATUS(status) != 0)
         result += "\n[exit code: " + std::to_string(WEXITSTATUS(status)) + "]";
     return result;
@@ -592,6 +646,12 @@ void App::StartMCP() {
     cb.setWorkspace = [this](const std::string& cwd) {
         events_.Push([this, cwd]() {
             OnWorkspaceChanged(0, cwd);
+        });
+    };
+
+    cb.cancelRequest = [this]() {
+        events_.Push([this]() {
+            CancelInFlight();
         });
     };
 
@@ -1871,19 +1931,35 @@ void App::ExecuteToolCalls(const std::vector<json>& toolCalls, const std::string
     scrollView_.StartThinking(scrollView_.BlockCount() - 1);
     MarkDirty();
 
-    // Execute in background
+    // Snapshot the current generation so we can cancel mid-run. Escape bumps
+    // requestGen_ and synthesises tool_results inline, so the background
+    // thread must not clobber history when it finishes after the fact.
     auto tcCopy = toolCalls;
-    std::thread([this, tcCopy]() {
+    uint64_t gen = requestGen_.load();
+
+    std::thread([this, tcCopy, gen]() {
         struct Result { std::string id, output; };
         std::vector<Result> results;
         for (auto& tc : tcCopy) {
+            // User cancelled while we were running the previous tool — stop
+            // here, don't start another child process.
+            if (requestGen_.load() != gen) break;
             results.push_back({
                 tc.value("id", ""),
                 ExecuteTool(tc.value("name", ""), tc.value("arguments", "{}"))
             });
         }
 
-        events_.Push([this, results, tcCopy]() {
+        events_.Push([this, results, tcCopy, gen]() {
+            // If Escape fired while this thread was running, history has
+            // already been fixed up with synthetic tool_results and an
+            // assistant cancel marker. Drop the results on the floor.
+            if (requestGen_.load() != gen) {
+                scrollView_.StopThinking(scrollView_.BlockCount() - 1);
+                MarkDirty();
+                return;
+            }
+
             // Show results
             std::string resultText;
             for (size_t i = 0; i < results.size(); i++) {
@@ -1901,6 +1977,57 @@ void App::ExecuteToolCalls(const std::vector<json>& toolCalls, const std::string
             MarkDirty();
         });
     }).detach();
+}
+
+void App::CancelInFlight() {
+    if (!requestInProgress_) return;
+
+    // Bump generation so any finalizer from the cancelled request is
+    // dropped when it eventually arrives.
+    ++requestGen_;
+    httpClient_.Abort();
+    // Claude ACP: signal the child process group so fgets unblocks and
+    // the reader thread can finish and reap. Otherwise the detached
+    // thread lives on holding a pipe to an orphaned claude child.
+    pid_t cpid = claudePid_.exchange(-1);
+    if (cpid > 0) kill(-cpid, SIGTERM);
+    // Bash tool: if a RunCommand child is running, kill its whole group
+    // so the read loop unblocks within ~100ms (short-poll interval).
+    // The tool thread will see the bumped generation and drop its
+    // result in the main-thread finalizer lambda.
+    pid_t tpgid = g_toolPgid.exchange(0);
+    if (tpgid > 0) kill(-tpgid, SIGKILL);
+    requestInProgress_ = false;
+    sendButton_.enabled = true;
+
+    // History hygiene. Two cancel shapes we need to handle:
+    //   a) Last entry is a user message — the model hadn't replied yet.
+    //      Just mark as cancelled so the turn closes cleanly.
+    //   b) Last entry is an assistant message with outstanding tool_calls —
+    //      the model asked for tools and we were mid-run. The wire protocol
+    //      requires every tool_use to be followed by a matching tool_result
+    //      before any other turn, so synthesise a [cancelled by user]
+    //      tool_result for each pending id and only then append the
+    //      "[cancelled]" assistant marker. Without this, the next user send
+    //      builds a request with a dangling tool_use and the API returns 400.
+    if (!session_.History().empty()) {
+        auto& last = session_.History().back();
+        if (last.role == "assistant" && !last.toolCalls.empty()) {
+            auto pendingCalls = last.toolCalls;  // copy: we're about to mutate
+            for (auto& tc : pendingCalls) {
+                std::string id = tc.value("id", "");
+                session_.History().push_back({"tool", "[cancelled by user]", {}, id});
+            }
+            session_.History().push_back({"assistant", "[cancelled]", {}, {}});
+        } else if (last.role == "user") {
+            session_.History().push_back({"assistant", "[cancelled]", {}, {}});
+        }
+    }
+    scrollView_.StopAllAnimations();
+    receivingThinking_ = false;
+    responseBuffer_.clear();
+    AppendSystem("Cancelled");
+    MarkDirty();
 }
 
 // ============================================================================
@@ -2091,26 +2218,7 @@ void App::OnKey(int key, int mods, bool pressed) {
 
     // Escape cancels request
     if (key == XKB_KEY_Escape && requestInProgress_) {
-        // Bump generation so any finalizer from the cancelled request is
-        // dropped when it eventually arrives.
-        ++requestGen_;
-        httpClient_.Abort();
-        // Claude ACP: signal the child process group so fgets unblocks and
-        // the reader thread can finish and reap. Otherwise the detached
-        // thread lives on holding a pipe to an orphaned claude child.
-        pid_t cpid = claudePid_.exchange(-1);
-        if (cpid > 0) kill(-cpid, SIGTERM);
-        requestInProgress_ = false;
-        sendButton_.enabled = true;
-        if (!session_.History().empty() && session_.History().back().role == "user") {
-            // Keep message but mark as cancelled
-            session_.History().push_back({"assistant", "[cancelled]", {}, {}});
-        }
-        scrollView_.StopAllAnimations();
-        receivingThinking_ = false;
-        responseBuffer_.clear();
-        AppendSystem("Cancelled");
-        MarkDirty();
+        CancelInFlight();
         return;
     }
 

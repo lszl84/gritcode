@@ -162,6 +162,10 @@ private:
 
     // Tool execution
     void ExecuteToolCalls(const std::vector<json>& toolCalls, const std::string& content);
+    // Cancel the in-flight request, kill any running tool child, and fix up
+    // history so the next turn's wire request stays well-formed. Shared by
+    // the Escape key path and the MCP cancelRequest test hook.
+    void CancelInFlight();
     void RenderMarkdownToBlocks(bool isFinal = false);
     std::string BuildRequestJson();
     std::string BuildAnthropicRequestJson();

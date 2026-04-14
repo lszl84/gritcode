@@ -38,6 +38,11 @@ struct MCPCallbacks {
     // path the workspace dropdown does, so the "block while a request is in
     // flight" guard applies. Used for test verification of that guard.
     std::function<void(const std::string& cwd)> setWorkspace;
+    // Simulate the Escape key while a request is in flight. Runs the same
+    // path the keyboard handler does — bumps requestGen_, kills the tool
+    // pgid if any, and performs history hygiene. Used for test verification
+    // of the cancel path.
+    std::function<void()> cancelRequest;
 };
 
 // Simple TCP-based JSON-RPC server for controlling FCN programmatically.

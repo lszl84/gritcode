@@ -180,6 +180,11 @@ json MCPServer::HandleRequest(const json& request) {
         if (cb_.selectAllText) result = {{"text", cb_.selectAllText()}};
         else result = {{"text", ""}};
 
+    } else if (method == "cancelRequest") {
+        std::lock_guard<std::mutex> lock(cbMutex_);
+        if (cb_.cancelRequest) { cb_.cancelRequest(); result = {{"cancelled", true}}; }
+        else result = {{"error", "not ready"}};
+
     } else if (method == "setWorkspace") {
         std::string cwd = params.value("cwd", "");
         if (cwd.empty()) {
