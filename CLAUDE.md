@@ -42,6 +42,17 @@ Concretely: build with `cmake --build build-debug`, launch `build-debug/fcn`, an
 
 Important: at the start of every session, check which hyprland workspace the harness is running on (`hyprctl activeworkspace -j`) and always launch fcn on that same workspace. Never let it spawn on an arbitrary workspace — the user is working elsewhere and shouldn't be interrupted by a window popping up in their face.
 
+## Don't touch the user's running instances or session data
+
+The user keeps multiple fcn instances running across different projects at the same time. When cleaning up after your own tests, **only kill the instance you launched** — track its pid from `hyprctl dispatch exec` / your own spawn call and `kill $pid`, never broad-match with `pkill -f fcn` or similar. If you need to list processes, verify ownership by matching the binary path (`build-debug/fcn`) before killing.
+
+Do not delete, truncate, or otherwise reset the user's session data. That includes:
+- `~/.local/share/fastcode-native/sessions/` — per-project conversation history and restored provider/model
+- `~/.local/share/fastcode-native/sessions.json` — the session registry
+- `~/.cache/fastcode-native/models.json` — the models.dev registry cache
+
+If a test needs a clean slate, run in a throwaway directory so a new session file is created there instead of wiping an existing one.
+
 ## Code style
 
 Clean, simple, long clear functions. No abstraction overload. Like harfbuzzscroll.
