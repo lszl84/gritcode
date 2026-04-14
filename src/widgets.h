@@ -94,7 +94,7 @@ public:
     std::function<void(const std::string&)> onSubmit;
     std::function<std::string()> onPaste;
 
-    void Paint(GLRenderer& r, FontManager& fm, float time) const;
+    void Paint(GLRenderer& r, FontManager& fm) const;
     bool OnMouseDown(float x, float y, FontManager& fm);
     void OnMouseDrag(float x, float y, FontManager& fm);
     std::string GetSelectedText() const;

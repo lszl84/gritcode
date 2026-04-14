@@ -285,7 +285,6 @@ void ScrollView::MeasureSegments(size_t idx) {
         } else {
             std::string hardLine = text.substr(pos, nl - pos);
             size_t wpos = 0;
-            bool first = true;
 
             while (wpos < hardLine.size()) {
                 size_t sp = hardLine.find(' ', wpos);
@@ -307,7 +306,6 @@ void ScrollView::MeasureSegments(size_t idx) {
                     segs.push_back({" ", spW, lh, false, true, style, {}, false});
                     wpos++;
                 }
-                first = false;
             }
         }
 
@@ -865,7 +863,7 @@ void ScrollView::OnMouseDown(float x, float y, bool shift) {
     }
 }
 
-void ScrollView::OnMouseUp(float x, float y) {
+void ScrollView::OnMouseUp(float, float) {
     selecting_ = false;
     autoScrollDelta_ = 0;
 }

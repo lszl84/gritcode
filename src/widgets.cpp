@@ -37,7 +37,6 @@ void Label::Paint(GLRenderer& r, FontManager& fm) const {
 void Button::Paint(GLRenderer& r, FontManager& fm) const {
     if (!visible) return;
     float radius = 14;
-    float padX = 12;  // Horizontal padding
     Color bg = !enabled ? bgColor : pressed ? pressColor : hovered ? hoverColor : bgColor;
     r.DrawRoundedRect(bounds.x, bounds.y, bounds.w, bounds.h, radius, bg);
 
@@ -144,7 +143,7 @@ void TextInput::EnsureCursorVisible(FontManager& fm) {
     scrollX = std::max(0.0f, scrollX);
 }
 
-void TextInput::Paint(GLRenderer& r, FontManager& fm, float time) const {
+void TextInput::Paint(GLRenderer& r, FontManager& fm) const {
     float radius = 14;
     float pad = 8;
 

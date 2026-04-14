@@ -688,13 +688,13 @@ void App::PaintBottomBar() {
     statusLabel_.Paint(renderer_, fm);
     versionLabel_.Paint(renderer_, fm);
     if (apiKeyEditing_) {
-        apiKeyInput_.Paint(renderer_, fm, 0);
+        apiKeyInput_.Paint(renderer_, fm);
         apiKeyAccept_.Paint(renderer_, fm);
         apiKeyCancel_.Paint(renderer_, fm);
     } else {
         apiKeyButton_.Paint(renderer_, fm);
     }
-    messageInput_.Paint(renderer_, fm, 0);
+    messageInput_.Paint(renderer_, fm);
     sendButton_.Paint(renderer_, fm);
 
     // Dropdown popups last (z-order: on top of everything)
@@ -912,14 +912,21 @@ void App::OnRegistryReceived(json registry, int httpStatus) {
 
 void App::PopulateModelsFromRegistry(const std::string& providerId) {
     if (!registryLoaded_) return;
-    if (!modelsRegistry_.contains(providerId) ||
-        !modelsRegistry_[providerId].is_object()) {
+
+    // fcn calls the Zen subscription "zen", but models.dev keys it under
+    // "opencode" (the CLI vendor namespace). Translate so the registry path
+    // actually resolves — without this, Zen on a warm cache silently falls
+    // through to an empty dropdown.
+    std::string registryKey = (providerId == "zen") ? "opencode" : providerId;
+
+    if (!modelsRegistry_.contains(registryKey) ||
+        !modelsRegistry_[registryKey].is_object()) {
         AppendSystem("Provider '" + providerId + "' not found in models.dev registry.");
         modelDropdown_.items.clear();
         return;
     }
 
-    const auto& p = modelsRegistry_[providerId];
+    const auto& p = modelsRegistry_[registryKey];
     std::string providerNpm = p.value("npm", "");
 
     modelDropdown_.items.clear();
@@ -1034,7 +1041,7 @@ void App::PopulateWorkspaceDropdown() {
     workspaceDropdown_.selectedIndex = sel;
 }
 
-void App::OnWorkspaceChanged(int idx, const std::string& id) {
+void App::OnWorkspaceChanged(int, const std::string& id) {
     // Save current session first
     session_.Save();
 
