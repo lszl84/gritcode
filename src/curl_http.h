@@ -61,8 +61,15 @@ public:
     // Hits the chat endpoint with a minimal body to test auth.
     int ValidateKey(const std::string& model = "kimi-k2.5");
 
+    // Which wire protocol a streaming request uses. OpenAI hits
+    // {baseUrl}/chat/completions with Authorization: Bearer, parses
+    // choices[0].delta.content. Anthropic hits {baseUrl}/messages with
+    // x-api-key, parses named SSE events (content_block_delta et al).
+    enum class Protocol { OpenAI, Anthropic };
+
     // Send streaming chat request (callbacks on bg thread)
     void SendStreaming(
+        Protocol protocol,
         const std::string& requestJson,
         std::function<void(const std::string& chunk, bool isThinking)> onChunk,
         std::function<void(bool ok, const std::string& content,
@@ -81,6 +88,7 @@ private:
     std::thread requestThread_;
 
     static size_t WriteCallback(char* data, size_t size, size_t nmemb, void* userp);
+    static size_t WriteCallbackAnthropic(char* data, size_t size, size_t nmemb, void* userp);
     void ProcessSSELine(const std::string& line, const std::string& sseBuffer,
                         std::string& accContent,
                         std::vector<json>& toolCalls,

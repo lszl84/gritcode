@@ -901,15 +901,17 @@ void App::PopulateModelsFromRegistry(const std::string& providerId) {
             const std::string& mid = it.key();
             const auto& m = it.value();
 
-            // Models may override the provider default via model.provider.npm.
-            // fcn only speaks OpenAI-compatible /chat/completions today, so
-            // skip anything routed through @ai-sdk/anthropic (/messages).
+            // Filter to the two wire protocols fcn supports:
+            //   @ai-sdk/openai-compatible → /chat/completions
+            //   @ai-sdk/anthropic         → /messages
+            // Any other shape (e.g. @ai-sdk/google) is still unsupported and
+            // gets skipped so we don't surface broken-on-click models.
             std::string npm = providerNpm;
             if (m.contains("provider") && m["provider"].is_object() &&
                 m["provider"].contains("npm") && m["provider"]["npm"].is_string()) {
                 npm = m["provider"]["npm"].get<std::string>();
             }
-            if (npm != "@ai-sdk/openai-compatible") continue;
+            if (npm != "@ai-sdk/openai-compatible" && npm != "@ai-sdk/anthropic") continue;
 
             std::string name = m.value("name", mid);
             modelDropdown_.items.push_back({mid, name});
@@ -1147,6 +1149,178 @@ std::string App::BuildRequestJson() {
     // Tools
     j["tools"] = json::parse(ToolDefsJson());
     j["tool_choice"] = "auto";
+
+    return j.dump();
+}
+
+net::CurlHttpClient::Protocol App::ProtocolForActiveModel() {
+    // Look up the active (provider, model) pair in the models.dev registry
+    // and decide which wire protocol to use. Models may override the
+    // provider-level npm default. Default to OpenAI-compat when the registry
+    // hasn't loaded or the entry is missing, matching how fcn behaved before
+    // Anthropic support existed.
+    if (!registryLoaded_) return net::CurlHttpClient::Protocol::OpenAI;
+    if (!modelsRegistry_.contains(activeProvider_) ||
+        !modelsRegistry_[activeProvider_].is_object()) {
+        return net::CurlHttpClient::Protocol::OpenAI;
+    }
+    const auto& p = modelsRegistry_[activeProvider_];
+    std::string npm = p.value("npm", "");
+    if (p.contains("models") && p["models"].is_object() &&
+        p["models"].contains(activeModel_) &&
+        p["models"][activeModel_].is_object()) {
+        const auto& m = p["models"][activeModel_];
+        if (m.contains("provider") && m["provider"].is_object() &&
+            m["provider"].contains("npm") && m["provider"]["npm"].is_string()) {
+            npm = m["provider"]["npm"].get<std::string>();
+        }
+    }
+    return (npm == "@ai-sdk/anthropic")
+        ? net::CurlHttpClient::Protocol::Anthropic
+        : net::CurlHttpClient::Protocol::OpenAI;
+}
+
+std::string App::BuildAnthropicRequestJson() {
+    json j;
+    j["model"] = activeModel_;
+    j["stream"] = true;
+    j["max_tokens"] = 32000;
+
+    // Same tool-result pruning rule as the OpenAI path: protect ~40K tokens
+    // of recent tool output, replace older results with a placeholder.
+    auto& hist = session_.History();
+    int histSize = (int)hist.size();
+    const size_t PROTECT_CHARS = 120000;
+    size_t toolCharsAccum = 0;
+    int pruneBeforeIdx = -1;
+    for (int i = histSize - 1; i >= 0; i--) {
+        if (hist[i].role == "tool") {
+            toolCharsAccum += hist[i].content.size();
+            if (toolCharsAccum > PROTECT_CHARS) { pruneBeforeIdx = i; break; }
+        }
+    }
+
+    // System prompt — Anthropic takes it at the top level, not as a
+    // messages[0] with role=system.
+    {
+        char cwdBuf[4096];
+        std::string cwd = getcwd(cwdBuf, sizeof(cwdBuf)) ? cwdBuf : ".";
+        j["system"] =
+            "You are an AI coding assistant. You help the user with software engineering tasks "
+            "by reading, writing, and editing files, and running shell commands.\n\n"
+            "Working directory: " + cwd + "\n\n"
+            "## Tools\n"
+            "You have these tools: bash, read_file, write_file, edit_file, list_directory.\n"
+            "- Use write_file to create new files or overwrite existing ones.\n"
+            "- Use edit_file to make targeted changes — provide enough context in old_string to be unique.\n"
+            "- Use read_file to read files before editing them.\n"
+            "- Use bash to run commands, tests, install packages, etc.\n\n"
+            "## Behavior\n"
+            "- When given a task, work through it step by step using your tools.\n"
+            "- Do not just describe what you would do — actually do it by calling tools.\n"
+            "- After each tool result, assess whether the task is complete and continue if not.\n"
+            "- When making changes, verify they work (e.g., run tests or the build).\n"
+            "- Keep responses concise. Lead with actions, not explanations.\n";
+    }
+
+    // Reshape fcn's OpenAI-flavored history into Anthropic content-block form.
+    // The mapping:
+    //   role=user    → role=user, content = string
+    //   role=assistant + text   → role=assistant, content = string
+    //   role=assistant + tools  → role=assistant, content = [text?, tool_use...]
+    //   role=tool               → role=user, content = [tool_result]
+    // Anthropic requires alternating user/assistant roles, so consecutive
+    // user-role messages (two tool_result turns back-to-back, or a
+    // tool_result immediately followed by a real user prompt) must be merged
+    // into a single user message with multiple content blocks.
+    json msgs = json::array();
+    auto pushOrMerge = [&](json msg) {
+        if (!msgs.empty() && msgs.back()["role"] == msg["role"] &&
+            msg["role"] == "user") {
+            auto& last = msgs.back();
+            // Normalize both sides to array form before concatenating.
+            auto toArray = [](json& c) {
+                if (c.is_string()) {
+                    json arr = json::array();
+                    arr.push_back({{"type","text"},{"text",c.get<std::string>()}});
+                    c = std::move(arr);
+                }
+            };
+            toArray(last["content"]);
+            toArray(msg["content"]);
+            for (auto& blk : msg["content"]) last["content"].push_back(blk);
+        } else {
+            msgs.push_back(std::move(msg));
+        }
+    };
+
+    for (int i = 0; i < histSize; i++) {
+        auto& m = hist[i];
+        json msg;
+        if (m.role == "user") {
+            msg["role"] = "user";
+            msg["content"] = m.content;
+
+        } else if (m.role == "assistant") {
+            msg["role"] = "assistant";
+            if (m.toolCalls.empty()) {
+                // Anthropic rejects empty assistant content — skip entirely.
+                if (m.content.empty()) continue;
+                msg["content"] = m.content;
+            } else {
+                json blocks = json::array();
+                if (!m.content.empty()) {
+                    blocks.push_back({{"type","text"},{"text",m.content}});
+                }
+                for (auto& tc : m.toolCalls) {
+                    json tu;
+                    tu["type"] = "tool_use";
+                    tu["id"] = tc.value("id", "");
+                    tu["name"] = tc.value("name", "");
+                    try {
+                        tu["input"] = json::parse(tc.value("arguments", std::string("{}")));
+                    } catch (...) {
+                        tu["input"] = json::object();
+                    }
+                    blocks.push_back(std::move(tu));
+                }
+                msg["content"] = std::move(blocks);
+            }
+
+        } else if (m.role == "tool") {
+            msg["role"] = "user";
+            json tr;
+            tr["type"] = "tool_result";
+            tr["tool_use_id"] = m.toolCallId;
+            tr["content"] = (i <= pruneBeforeIdx)
+                ? std::string("[Old tool result content cleared]")
+                : m.content;
+            json blocks = json::array();
+            blocks.push_back(std::move(tr));
+            msg["content"] = std::move(blocks);
+
+        } else {
+            continue;  // unknown role, drop
+        }
+        pushOrMerge(std::move(msg));
+    }
+    j["messages"] = std::move(msgs);
+
+    // Tools — convert the canonical OpenAI-flavored ToolDefsJson() into
+    // Anthropic's { name, description, input_schema } shape. Keeping one
+    // source of truth avoids the two tool lists drifting.
+    json openaiTools = json::parse(ToolDefsJson());
+    json anthTools = json::array();
+    for (auto& t : openaiTools) {
+        if (!t.contains("function")) continue;
+        json at;
+        at["name"] = t["function"].value("name", "");
+        at["description"] = t["function"].value("description", "");
+        at["input_schema"] = t["function"].value("parameters", json::object());
+        anthTools.push_back(std::move(at));
+    }
+    j["tools"] = std::move(anthTools);
+    j["tool_choice"] = {{"type","auto"}};
 
     return j.dump();
 }
@@ -1420,15 +1594,20 @@ void App::DoSendToProvider() {
         return;
     }
 
-    // Zen provider: HTTP streaming
-    std::string requestJson = BuildRequestJson();
+    // Zen / OpenCode Go provider: HTTP streaming. The wire protocol depends
+    // on the active model, not the provider — opencode-go serves both
+    // OpenAI-compatible and Anthropic-style models under the same base URL.
+    auto protocol = ProtocolForActiveModel();
+    std::string requestJson = (protocol == net::CurlHttpClient::Protocol::Anthropic)
+        ? BuildAnthropicRequestJson()
+        : BuildRequestJson();
 
     responseBuffer_.clear();
     receivingThinking_ = false;
     lastMarkdownLen_ = 0;
     lastMarkdownTime_ = GetMonotonicTime();
 
-    httpClient_.SendStreaming(requestJson,
+    httpClient_.SendStreaming(protocol, requestJson,
         // onChunk (bg thread)
         [this](const std::string& chunk, bool isThinking) {
             events_.Push([this, chunk, isThinking]() {

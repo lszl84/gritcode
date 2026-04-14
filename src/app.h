@@ -158,6 +158,8 @@ private:
     void ExecuteToolCalls(const std::vector<json>& toolCalls, const std::string& content);
     void RenderMarkdownToBlocks(bool isFinal = false);
     std::string BuildRequestJson();
+    std::string BuildAnthropicRequestJson();
+    net::CurlHttpClient::Protocol ProtocolForActiveModel();
 
     // Input handling
     void OnMouseDown(float x, float y, bool shift);
