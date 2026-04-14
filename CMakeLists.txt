@@ -123,8 +123,17 @@ set(FCN_SOURCES
     src/curl_http.cpp
     src/keychain.cpp
     src/session.cpp
-    src/mcp_server.cpp
 )
+
+# MCP is the dev/agent automation channel — it lets scripts/mcp_client.py
+# drive a running fcn for testing. Release builds don't need it (and end
+# users aren't expected to script their editor), so we compile it out of
+# Release entirely: smaller binary, no listening TCP socket, no attack
+# surface. Any non-Release config (Debug, RelWithDebInfo) keeps it in.
+if(NOT CMAKE_BUILD_TYPE STREQUAL "Release")
+    list(APPEND FCN_SOURCES src/mcp_server.cpp)
+    set(FCN_ENABLE_MCP TRUE)
+endif()
 
 if(APPLE)
     # Generate fcn.icns from fcn.svg using built-in sips + iconutil.
@@ -196,6 +205,10 @@ endif()
 target_compile_definitions(fcn PRIVATE
     FCN_VERSION="${VERSION_STRING}"
 )
+
+if(FCN_ENABLE_MCP)
+    target_compile_definitions(fcn PRIVATE FCN_ENABLE_MCP)
+endif()
 
 if(LINUX)
     target_compile_definitions(fcn PRIVATE FCN_LINUX)

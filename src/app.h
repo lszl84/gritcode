@@ -22,7 +22,9 @@
 #include "keychain.h"
 #include "markdown_renderer.h"
 #include "session.h"
+#ifdef FCN_ENABLE_MCP
 #include "mcp_server.h"
+#endif
 #include <string>
 #include <vector>
 #include <mutex>
@@ -88,8 +90,12 @@ private:
     Label statusLabel_;
     Label versionLabel_;
 
-    // MCP server
+    // MCP server — dev/agent automation channel. Compiled out of Release
+    // builds (see CMakeLists.txt) so production fcn doesn't listen on any
+    // port. Only present in Debug/RelWithDebInfo.
+#ifdef FCN_ENABLE_MCP
     MCPServer mcpServer_;
+#endif
     void StartMCP();
 
     // Backend state

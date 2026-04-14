@@ -543,6 +543,7 @@ void App::StartConnect() {
 }
 
 void App::StartMCP() {
+#ifdef FCN_ENABLE_MCP
     MCPCallbacks cb;
 
     cb.sendMessage = [this](const std::string& msg) {
@@ -615,6 +616,7 @@ void App::StartMCP() {
     };
 
     mcpServer_.Start(std::move(cb));
+#endif
 }
 
 // ============================================================================
