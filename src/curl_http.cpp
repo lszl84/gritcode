@@ -229,6 +229,38 @@ void CurlHttpClient::FetchModels(std::function<void(std::vector<ModelInfo>, int)
     });
 }
 
+void CurlHttpClient::FetchJson(const std::string& url,
+                               std::function<void(json, int)> cb) {
+    std::thread([url, cb = std::move(cb)]() {
+        CURL* curl = curl_easy_init();
+        if (!curl) { cb({}, 0); return; }
+
+        std::string response;
+        curl_easy_setopt(curl, CURLOPT_URL, url.c_str());
+        curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT, 10L);
+        curl_easy_setopt(curl, CURLOPT_TIMEOUT, 30L);
+        curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 1L);
+        curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION,
+            +[](char* d, size_t s, size_t n, void* p) -> size_t {
+                ((std::string*)p)->append(d, s * n);
+                return s * n;
+            });
+        curl_easy_setopt(curl, CURLOPT_WRITEDATA, &response);
+
+        CURLcode res = curl_easy_perform(curl);
+        long httpCode = 0;
+        curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &httpCode);
+        curl_easy_cleanup(curl);
+
+        if (res != CURLE_OK) { cb({}, 0); return; }
+        try {
+            cb(json::parse(response), (int)httpCode);
+        } catch (...) {
+            cb({}, (int)httpCode);
+        }
+    }).detach();
+}
+
 void CurlHttpClient::SendStreaming(
     const std::string& requestJson,
     std::function<void(const std::string&, bool)> onChunk,

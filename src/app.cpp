@@ -347,7 +347,11 @@ bool App::Init(bool sessionChooser) {
     workspaceDropdown_.onSelect = [&](int i, const std::string& id) { OnWorkspaceChanged(i, id); };
 
     // Provider dropdown
-    providerDropdown_.items = {{"zen", "OpenCode Zen"}, {"claude", "Claude (ACP)"}};
+    providerDropdown_.items = {
+        {"zen", "OpenCode Zen"},
+        {"opencode-go", "OpenCode Go"},
+        {"claude", "Claude (ACP)"},
+    };
     providerDropdown_.selectedIndex = 0;
     providerDropdown_.onSelect = [&](int i, const std::string& id) { OnProviderChanged(i, id); };
 
@@ -466,6 +470,7 @@ bool App::Init(bool sessionChooser) {
         session_.LoadForCwd(cwd);
         PopulateWorkspaceDropdown();
         RestoreSessionToView();
+        StartFetchRegistry();
         StartConnect();
     }
 
@@ -493,7 +498,8 @@ void App::RestoreSessionToView() {
             std::string savedProvider = session_.Provider();
             std::string savedModel = session_.Model();
             if (!savedProvider.empty() &&
-                (savedProvider == "zen" || savedProvider == "claude")) {
+                (savedProvider == "zen" || savedProvider == "opencode-go" ||
+                 savedProvider == "claude")) {
                 // Select in dropdown so the UI reflects reality.
                 for (size_t i = 0; i < providerDropdown_.items.size(); i++) {
                     if (providerDropdown_.items[i].id == savedProvider) {
@@ -624,7 +630,7 @@ void App::LayoutWidgets() {
 
     // Right-edge of the bottom bar matches sendButton right edge above (w - 8).
     float rightEdge = w - 8;
-    bool showApiKey = (activeProvider_ == "zen");
+    bool showApiKey = (activeProvider_ == "zen" || activeProvider_ == "opencode-go");
     if (showApiKey && apiKeyEditing_) {
         apiKeyButton_.visible = false;
         float btnW = 40 * s;
@@ -696,11 +702,41 @@ void App::PaintBottomBar() {
 // ============================================================================
 
 void App::Connect(const std::string& apiKey) {
-    httpClient_.SetBaseUrl("https://opencode.ai/zen/v1");
+    // Base URL depends on the active registry-backed provider. OpenCode Go is
+    // a different subscription tier served at /zen/go/v1; both use the same
+    // OPENCODE_API_KEY.
+    std::string baseUrl = (activeProvider_ == "opencode-go")
+        ? "https://opencode.ai/zen/go/v1"
+        : "https://opencode.ai/zen/v1";
+    httpClient_.SetBaseUrl(baseUrl);
     httpClient_.SetApiKey(apiKey);
     connected_ = true;
-    statusLabel_.text = apiKey.empty() ? "Zen (Anonymous)" : "Validating key...";
+    const char* providerLabel = (activeProvider_ == "opencode-go") ? "Go" : "Zen";
+    if (apiKey.empty() && activeProvider_ == "opencode-go") {
+        statusLabel_.text = "Go (no key — add one)";
+    } else {
+        statusLabel_.text = apiKey.empty()
+            ? std::string(providerLabel) + " (Anonymous)"
+            : "Validating key...";
+    }
     MarkDirty();
+
+    // Registry is the canonical source — prefer it whenever it's loaded,
+    // for both Zen and Go. Fall back to /models only for Zen if the registry
+    // hasn't arrived yet (OpenCode Go has no /models endpoint — 404).
+    if (registryLoaded_) {
+        PopulateModelsFromRegistry(activeProvider_);
+        statusLabel_.text = apiKey.empty()
+            ? (activeProvider_ == "opencode-go" ? "Go (no key — add one)" : "Zen (Anonymous)")
+            : (activeProvider_ == "opencode-go" ? "Go" : "Zen");
+        return;
+    }
+
+    if (activeProvider_ == "opencode-go") {
+        // No legacy discovery endpoint — wait for the registry fetch.
+        statusLabel_.text = "Go (loading models...)";
+        return;
+    }
 
     httpClient_.FetchModels([this, apiKey](std::vector<net::ModelInfo> models, int httpStatus) {
         // If we have an API key, validate it against an authenticated endpoint
@@ -710,10 +746,10 @@ void App::Connect(const std::string& apiKey) {
             authStatus = httpClient_.ValidateKey(testModel);
             if (authStatus == 401) {
                 events_.Push([this, apiKey]() {
-                    AppendSystem("Invalid API key (" + apiKey + "). Please set a new key.");
-                    keychain::ClearApiKey();
-                    httpClient_.SetApiKey("");
-                    statusLabel_.text = "Invalid key";
+                    // Mirror the streaming-path fix: 401 does not nuke a saved
+                    // key anymore. Surface the error, leave the key alone.
+                    AppendSystem("Unauthorized (HTTP 401). Key was not cleared — retry, or replace it manually via the key button if it's really invalid.");
+                    statusLabel_.text = "Unauthorized";
                     connected_ = false;
                     MarkDirty();
                 });
@@ -726,10 +762,10 @@ void App::Connect(const std::string& apiKey) {
 
 void App::OnModelsReceived(std::vector<net::ModelInfo> models, int httpStatus) {
     if (httpStatus == 401) {
-        AppendSystem("Invalid API key. Please check your key and try again.");
+        // 401 on the /models probe used to wipe the saved key — same bug as
+        // the streaming-path handler. Don't. Surface, let the user decide.
+        AppendSystem("Unauthorized (HTTP 401) while listing models. Key was not cleared.");
         statusLabel_.text = "Unauthorized";
-        keychain::ClearApiKey();
-        httpClient_.SetApiKey("");
         connected_ = false;
         MarkDirty();
         return;
@@ -778,6 +814,146 @@ void App::OnModelsReceived(std::vector<net::ModelInfo> models, int httpStatus) {
     // sticks forever because Connect() set it and OnModelsReceived never did.
     statusLabel_.text = httpClient_.IsAnonymous() ? "Zen (Anonymous)" : "Zen";
     AppendSystem("Models loaded. Active: " + activeModel_);
+    MarkDirty();
+}
+
+std::string App::GetRegistryCachePath() {
+    const char* xdg = getenv("XDG_CACHE_HOME");
+    const char* home = getenv("HOME");
+    std::string base;
+    if (xdg && *xdg) base = xdg;
+    else if (home) base = std::string(home) + "/.cache";
+    else base = "/tmp";
+    return base + "/fastcode-native/models.json";
+}
+
+void App::StartFetchRegistry() {
+    // Fast-path: hydrate from disk cache synchronously so the dropdown has
+    // something to show before the network comes back. Mirrors what the
+    // opencode CLI does with its ~/.cache/opencode/models.json.
+    std::string cachePath = GetRegistryCachePath();
+    try {
+        std::ifstream f(cachePath);
+        if (f) {
+            json cached;
+            f >> cached;
+            if (cached.is_object() && !cached.empty()) {
+                modelsRegistry_ = std::move(cached);
+                registryLoaded_ = true;
+            }
+        }
+    } catch (...) {}
+
+    // Always refresh in the background so a stale cache doesn't pin us to
+    // an out-of-date model list.
+    net::CurlHttpClient::FetchJson("https://models.dev/api.json",
+        [this](json body, int status) {
+            events_.Push([this, body, status]() { OnRegistryReceived(body, status); });
+        });
+}
+
+void App::OnRegistryReceived(json registry, int httpStatus) {
+    if (httpStatus != 200 || !registry.is_object() || registry.empty()) {
+        // Don't surface this as an error if we already have a cache loaded —
+        // the user can keep working against the stale copy.
+        if (!registryLoaded_) {
+            AppendSystem("Could not load models.dev registry (HTTP " +
+                         std::to_string(httpStatus) + "). Zen will fall back to /models; OpenCode Go will be unavailable until the registry loads.");
+        }
+        return;
+    }
+
+    modelsRegistry_ = std::move(registry);
+    registryLoaded_ = true;
+
+    // Persist to disk for next launch.
+    try {
+        std::string cachePath = GetRegistryCachePath();
+        std::filesystem::create_directories(
+            std::filesystem::path(cachePath).parent_path());
+        std::ofstream(cachePath) << modelsRegistry_.dump();
+    } catch (...) {}
+
+    // If the user is already on a registry-backed provider, refresh the
+    // dropdown so they see the canonical list instead of whatever /models
+    // or the cache had.
+    if (activeProvider_ == "zen" || activeProvider_ == "opencode-go") {
+        PopulateModelsFromRegistry(activeProvider_);
+    }
+}
+
+void App::PopulateModelsFromRegistry(const std::string& providerId) {
+    if (!registryLoaded_) return;
+    if (!modelsRegistry_.contains(providerId) ||
+        !modelsRegistry_[providerId].is_object()) {
+        AppendSystem("Provider '" + providerId + "' not found in models.dev registry.");
+        modelDropdown_.items.clear();
+        return;
+    }
+
+    const auto& p = modelsRegistry_[providerId];
+    std::string providerNpm = p.value("npm", "");
+
+    modelDropdown_.items.clear();
+
+    if (p.contains("models") && p["models"].is_object()) {
+        for (auto it = p["models"].begin(); it != p["models"].end(); ++it) {
+            const std::string& mid = it.key();
+            const auto& m = it.value();
+
+            // Models may override the provider default via model.provider.npm.
+            // fcn only speaks OpenAI-compatible /chat/completions today, so
+            // skip anything routed through @ai-sdk/anthropic (/messages).
+            std::string npm = providerNpm;
+            if (m.contains("provider") && m["provider"].is_object() &&
+                m["provider"].contains("npm") && m["provider"]["npm"].is_string()) {
+                npm = m["provider"]["npm"].get<std::string>();
+            }
+            if (npm != "@ai-sdk/openai-compatible") continue;
+
+            std::string name = m.value("name", mid);
+            modelDropdown_.items.push_back({mid, name});
+        }
+    }
+
+    // Registry iteration order is arbitrary (JSON object), so sort by display
+    // name to get a stable, predictable dropdown.
+    std::sort(modelDropdown_.items.begin(), modelDropdown_.items.end(),
+              [](const DropdownItem& a, const DropdownItem& b) {
+                  return a.label < b.label;
+              });
+
+    if (modelDropdown_.items.empty()) {
+        AppendSystem("No OpenAI-compatible models available for " + providerId +
+                     " (all are routed through a protocol fcn doesn't support yet).");
+        activeModel_.clear();
+        MarkDirty();
+        return;
+    }
+
+    int defaultIdx = 0;
+    // Prefer kimi-k2.5 as the default where available — matches old behavior.
+    for (size_t i = 0; i < modelDropdown_.items.size(); i++) {
+        if (modelDropdown_.items[i].id == "kimi-k2.5") {
+            defaultIdx = (int)i;
+            break;
+        }
+    }
+    if (!restoredModelPref_.empty()) {
+        for (size_t i = 0; i < modelDropdown_.items.size(); i++) {
+            if (modelDropdown_.items[i].id == restoredModelPref_) {
+                defaultIdx = (int)i;
+                break;
+            }
+        }
+        restoredModelPref_.clear();
+    }
+
+    modelDropdown_.selectedIndex = defaultIdx;
+    activeModel_ = modelDropdown_.SelectedId();
+    AppendSystem("Models loaded from registry (" +
+                 std::to_string(modelDropdown_.items.size()) +
+                 " for " + providerId + "). Active: " + activeModel_);
     MarkDirty();
 }
 
@@ -841,11 +1017,11 @@ void App::OnWorkspaceChanged(int idx, const std::string& id) {
 
 void App::OnProviderChanged(int, const std::string& id) {
     activeProvider_ = id;
-    apiKeyButton_.visible = (id == "zen");
+    apiKeyButton_.visible = (id == "zen" || id == "opencode-go");
     AppendSystem("Switched to " + id);
     LayoutWidgets();
 
-    if (id == "zen") {
+    if (id == "zen" || id == "opencode-go") {
         std::string key = keychain::LoadApiKey();
         Connect(key);
     } else {

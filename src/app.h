@@ -104,6 +104,15 @@ private:
     bool requestInProgress_ = false;
     int toolRound_ = 0;
 
+    // models.dev registry — canonical source for the Zen and OpenCode Go
+    // provider/model lists. Fetched once at startup (with a disk cache at
+    // $XDG_CACHE_HOME/fastcode-native/models.json). Used to populate the
+    // model dropdown and to filter out models whose wire protocol fcn
+    // doesn't speak (e.g. @ai-sdk/anthropic — /messages instead of
+    // /chat/completions).
+    nlohmann::json modelsRegistry_;
+    bool registryLoaded_ = false;
+
     // Claude ACP: child pid of running `claude --print` (so Escape can kill it),
     // and per-request generation so a stale finalizer from a cancelled request
     // doesn't clobber the UI state of a newer one.
@@ -134,6 +143,10 @@ private:
     void SendMessage();
     void DoSendToProvider();
     void OnModelsReceived(std::vector<net::ModelInfo> models, int httpStatus);
+    void StartFetchRegistry();
+    void OnRegistryReceived(nlohmann::json registry, int httpStatus);
+    void PopulateModelsFromRegistry(const std::string& providerId);
+    std::string GetRegistryCachePath();
     void OnWorkspaceChanged(int idx, const std::string& id);
     void OnProviderChanged(int idx, const std::string& id);
     void OnModelChanged(int idx, const std::string& id);

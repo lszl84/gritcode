@@ -51,6 +51,12 @@ public:
     // httpStatus: 0 = network error, 200 = ok, 401 = unauthorized, etc.
     void FetchModels(std::function<void(std::vector<ModelInfo>, int httpStatus)> cb);
 
+    // Async unauthenticated JSON GET, for fetching the models.dev registry.
+    // Detached thread, independent of the streaming request slot so it can
+    // run alongside a live chat request without colliding.
+    static void FetchJson(const std::string& url,
+                          std::function<void(json body, int httpStatus)> cb);
+
     // Quick synchronous key check — returns HTTP status (401 = bad key)
     // Hits the chat endpoint with a minimal body to test auth.
     int ValidateKey(const std::string& model = "kimi-k2.5");
