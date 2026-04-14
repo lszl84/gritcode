@@ -39,7 +39,12 @@ public:
     int Height() const { return fbH_; }
     int LogicalW() const { return winW_; }
     int LogicalH() const { return winH_; }
-    float Scale() const { return scale_; }
+    // UI scale factor (for sizing fonts, widgets, padding). Derived from
+    // GLFW's content-scale query, which on Wayland/macOS is the compositor
+    // buffer scale and on X11 is the Xft.dpi / XSETTINGS / XRandR-derived
+    // DPI ratio. Previously this returned fbW/winW, which is always 1 on
+    // X11, so fcn rendered at 96dpi regardless of the user's HiDPI setting.
+    float Scale() const { return contentScale_; }
 
     using ResizeCb = std::function<void(int, int, float)>;
     using MouseBtnCb = std::function<void(float, float, bool, bool)>;
@@ -63,7 +68,14 @@ private:
     GLFWwindow* window_ = nullptr;
     int winW_ = 0, winH_ = 0;    // logical
     int fbW_ = 0, fbH_ = 0;      // framebuffer
-    float scale_ = 1.0f;
+    // UI scale — derived from glfwGetWindowContentScale. What every widget
+    // sizing site wants. On Wayland/macOS equals the compositor buffer
+    // scale; on X11 equals Xft.dpi/96 (or whatever XSETTINGS reports).
+    float contentScale_ = 1.0f;
+    // Framebuffer-to-logical ratio, needed only to map GLFW's logical
+    // cursor coordinates onto the larger framebuffer on Wayland/macOS.
+    // On X11 this is always 1 (GLFW's "logical" coords are already pixels).
+    float bufferScale_ = 1.0f;
     double mouseX_ = 0, mouseY_ = 0;
     bool leftDown_ = false;
     bool superHeld_ = false;  // Track Cmd/Super for suppressing char events
@@ -78,6 +90,7 @@ private:
     void UpdateScale();
 
     static void FramebufferSizeCb(GLFWwindow*, int, int);
+    static void WindowContentScaleCb(GLFWwindow*, float, float);
     static void MouseButtonCb(GLFWwindow*, int, int, int);
     static void CursorPosCb(GLFWwindow*, double, double);
     static void ScrollCallbackCb(GLFWwindow*, double, double);

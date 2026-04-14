@@ -55,6 +55,7 @@ bool GlfwWindow::Init(int width, int height, const char* title) {
 
     glfwSetWindowUserPointer(window_, this);
     glfwSetFramebufferSizeCallback(window_, FramebufferSizeCb);
+    glfwSetWindowContentScaleCallback(window_, WindowContentScaleCb);
     glfwSetMouseButtonCallback(window_, MouseButtonCb);
     glfwSetCursorPosCallback(window_, CursorPosCb);
     glfwSetScrollCallback(window_, ScrollCallbackCb);
@@ -63,6 +64,9 @@ bool GlfwWindow::Init(int width, int height, const char* title) {
 
     glfwGetWindowSize(window_, &winW_, &winH_);
     glfwGetFramebufferSize(window_, &fbW_, &fbH_);
+    float sx = 1.0f, sy = 1.0f;
+    glfwGetWindowContentScale(window_, &sx, &sy);
+    contentScale_ = sx;
     UpdateScale();
 
 #ifdef FCN_MACOS
@@ -75,7 +79,10 @@ bool GlfwWindow::Init(int width, int height, const char* title) {
 }
 
 void GlfwWindow::UpdateScale() {
-    scale_ = (winW_ > 0) ? (float)fbW_ / winW_ : 1.0f;
+    // bufferScale_ converts GLFW's logical cursor/window coords into
+    // framebuffer pixels. On X11 winW == fbW so this stays at 1; on
+    // Wayland / macOS it jumps to the compositor buffer scale.
+    bufferScale_ = (winW_ > 0) ? (float)fbW_ / winW_ : 1.0f;
 }
 
 void GlfwWindow::Show() { glfwShowWindow(window_); }
@@ -101,7 +108,17 @@ void GlfwWindow::FramebufferSizeCb(GLFWwindow* win, int w, int h) {
     self->fbH_ = h;
     glfwGetWindowSize(win, &self->winW_, &self->winH_);
     self->UpdateScale();
-    if (self->resizeCb_) self->resizeCb_(w, h, self->scale_);
+    if (self->resizeCb_) self->resizeCb_(w, h, self->contentScale_);
+}
+
+void GlfwWindow::WindowContentScaleCb(GLFWwindow* win, float xs, float /*ys*/) {
+    // Fires when the window moves to a monitor with a different content
+    // scale (X11 + XRandR reconfig, Wayland per-monitor scale, macOS
+    // main→external 2x→1x). Re-issue the resize callback so scroll_view
+    // and widgets rebuild at the new DPI.
+    auto* self = (GlfwWindow*)glfwGetWindowUserPointer(win);
+    self->contentScale_ = xs;
+    if (self->resizeCb_) self->resizeCb_(self->fbW_, self->fbH_, self->contentScale_);
 }
 
 void GlfwWindow::MouseButtonCb(GLFWwindow* win, int button, int action, int mods) {
@@ -110,8 +127,8 @@ void GlfwWindow::MouseButtonCb(GLFWwindow* win, int button, int action, int mods
     bool pressed = (action == GLFW_PRESS);
     self->leftDown_ = pressed;
     bool shift = (mods & GLFW_MOD_SHIFT);
-    float px = (float)self->mouseX_ * self->scale_;
-    float py = (float)self->mouseY_ * self->scale_;
+    float px = (float)self->mouseX_ * self->bufferScale_;
+    float py = (float)self->mouseY_ * self->bufferScale_;
     if (self->mouseBtnCb_) self->mouseBtnCb_(px, py, pressed, shift);
 }
 
@@ -119,8 +136,8 @@ void GlfwWindow::CursorPosCb(GLFWwindow* win, double x, double y) {
     auto* self = (GlfwWindow*)glfwGetWindowUserPointer(win);
     self->mouseX_ = x;
     self->mouseY_ = y;
-    float px = (float)x * self->scale_;
-    float py = (float)y * self->scale_;
+    float px = (float)x * self->bufferScale_;
+    float py = (float)y * self->bufferScale_;
     if (self->mouseMoveCb_) self->mouseMoveCb_(px, py, self->leftDown_);
 }
 
