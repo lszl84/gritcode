@@ -79,6 +79,16 @@ bool SessionManager::LoadForCwd(const std::string& cwd) {
     cwd_ = cwd;
     sessionId_ = HashCwd(cwd);
 
+    // Always start from an empty slate. Previously the "no session file on
+    // disk" branch early-returned without touching history_, which meant a
+    // workspace switch to a fresh cwd left the previous session's messages
+    // hanging in memory — the next Save() would then write them into the
+    // new cwd's session file, corrupting it.
+    history_.clear();
+    provider_.clear();
+    model_.clear();
+    dirty_ = false;
+
     std::string path = SessionPath(sessionId_);
     if (!fs::exists(path)) {
         // Register new session in index so workspace dropdown can see it
@@ -94,14 +104,12 @@ bool SessionManager::LoadForCwd(const std::string& cwd) {
         provider_ = j.value("provider", "zen");
         model_ = j.value("model", "");
 
-        history_.clear();
         if (j.contains("messages") && j["messages"].is_array()) {
             for (auto& msg : j["messages"]) {
                 history_.push_back(MessageFromJson(msg));
             }
         }
 
-        dirty_ = false;
         return !history_.empty();
     } catch (...) {
         return false;

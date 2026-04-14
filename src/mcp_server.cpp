@@ -180,6 +180,19 @@ json MCPServer::HandleRequest(const json& request) {
         if (cb_.selectAllText) result = {{"text", cb_.selectAllText()}};
         else result = {{"text", ""}};
 
+    } else if (method == "setWorkspace") {
+        std::string cwd = params.value("cwd", "");
+        if (cwd.empty()) {
+            return {{"error", {{"code", -32602}, {"message", "missing 'cwd' param"}}}, {"id", id}};
+        }
+        std::lock_guard<std::mutex> lock(cbMutex_);
+        if (cb_.setWorkspace) {
+            cb_.setWorkspace(cwd);
+            result = {{"set", true}};
+        } else {
+            result = {{"error", "not ready"}};
+        }
+
     } else if (method == "setProvider") {
         std::string provider = params.value("provider", "");
         std::string model = params.value("model", "");

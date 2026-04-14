@@ -589,6 +589,12 @@ void App::StartMCP() {
         return {{"text", ""}, {"index", -1}};
     };
 
+    cb.setWorkspace = [this](const std::string& cwd) {
+        events_.Push([this, cwd]() {
+            OnWorkspaceChanged(0, cwd);
+        });
+    };
+
     cb.selectAllText = [this]() -> std::string {
         // Runs on the MCP thread, but SelectAll and GetSelectedText only
         // touch ScrollView state that Paint also touches. The MCP server
@@ -1054,6 +1060,28 @@ void App::PopulateWorkspaceDropdown() {
 }
 
 void App::OnWorkspaceChanged(int, const std::string& id) {
+    // A request in flight owns scrollView_ and session_.History() via the
+    // events queue — swapping workspaces under it corrupts the old session
+    // (response lost) and the new one (response lands in the wrong history).
+    // Block the switch until the user stops or finishes the current turn.
+    // Future work: detach the in-flight request into a per-session context
+    // so switches are non-destructive.
+    if (requestInProgress_) {
+        AppendSystem("Can't switch workspaces while a request is in progress. "
+                     "Wait for the current response to finish, or stop it first.");
+        // Revert the dropdown to the current workspace so the UI reflects
+        // reality (it already updated selectedIndex when the user clicked).
+        const std::string& currentCwd = session_.SessionId();
+        for (size_t i = 0; i < workspaceDropdown_.items.size(); i++) {
+            if (workspaceDropdown_.items[i].id == currentCwd) {
+                workspaceDropdown_.selectedIndex = (int)i;
+                break;
+            }
+        }
+        MarkDirty();
+        return;
+    }
+
     // Save current session first
     session_.Save();
 

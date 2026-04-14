@@ -34,6 +34,10 @@ struct MCPCallbacks {
     // Trigger Select-All and return the text the scroll view would place on
     // the clipboard. Used for end-to-end copy verification in tests.
     std::function<std::string()> selectAllText;
+    // Trigger a workspace/session switch to the given cwd. Runs the same
+    // path the workspace dropdown does, so the "block while a request is in
+    // flight" guard applies. Used for test verification of that guard.
+    std::function<void(const std::string& cwd)> setWorkspace;
 };
 
 // Simple TCP-based JSON-RPC server for controlling FCN programmatically.
