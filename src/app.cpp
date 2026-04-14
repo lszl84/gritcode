@@ -2186,9 +2186,18 @@ void App::Run() {
     double lastTime = GetMonotonicTime();
 
     while (!window_.ShouldClose()) {
-        // Block until something happens (poll during active requests or animations)
+        // Block until something happens. Bg threads call glfwPostEmptyEvent
+        // via EventQueue::Push, so streaming chunks and onComplete wake the
+        // main thread without polling. Only poll when there's already work to
+        // do this iteration (dirty UI, queued events, scroll/anim in flight,
+        // or the waiting-dots animation that needs per-frame ticks).
+        //
+        // Polling during requestInProgress_ used to pin one core at 100%:
+        // between chunks (and especially during Anthropic tool_use streaming,
+        // which accumulates partial_json server-side without posting any UI
+        // events) the loop would PollEvents → drain → continue with no sleep.
         bool showingDots = waitingForResponse_ && (GetMonotonicTime() - requestStartTime_ > 1.5);
-        if (!dirty_ && events_.Empty() && !scrollView_.NeedsRedraw() && !showingDots && !requestInProgress_) {
+        if (!dirty_ && events_.Empty() && !scrollView_.NeedsRedraw() && !showingDots) {
             window_.WaitEvents();
         } else {
             window_.PollEvents();
