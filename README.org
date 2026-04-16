@@ -16,7 +16,13 @@ GPU-rendered AI coding harness built in C++ with OpenGL, HarfBuzz, and FreeType.
 - *Tool use* -- bash, read_file, list_directory with background execution
 - *Session persistence* -- per working directory, automatic restore
 - *Markdown rendering* -- bold, italic, code blocks, headings, blockquotes, lists
-- *~4,900 lines of C++* -- entire codebase
+- *~9,400 lines of C++* -- entire codebase
+
+** Is this production ready?
+
+No. This is not even pre-alpha. I use Gritcode every day as my primary coding environment, but every few hours I hit a bug — sometimes small, sometimes not. Things break, things get fixed, things change fast. This is a live project under active development.
+
+If you want to see it stabilize faster, [[https://github.com/sponsors/lszl84][sponsor the project]] 💜
 
 ** Quick Start
 
