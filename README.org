@@ -85,6 +85,24 @@ On macOS, GLFW, FreeType, HarfBuzz, and curl are fetched and built from source a
 - Linux: glfw3, freetype2, harfbuzz, fontconfig, libcurl, libsecret-1, OpenGL
 - macOS: Xcode command line tools (dependencies fetched automatically)
 
+** Contributing
+
+✨ *This is all vibe coded.* ✨
+
+Not a single line of code in this project was typed by hand. Every feature, every fix, every refactor — all driven through AI agents. That's the whole point.
+
+I don't intend to write code manually, and as the project grows the focus will be on building features for more surgical agentic interventions — interaction graphs for code components, visual code browsing, targeted refactoring, debugging, performance profiling. The IDE itself is built the way it's meant to be used.
+
+*Pull requests are not accepted for now.* If you find a bug or have a suggestion, please open an issue — and if you can, run your own AI agent to analyze the problem and include its suggestions in the report. That kind of contribution is worth more than a patch. Thanks! 🙏
+
+** Support the Project
+
+Gritcode is built and maintained by one person with the help of AI agents. If you want to see this project grow — more providers, visual debugging, code graphs, refactoring tools — the single best thing you can do is sponsor the development.
+
+💜 [[https://github.com/sponsors/lszl84][Become a GitHub Sponsor]]
+
+Every contribution directly funds development time, API costs, and infrastructure. This is an independent project with no VC backing — your support is what keeps it alive and moving forward.
+
 ** License
 
 GPL v3 -- See [[./LICENSE][LICENSE]].
