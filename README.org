@@ -12,7 +12,7 @@ GPU-rendered AI coding harness built in C++ with OpenGL, HarfBuzz, and FreeType.
 - *GPU-rendered UI* -- OpenGL 3.3 batched quads, SDF rounded rects, 0% idle CPU
 - *HarfBuzz text shaping* -- proper Arabic RTL, ligatures, contextual forms, diacritics
 - *Emoji support* -- FontConfig fallback, ZWJ sequences, bitmap scaling
-- *Multi-provider* -- [[https://opencode.ai/zen][OpenCode]] Zen (pay-as-you-go), OpenCode Go (quality coding models, low monthly price), and Claude ACP
+- *Multi-provider* -- [[https://opencode.ai/zen][OpenCode]] Zen (pay-as-you-go), OpenCode Go (quality coding models, low monthly price), and Claude ACP (requires [[https://docs.anthropic.com/en/docs/claude-code/overview][Claude Code CLI]])
 - *Tool use* -- bash, read_file, list_directory with background execution
 - *Session persistence* -- per working directory, automatic restore
 - *Markdown rendering* -- bold, italic, code blocks, headings, blockquotes, lists
