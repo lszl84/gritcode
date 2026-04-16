@@ -5,6 +5,8 @@
 
 GPU-rendered AI coding harness built in C++ with OpenGL, HarfBuzz, and FreeType.
 
+⚠️ *Warning:* Gritcode does not have a permission system. AI agents can execute any command on your machine. Press *Escape* to cancel a running request at any time.
+
 ** Features
 
 - *GPU-rendered UI* -- OpenGL 3.3 batched quads, SDF rounded rects, 0% idle CPU
