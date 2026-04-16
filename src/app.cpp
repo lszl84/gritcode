@@ -1744,7 +1744,8 @@ void App::SendMessage() {
     toolRound_ = 0;
     requestStartTime_ = GetMonotonicTime();
     waitingForResponse_ = true;
-    waitingDotAnim_ = 0;
+    waitingDotTimer_ = 0;
+    waitingDotFrame_ = -1;
     MarkDirty();
 
     DoSendToProvider();
@@ -1919,7 +1920,7 @@ void App::DoSendToProvider() {
                                         responseBuffer_ += text;
 
                                         double now = GetMonotonicTime();
-                                        if (now - lastMarkdownTime_ > 0.5 &&
+                                        if (now - lastMarkdownTime_ > 0.2 &&
                                             responseBuffer_.size() > lastMarkdownLen_ + 20) {
                                             RenderMarkdownToBlocks();
                                             lastMarkdownTime_ = now;
@@ -2046,7 +2047,7 @@ void App::DoSendToProvider() {
 
                     // Progressive markdown: re-render every 500ms if enough new text
                     double now = GetMonotonicTime();
-                    if (now - lastMarkdownTime_ > 0.5 &&
+                    if (now - lastMarkdownTime_ > 0.2 &&
                         responseBuffer_.size() > lastMarkdownLen_ + 20) {
                         RenderMarkdownToBlocks();
                         lastMarkdownTime_ = now;
@@ -2649,8 +2650,7 @@ void App::Run() {
         // between chunks (and especially during Anthropic tool_use streaming,
         // which accumulates partial_json server-side without posting any UI
         // events) the loop would PollEvents → drain → continue with no sleep.
-        bool showingDots = waitingForResponse_ && (GetMonotonicTime() - requestStartTime_ > 1.5);
-        if (!dirty_ && events_.Empty() && !scrollView_.NeedsRedraw() && !showingDots) {
+        if (!dirty_ && events_.Empty() && !scrollView_.NeedsRedraw()) {
             window_.WaitEvents();
         } else {
             window_.PollEvents();
@@ -2670,11 +2670,22 @@ void App::Run() {
             scrollView_.Update(dt);
         }
 
-        // Animate waiting dots
-        if (waitingForResponse_) {
-            waitingDotAnim_ += dt;
-            double elapsed = now - requestStartTime_;
-            if (elapsed > 1.5) MarkDirty();  // Keep redrawing for animation
+        // Animate waiting dots (~4fps, only redraw on frame change)
+        if (waitingForResponse_ && (now - requestStartTime_ > 1.5)) {
+            if (waitingDotFrame_ < 0) {
+                // First appearance — show immediately
+                waitingDotFrame_ = 0;
+                waitingDotTimer_ = 0;
+                MarkDirty();
+            } else {
+                waitingDotTimer_ += dt;
+                static constexpr float DOT_INTERVAL = 0.25f;  // 4fps
+                if (waitingDotTimer_ >= DOT_INTERVAL) {
+                    waitingDotTimer_ = 0;
+                    waitingDotFrame_ = (waitingDotFrame_ + 1) % 3;
+                    MarkDirty();
+                }
+            }
         }
 
         if (!dirty_ && !scrollView_.NeedsRedraw()) continue;
@@ -2696,16 +2707,15 @@ void App::Run() {
             // Scroll view (top portion)
             scrollView_.Paint(renderer_);
 
-            // Waiting dots (plain, below last block, after 3s)
-            if (waitingForResponse_ && (now - requestStartTime_ > 1.5)) {
+            // Waiting dots (plain, below last block, after 1.5s)
+            if (waitingForResponse_ && waitingDotFrame_ >= 0) {
                 auto& fm = scrollView_.Fonts();
                 float dotR = fm.LineHeight(FontStyle::Regular) * 0.15f;
                 float spacing = dotR * 3;
                 float baseX = 20;
                 float baseY = scrollView_.ContentBottom() + fm.LineHeight(FontStyle::Regular);
-                int frame = (int)(waitingDotAnim_ * 4) % 4;  // 0-3 animation frame
                 for (int d = 0; d < 3; d++) {
-                    float alpha = (d == (frame % 3)) ? 1.0f : 0.3f;
+                    float alpha = (d == waitingDotFrame_) ? 1.0f : 0.3f;
                     Color c{0.5f, 0.5f, 0.5f, alpha};
                     float cx = baseX + d * spacing;
                     renderer_.DrawRect(cx - dotR, baseY - dotR, dotR * 2, dotR * 2, c);

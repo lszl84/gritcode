@@ -224,7 +224,7 @@ void ScrollView::ToggleCollapse(size_t idx) {
 void ScrollView::Update(float dt) {
     animTime_ += dt;
     if (animTime_ >= ANIMATION_INTERVAL) {
-        animTime_ -= ANIMATION_INTERVAL;
+        animTime_ = 0;
         loadingFrame_ = (loadingFrame_ + 1) % LOADING_DOT_COUNT;
         if (!animatedBlocks_.empty()) needsRedraw_ = true;
     }
