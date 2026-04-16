@@ -101,7 +101,7 @@ Gritcode is built and maintained by one person with the help of AI agents. If yo
 
 💜 [[https://github.com/sponsors/lszl84][Become a GitHub Sponsor]]
 
-Every contribution directly funds development time, API costs, and infrastructure. This is an independent project with no VC backing — your support is what keeps it alive and moving forward.
+This is an independent project with no VC backing — your support is what keeps it alive and moving forward.
 
 ** License
 
