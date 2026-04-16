@@ -14,6 +14,7 @@ GPU-rendered AI coding harness built in C++ with OpenGL, HarfBuzz, and FreeType.
 - *Emoji support* -- FontConfig fallback, ZWJ sequences, bitmap scaling
 - *Multi-provider* -- [[https://opencode.ai/zen][OpenCode]] Zen (pay-as-you-go), OpenCode Go (quality coding models, low monthly price), and Claude ACP (requires [[https://docs.anthropic.com/en/docs/claude-code/overview][Claude Code CLI]])
 - *Tool use* -- bash, read_file, list_directory with background execution
+- *Secure API key storage* -- system keychain (libsecret on Linux, Keychain on macOS)
 - *Session persistence* -- per working directory, automatic restore
 - *Markdown rendering* -- bold, italic, code blocks, headings, blockquotes, lists
 - *~9,400 lines of C++* -- entire codebase
