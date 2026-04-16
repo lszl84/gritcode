@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 """
-FCN MCP Client — programmatic control of a running FastCode Native instance.
+Grit MCP Client — programmatic control of a running Gritcode instance.
 
 Usage as library:
-    from mcp_client import FCN
-    fcn = FCN()
-    fcn.send("create a PHP project with unit tests")
-    fcn.wait_idle(timeout=120)
-    print(fcn.last_assistant())
+    from mcp_client import Grit
+    grit = Grit()
+    grit.send("create a PHP project with unit tests")
+    grit.wait_idle(timeout=120)
+    print(grit.last_assistant())
 
 Usage as CLI:
     python3 scripts/mcp_client.py status
@@ -23,7 +23,7 @@ import sys
 import time
 
 
-class FCN:
+class Grit:
     def __init__(self, host="localhost", port=8765):
         self.host = host
         self.port = port
@@ -31,7 +31,7 @@ class FCN:
         self._id = 0
 
     def connect(self):
-        """Connect to FCN MCP server. Tries ports 8765-8770."""
+        """Connect to Grit MCP server. Tries ports 8765-8770."""
         for p in range(self.port, self.port + 6):
             try:
                 self.sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -42,7 +42,7 @@ class FCN:
             except (ConnectionRefusedError, socket.timeout, OSError):
                 self.sock.close()
                 self.sock = None
-        raise ConnectionError(f"Cannot connect to FCN on ports {self.port}-{self.port+5}")
+        raise ConnectionError(f"Cannot connect to Grit on ports {self.port}-{self.port+5}")
 
     def close(self):
         if self.sock:
@@ -81,7 +81,7 @@ class FCN:
         return self._call("getStatus")
 
     def send(self, message):
-        """Send a message to FCN (like typing and pressing Enter)."""
+        """Send a message to Grit (like typing and pressing Enter)."""
         return self._call("sendMessage", {"message": message})
 
     def conversation(self):
@@ -104,7 +104,7 @@ class FCN:
             if not self.is_busy():
                 return True
             time.sleep(poll_interval)
-        raise TimeoutError(f"FCN still busy after {timeout}s")
+        raise TimeoutError(f"Grit still busy after {timeout}s")
 
 
 def main():
@@ -115,26 +115,26 @@ def main():
 
     cmd = sys.argv[1]
 
-    with FCN() as fcn:
+    with Grit() as grit:
         if cmd == "status":
-            print(json.dumps(fcn.status(), indent=2))
+            print(json.dumps(grit.status(), indent=2))
 
         elif cmd == "send":
             if len(sys.argv) < 3:
                 print("Usage: mcp_client.py send <message>")
                 sys.exit(1)
             msg = " ".join(sys.argv[2:])
-            fcn.send(msg)
+            grit.send(msg)
             print(f"Sent: {msg}")
 
         elif cmd == "wait":
             timeout = int(sys.argv[2]) if len(sys.argv) > 2 else 300
-            print(f"Waiting up to {timeout}s for FCN to finish...")
-            fcn.wait_idle(timeout=timeout)
+            print(f"Waiting up to {timeout}s for Grit to finish...")
+            grit.wait_idle(timeout=timeout)
             print("Done.")
 
         elif cmd == "conversation":
-            conv = fcn.conversation()
+            conv = grit.conversation()
             for m in conv:
                 role = m.get("role", "?")
                 content = m.get("content", "")
@@ -148,7 +148,7 @@ def main():
                     print(f"[{role}] {content[:200]}")
 
         elif cmd == "last":
-            resp = fcn.last_assistant()
+            resp = grit.last_assistant()
             print(resp.get("text", "(no response)"))
 
         else:

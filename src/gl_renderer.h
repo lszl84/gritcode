@@ -1,4 +1,4 @@
-// FastCode Native — GPU-rendered AI coding harness
+// Gritcode — GPU-rendered AI coding harness
 // Copyright (C) 2026 luke@devmindscape.com
 //
 // This program is free software: you can redistribute it and/or modify

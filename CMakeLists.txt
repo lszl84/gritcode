@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.24)
-project(fcn VERSION 0.1.0 LANGUAGES CXX C)
+project(grit VERSION 0.1.0 LANGUAGES CXX C)
 
 set(CMAKE_CXX_STANDARD 23)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -111,7 +111,7 @@ else()
 endif()
 
 # --- Executable ---
-set(FCN_SOURCES
+set(GRIT_SOURCES
     src/main.cpp
     src/app.cpp
     src/glfw_window.cpp
@@ -126,58 +126,58 @@ set(FCN_SOURCES
 )
 
 # MCP is the dev/agent automation channel — it lets scripts/mcp_client.py
-# drive a running fcn for testing. Release builds don't need it (and end
+# drive a running grit for testing. Release builds don't need it (and end
 # users aren't expected to script their editor), so we compile it out of
 # Release entirely: smaller binary, no listening TCP socket, no attack
 # surface. Any non-Release config (Debug, RelWithDebInfo) keeps it in.
 if(NOT CMAKE_BUILD_TYPE STREQUAL "Release")
-    list(APPEND FCN_SOURCES src/mcp_server.cpp)
-    set(FCN_ENABLE_MCP TRUE)
+    list(APPEND GRIT_SOURCES src/mcp_server.cpp)
+    set(GRIT_ENABLE_MCP TRUE)
 endif()
 
 if(APPLE)
-    # Generate fcn.icns from fcn.svg using built-in sips + iconutil.
-    set(FCN_ICNS ${CMAKE_BINARY_DIR}/fcn.icns)
+    # Generate grit.icns from grit.svg using built-in sips + iconutil.
+    set(GRIT_ICNS ${CMAKE_BINARY_DIR}/grit.icns)
     add_custom_command(
-        OUTPUT ${FCN_ICNS}
+        OUTPUT ${GRIT_ICNS}
         COMMAND ${CMAKE_SOURCE_DIR}/scripts/gen-icns.sh
-                ${CMAKE_SOURCE_DIR}/fcn.svg ${FCN_ICNS}
-        DEPENDS ${CMAKE_SOURCE_DIR}/fcn.svg ${CMAKE_SOURCE_DIR}/scripts/gen-icns.sh
-        COMMENT "Generating fcn.icns from fcn.svg"
+                ${CMAKE_SOURCE_DIR}/grit.svg ${GRIT_ICNS}
+        DEPENDS ${CMAKE_SOURCE_DIR}/grit.svg ${CMAKE_SOURCE_DIR}/scripts/gen-icns.sh
+        COMMENT "Generating grit.icns from grit.svg"
     )
-    set_source_files_properties(${FCN_ICNS} PROPERTIES
+    set_source_files_properties(${GRIT_ICNS} PROPERTIES
         MACOSX_PACKAGE_LOCATION "Resources")
-    list(APPEND FCN_SOURCES src/macos_chrome.mm ${FCN_ICNS})
+    list(APPEND GRIT_SOURCES src/macos_chrome.mm ${GRIT_ICNS})
 
-    add_executable(fcn MACOSX_BUNDLE ${FCN_SOURCES})
+    add_executable(grit MACOSX_BUNDLE ${GRIT_SOURCES})
 
-    set_target_properties(fcn PROPERTIES
+    set_target_properties(grit PROPERTIES
         MACOSX_BUNDLE TRUE
         MACOSX_BUNDLE_INFO_PLIST ${CMAKE_SOURCE_DIR}/cmake/Info.plist.in
-        MACOSX_BUNDLE_BUNDLE_NAME "FastCode Native"
-        MACOSX_BUNDLE_GUI_IDENTIFIER "com.devmindscape.fastcode-native"
+        MACOSX_BUNDLE_BUNDLE_NAME "Gritcode"
+        MACOSX_BUNDLE_GUI_IDENTIFIER "ai.gritcode.app"
         MACOSX_BUNDLE_BUNDLE_VERSION "${VERSION_STRING}"
         MACOSX_BUNDLE_SHORT_VERSION_STRING "${PROJECT_VERSION_MAJOR}.${PROJECT_VERSION_MINOR}.${PROJECT_VERSION_PATCH}"
-        MACOSX_BUNDLE_ICON_FILE fcn.icns
+        MACOSX_BUNDLE_ICON_FILE grit.icns
     )
 else()
-    add_executable(fcn ${FCN_SOURCES})
+    add_executable(grit ${GRIT_SOURCES})
 endif()
 
-target_include_directories(fcn PRIVATE
+target_include_directories(grit PRIVATE
     ${cmark_BINARY_DIR}/src
     ${cmark_SOURCE_DIR}/src
     src
 )
 
-target_link_libraries(fcn PRIVATE
+target_link_libraries(grit PRIVATE
     OpenGL::GL
     nlohmann_json::nlohmann_json
     cmark
 )
 
 if(LINUX)
-    target_link_libraries(fcn PRIVATE
+    target_link_libraries(grit PRIVATE
         PkgConfig::GLFW
         PkgConfig::FREETYPE
         PkgConfig::HARFBUZZ
@@ -186,14 +186,14 @@ if(LINUX)
         PkgConfig::LIBSECRET
     )
 else()
-    target_link_libraries(fcn PRIVATE
+    target_link_libraries(grit PRIVATE
         glfw
         freetype
         harfbuzz
         CURL::libcurl
     )
     if(APPLE)
-        target_link_libraries(fcn PRIVATE
+        target_link_libraries(grit PRIVATE
             "-framework Security"
             "-framework CoreText"
             "-framework CoreFoundation"
@@ -202,37 +202,37 @@ else()
     endif()
 endif()
 
-target_compile_definitions(fcn PRIVATE
-    FCN_VERSION="${VERSION_STRING}"
+target_compile_definitions(grit PRIVATE
+    GRIT_VERSION="${VERSION_STRING}"
 )
 
-if(FCN_ENABLE_MCP)
-    target_compile_definitions(fcn PRIVATE FCN_ENABLE_MCP)
+if(GRIT_ENABLE_MCP)
+    target_compile_definitions(grit PRIVATE GRIT_ENABLE_MCP)
 endif()
 
 if(LINUX)
-    target_compile_definitions(fcn PRIVATE FCN_LINUX)
+    target_compile_definitions(grit PRIVATE GRIT_LINUX)
 elseif(APPLE)
-    target_compile_definitions(fcn PRIVATE FCN_MACOS)
+    target_compile_definitions(grit PRIVATE GRIT_MACOS)
 elseif(WIN32)
-    target_compile_definitions(fcn PRIVATE FCN_WINDOWS)
+    target_compile_definitions(grit PRIVATE GRIT_WINDOWS)
 endif()
 
 if(MSVC)
-    target_compile_options(fcn PRIVATE /W4)
+    target_compile_options(grit PRIVATE /W4)
 else()
-    target_compile_options(fcn PRIVATE -Wall -Wextra -Wpedantic)
+    target_compile_options(grit PRIVATE -Wall -Wextra -Wpedantic)
 endif()
 
 include(CheckIPOSupported)
 check_ipo_supported(RESULT lto_supported)
 if(lto_supported)
-    set_property(TARGET fcn PROPERTY INTERPROCEDURAL_OPTIMIZATION_RELEASE TRUE)
+    set_property(TARGET grit PROPERTY INTERPROCEDURAL_OPTIMIZATION_RELEASE TRUE)
 endif()
 
 # Install
-install(TARGETS fcn DESTINATION bin)
+install(TARGETS grit DESTINATION bin)
 if(LINUX)
-    install(FILES fcn.desktop DESTINATION share/applications)
-    install(FILES fcn.svg DESTINATION share/icons/hicolor/scalable/apps)
+    install(FILES grit.desktop DESTINATION share/applications)
+    install(FILES grit.svg DESTINATION share/icons/hicolor/scalable/apps)
 endif()

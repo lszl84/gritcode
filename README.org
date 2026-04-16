@@ -1,15 +1,11 @@
-#+TITLE: FastCode Native
-#+SUBTITLE: GPU-rendered AI coding harness. No Electron. No web views.
+#+TITLE: Gritcode
+#+SUBTITLE: Native coding engine
 
-A native AI coding assistant built in C++ with OpenGL, HarfBuzz, and FreeType.
+[[https://gritcode.ai][gritcode.ai]]
 
-No Electron. No Chromium. No 800 MB RAM for a chat window.
+GPU-rendered AI coding harness built in C++ with OpenGL, HarfBuzz, and FreeType.
 
-** The Problem
-
-Every AI coding tool ships as an Electron app or a web-based TUI. You're running a compiler, a language server, a browser with 47 tabs, and then your AI assistant wants another Chromium instance and half a gigabyte of RAM to show you a text conversation.
-
-** What It Does
+** Features
 
 - *GPU-rendered UI* -- OpenGL 3.3 batched quads, SDF rounded rects, 0% idle CPU
 - *HarfBuzz text shaping* -- proper Arabic RTL, ligatures, contextual forms, diacritics
@@ -22,21 +18,48 @@ Every AI coding tool ships as an Electron app or a web-based TUI. You're running
 
 ** Quick Start
 
+*** Linux (Arch)
+
 #+begin_src bash
-# Dependencies (Arch)
 sudo pacman -S glfw freetype2 harfbuzz fontconfig curl libsecret
 
-git clone https://github.com/lszl84/fastcode-native.git
-cd fastcode-native
-
+git clone https://github.com/lszl84/gritcode.git
+cd gritcode
 cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX=~/.local
 cmake --build build
 cmake --install build
 
-fastcode-native
+grit
 #+end_src
 
-CMake fetches cmark and nlohmann_json automatically. Everything else is system libraries.
+*** Linux (Ubuntu/Debian)
+
+#+begin_src bash
+sudo apt install libglfw3-dev libfreetype-dev libharfbuzz-dev libfontconfig-dev libcurl4-openssl-dev libsecret-1-dev cmake ninja-build
+
+git clone https://github.com/lszl84/gritcode.git
+cd gritcode
+cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX=~/.local
+cmake --build build
+cmake --install build
+
+grit
+#+end_src
+
+*** macOS
+
+#+begin_src bash
+brew install cmake ninja
+
+git clone https://github.com/lszl84/gritcode.git
+cd gritcode
+cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
+cmake --build build
+
+open build/grit.app
+#+end_src
+
+On macOS, GLFW, FreeType, HarfBuzz, and curl are fetched and built from source automatically by CMake.
 
 ** Architecture
 
@@ -51,23 +74,14 @@ CMake fetches cmark and nlohmann_json automatically. Everything else is system l
 | =glfw_window.cpp= | GLFW setup, input handling, main loop       |
 | =curl_http.cpp=   | Async HTTP with SSE streaming               |
 | =session.cpp=     | Per-CWD session persistence                 |
-| =keychain.cpp=    | libsecret API key storage                   |
-
-** Measured Numbers
-
-| Metric               | FastCode Native      | Typical Electron app |
-|------------------------+----------------------+----------------------|
-| Codebase              | ~4,900 lines C++     | 50K-200K+ lines      |
-| Idle CPU              | 0%                   | 1-5%                 |
-| Scroll CPU            | ~1%                  | 10-40%               |
-| System dependencies   | System libs only     | Node.js + Chromium   |
-| Startup               | < 1 second           | 2-5 seconds          |
+| =keychain.cpp=    | libsecret / Keychain API key storage        |
 
 ** Requirements
 
-- Linux (Wayland or X11)
+- Linux (Wayland or X11) or macOS
 - CMake 3.24+, Ninja, C++23 compiler
-- System libs: glfw3, freetype2, harfbuzz, fontconfig, libcurl, libsecret-1, OpenGL
+- Linux: glfw3, freetype2, harfbuzz, fontconfig, libcurl, libsecret-1, OpenGL
+- macOS: Xcode command line tools (dependencies fetched automatically)
 
 ** License
 
@@ -75,4 +89,4 @@ GPL v3 -- See [[./LICENSE][LICENSE]].
 
 ** Credits
 
-Built by [[https://github.com/lszl84][lszl84]].
+Built by [[https://devmindscape.com][DevMindscape]].

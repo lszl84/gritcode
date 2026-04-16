@@ -1,4 +1,4 @@
-// FastCode Native — GPU-rendered AI coding harness
+// Gritcode — GPU-rendered AI coding harness
 // Copyright (C) 2026 luke@devmindscape.com
 //
 // This program is free software: you can redistribute it and/or modify
@@ -20,9 +20,9 @@
 #include <cstdio>
 #include <map>
 
-#if defined(FCN_LINUX)
+#if defined(GRIT_LINUX)
 #include <fontconfig/fontconfig.h>
-#elif defined(FCN_MACOS)
+#elif defined(GRIT_MACOS)
 #include <CoreText/CoreText.h>
 #include <CoreFoundation/CoreFoundation.h>
 #endif
@@ -37,7 +37,7 @@ FontManager::~FontManager() {
     if (ft_) FT_Done_FreeType(ft_);
 }
 
-#if defined(FCN_LINUX)
+#if defined(GRIT_LINUX)
 
 std::string FontManager::FindFont(const char* family, bool bold, bool italic) const {
     FcPattern* pat = FcPatternCreate();
@@ -103,7 +103,7 @@ int FontManager::FindFallbackFace(uint32_t codepoint, int sizePx) const {
 
 static void InitFontDiscovery() { FcInit(); }
 
-#elif defined(FCN_MACOS)
+#elif defined(GRIT_MACOS)
 
 // Helper: get file path from a CTFont
 static std::string CTFontGetFilePath(CTFontRef font) {

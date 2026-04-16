@@ -1,4 +1,4 @@
-// FastCode Native — GPU-rendered AI coding harness
+// Gritcode — GPU-rendered AI coding harness
 // Copyright (C) 2026 luke@devmindscape.com
 //
 // This program is free software: you can redistribute it and/or modify
@@ -43,7 +43,7 @@ public:
     // GLFW's content-scale query, which on Wayland/macOS is the compositor
     // buffer scale and on X11 is the Xft.dpi / XSETTINGS / XRandR-derived
     // DPI ratio. Previously this returned fbW/winW, which is always 1 on
-    // X11, so fcn rendered at 96dpi regardless of the user's HiDPI setting.
+    // X11, so grit rendered at 96dpi regardless of the user's HiDPI setting.
     float Scale() const { return contentScale_; }
 
     using ResizeCb = std::function<void(int, int, float)>;

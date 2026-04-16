@@ -1,0 +1,16 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256">
+  <rect width="256" height="256" rx="48" fill="#1a1b2e"/>
+  <rect x="8" y="8" width="240" height="240" rx="40" fill="#252640"/>
+  <!-- Layered chevrons — depth/layers going deep -->
+  <polyline points="80,80 128,128 176,80" fill="none" stroke="#6ecf6e" stroke-width="14" stroke-linecap="round" stroke-linejoin="round"/>
+  <polyline points="80,112 128,160 176,112" fill="none" stroke="#6ecf6e" stroke-width="14" stroke-linecap="round" stroke-linejoin="round" opacity="0.6"/>
+  <polyline points="80,144 128,192 176,144" fill="none" stroke="#6ecf6e" stroke-width="14" stroke-linecap="round" stroke-linejoin="round" opacity="0.3"/>
+  <!-- Glow on top chevron -->
+  <polyline points="80,80 128,128 176,80" fill="none" stroke="#6ecf6e" stroke-width="14" stroke-linecap="round" stroke-linejoin="round" opacity="0.3" filter="url(#glow)"/>
+  <defs>
+    <filter id="glow" x="-20%" y="-20%" width="140%" height="140%">
+      <feGaussianBlur stdDeviation="8" result="blur"/>
+      <feMerge><feMergeNode in="blur"/><feMergeNode in="SourceGraphic"/></feMerge>
+    </filter>
+  </defs>
+</svg>

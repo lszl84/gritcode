@@ -1,4 +1,4 @@
-// FastCode Native — GPU-rendered AI coding harness
+// Gritcode — GPU-rendered AI coding harness
 // Copyright (C) 2026 luke@devmindscape.com
 //
 // This program is free software: you can redistribute it and/or modify
@@ -46,7 +46,7 @@ void MCPServer::Stop() {
 void MCPServer::ServerLoop() {
     // SOCK_CLOEXEC so spawned tool subprocesses (wl-copy, etc.) don't inherit
     // the listen fd. Without this, backgrounded helpers daemonize holding the
-    // port and block the next fcn instance from binding.
+    // port and block the next grit instance from binding.
 #ifdef SOCK_CLOEXEC
     serverFd_ = socket(AF_INET, SOCK_STREAM | SOCK_CLOEXEC, 0);
 #else

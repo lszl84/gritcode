@@ -5,7 +5,7 @@
 
 #pragma once
 
-#ifdef FCN_LINUX
+#ifdef GRIT_LINUX
 #include <xkbcommon/xkbcommon-keysyms.h>
 #else
 // XKB keysym values (X11/XKB standard, same values GLFW maps to)

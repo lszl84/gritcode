@@ -1,4 +1,4 @@
-// FastCode Native — GPU-rendered AI coding harness
+// Gritcode — GPU-rendered AI coding harness
 // Copyright (C) 2026 luke@devmindscape.com
 //
 // This program is free software: you can redistribute it and/or modify
@@ -45,7 +45,7 @@ struct MCPCallbacks {
     std::function<void()> cancelRequest;
 };
 
-// Simple TCP-based JSON-RPC server for controlling FCN programmatically.
+// Simple TCP-based JSON-RPC server for controlling Grit programmatically.
 // Listens on port 8765 (or next available), accepts one client at a time.
 class MCPServer {
 public:

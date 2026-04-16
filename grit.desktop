@@ -1,9 +1,9 @@
 [Desktop Entry]
-Name=FastCode Native
-Comment=GPU-rendered AI coding harness
-Exec=fcn --session-chooser
+Name=Gritcode
+Comment=Native coding engine
+Exec=grit --session-chooser
 Terminal=false
 Type=Application
-Icon=fcn
+Icon=grit
 Categories=Development;
 Keywords=AI;coding;assistant;

@@ -1,4 +1,4 @@
-// FastCode Native — GPU-rendered AI coding harness
+// Gritcode — GPU-rendered AI coding harness
 // Copyright (C) 2026 luke@devmindscape.com
 //
 // This program is free software: you can redistribute it and/or modify
@@ -92,7 +92,7 @@ static void ResolveShellEnvAsync(EventQueue& events) {
             if (devnull >= 0) { dup2(devnull, STDERR_FILENO); close(devnull); }
             // Original pfd fds are CLOEXEC so they auto-close on exec.
             // Hint rc-files to skip heavy work (some users check this).
-            setenv("FCN_RESOLVING_ENVIRONMENT", "1", 1);
+            setenv("GRIT_RESOLVING_ENVIRONMENT", "1", 1);
             execl(shell, shell, "-ilc", cmd.c_str(), (char*)nullptr);
             _exit(127);
         }
@@ -633,7 +633,7 @@ static std::string ToolDefsJson() {
 
 bool App::Init(bool sessionChooser) {
     chooserMode_ = sessionChooser;
-    if (!window_.Init(1000, 750, "FastCode Native")) return false;
+    if (!window_.Init(1000, 750, "Gritcode")) return false;
 
     if (!scrollView_.Init(window_.Width(), window_.Height() - (int)((barHeight_ + inputHeight_ + chromeTopPad_) * window_.Scale()),
                           window_.Scale()))
@@ -641,7 +641,7 @@ bool App::Init(bool sessionChooser) {
 
     scrollView_.SetAutoScroll(true);
     scrollView_.SetClipboardFunc([&](const std::string& t) {
-#ifdef FCN_LINUX
+#ifdef GRIT_LINUX
         FILE* p = popen("wl-copy 2>/dev/null", "w");
 #else
         FILE* p = popen("pbcopy 2>/dev/null", "w");
@@ -705,7 +705,7 @@ bool App::Init(bool sessionChooser) {
 
     // Clipboard paste helper (GLFW can't read cross-app clipboard on Wayland)
     auto pasteFromClipboard = [&]() -> std::string {
-#ifdef FCN_LINUX
+#ifdef GRIT_LINUX
         FILE* p = popen("wl-paste --no-newline 2>/dev/null", "r");
 #else
         FILE* p = popen("pbpaste 2>/dev/null", "r");
@@ -726,7 +726,7 @@ bool App::Init(bool sessionChooser) {
     messageInput_.onPaste = pasteFromClipboard;
 
     statusLabel_.text = "Disconnected";
-    versionLabel_.text = "v" FCN_VERSION;
+    versionLabel_.text = "v" GRIT_VERSION;
     versionLabel_.color = {0.35f, 0.35f, 0.37f};
 
     // Window callbacks
@@ -759,7 +759,7 @@ bool App::Init(bool sessionChooser) {
     LayoutWidgets();
 
     // Kick off async shell env resolution — PATH and friends from the
-    // user's login shell, needed so GUI-launched fcn can find claude,
+    // user's login shell, needed so GUI-launched grit can find claude,
     // ffmpeg, etc. Runs in a detached thread; result is applied on the
     // main thread via events_ before any user-triggered subprocess is
     // likely to run.
@@ -796,6 +796,8 @@ bool App::Init(bool sessionChooser) {
 }
 
 void App::RestoreSessionToView() {
+    AppendSystem("\xe2\x9a\xa0\xef\xb8\x8f No permission system — agents can execute any command on your machine. Press Escape to cancel a running request.");
+
     if (!session_.History().empty()) {
         events_.Push([this]() {
             MarkdownRenderer mdRenderer(14);
@@ -854,7 +856,7 @@ void App::StartConnect() {
 }
 
 void App::StartMCP() {
-#ifdef FCN_ENABLE_MCP
+#ifdef GRIT_ENABLE_MCP
     MCPCallbacks cb;
 
     cb.sendMessage = [this](const std::string& msg) {
@@ -1175,7 +1177,7 @@ std::string App::GetRegistryCachePath() {
     if (xdg && *xdg) base = xdg;
     else if (home) base = std::string(home) + "/.cache";
     else base = "/tmp";
-    return base + "/fastcode-native/models.json";
+    return base + "/gritcode/models.json";
 }
 
 void App::StartFetchRegistry() {
@@ -1248,7 +1250,7 @@ void App::OnRegistryReceived(json registry, int httpStatus) {
 void App::PopulateModelsFromRegistry(const std::string& providerId) {
     if (!registryLoaded_) return;
 
-    // fcn calls the Zen subscription "zen", but models.dev keys it under
+    // grit calls the Zen subscription "zen", but models.dev keys it under
     // "opencode" (the CLI vendor namespace). Translate so the registry path
     // actually resolves — without this, Zen on a warm cache silently falls
     // through to an empty dropdown.
@@ -1271,7 +1273,7 @@ void App::PopulateModelsFromRegistry(const std::string& providerId) {
             const std::string& mid = it.key();
             const auto& m = it.value();
 
-            // Filter to the two wire protocols fcn supports:
+            // Filter to the two wire protocols grit supports:
             //   @ai-sdk/openai-compatible → /chat/completions
             //   @ai-sdk/anthropic         → /messages
             // Any other shape (e.g. @ai-sdk/google) is still unsupported and
@@ -1297,7 +1299,7 @@ void App::PopulateModelsFromRegistry(const std::string& providerId) {
 
     if (modelDropdown_.items.empty()) {
         AppendSystem("No OpenAI-compatible models available for " + providerId +
-                     " (all are routed through a protocol fcn doesn't support yet).");
+                     " (all are routed through a protocol grit doesn't support yet).");
         activeModel_.clear();
         MarkDirty();
         return;
@@ -1356,7 +1358,7 @@ void App::PopulateWorkspaceDropdown() {
 
     for (int i = 0; i < (int)sessions.size(); i++) {
         auto& si = sessions[i];
-        // Shorten path: ~/Developer/fastcode-native → .../Developer/fastcode-native
+        // Shorten path: ~/Developer/gritcode → .../Developer/gritcode
         std::string label = si.cwd;
         const char* home = getenv("HOME");
         if (home && label.find(home) == 0)
@@ -1414,7 +1416,7 @@ void App::OnWorkspaceChanged(int, const std::string& id) {
 
     session_.SetCwd(id);
     session_.LoadForCwd(id);
-    window_.SetTitle(("FCN — " + id).c_str());
+    window_.SetTitle(("Grit — " + id).c_str());
     RestoreSessionToView();
 
     // Re-connect with current provider
@@ -1562,7 +1564,7 @@ net::CurlHttpClient::Protocol App::ProtocolForActiveModel() {
     // Look up the active (provider, model) pair in the models.dev registry
     // and decide which wire protocol to use. Models may override the
     // provider-level npm default. Default to OpenAI-compat when the registry
-    // hasn't loaded or the entry is missing, matching how fcn behaved before
+    // hasn't loaded or the entry is missing, matching how grit behaved before
     // Anthropic support existed.
     if (!registryLoaded_) return net::CurlHttpClient::Protocol::OpenAI;
     if (!modelsRegistry_.contains(activeProvider_) ||
@@ -1628,7 +1630,7 @@ std::string App::BuildAnthropicRequestJson() {
             "- Keep responses concise. Lead with actions, not explanations.\n";
     }
 
-    // Reshape fcn's OpenAI-flavored history into Anthropic content-block form.
+    // Reshape grit's OpenAI-flavored history into Anthropic content-block form.
     // The mapping:
     //   role=user    → role=user, content = string
     //   role=assistant + text   → role=assistant, content = string
@@ -2310,7 +2312,7 @@ void App::OnMouseDown(float x, float y, bool shift) {
             std::string cwd = getcwd(cwdBuf, sizeof(cwdBuf)) ? cwdBuf : ".";
             session_.SetCwd(cwd);
             session_.LoadForCwd(cwd);
-            window_.SetTitle(("FCN — " + cwd).c_str());
+            window_.SetTitle(("Grit — " + cwd).c_str());
             RestoreSessionToView();
             StartConnect();
         }
@@ -2453,7 +2455,7 @@ void App::OnKey(int key, int mods, bool pressed) {
                 std::string cwd = getcwd(cwdBuf, sizeof(cwdBuf)) ? cwdBuf : ".";
                 session_.SetCwd(cwd);
                 session_.LoadForCwd(cwd);
-                window_.SetTitle(("FCN — " + cwd).c_str());
+                window_.SetTitle(("Grit — " + cwd).c_str());
                 PopulateWorkspaceDropdown();
                 RestoreSessionToView();
                 StartConnect();
@@ -2486,7 +2488,7 @@ void App::OnKey(int key, int mods, bool pressed) {
         if (inp && inp->selStart != inp->selEnd) {
             std::string sel = inp->GetSelectedText();
             if (!sel.empty()) {
-#ifdef FCN_LINUX
+#ifdef GRIT_LINUX
                 FILE* p = popen("wl-copy 2>/dev/null", "w");
 #else
                 FILE* p = popen("pbcopy 2>/dev/null", "w");
@@ -2608,7 +2610,7 @@ void App::ChooserSelect(int idx) {
     session_.SetCwd(dir);
     session_.LoadForCwd(dir);
     chooserMode_ = false;
-    window_.SetTitle(("FCN — " + dir).c_str());
+    window_.SetTitle(("Grit — " + dir).c_str());
     PopulateWorkspaceDropdown();
     RestoreSessionToView();
     StartConnect();
@@ -2630,7 +2632,7 @@ void App::ChooserSelectPath(const std::string& path) {
     session_.SetCwd(dir);
     session_.LoadForCwd(dir);
     chooserMode_ = false;
-    window_.SetTitle(("FCN — " + dir).c_str());
+    window_.SetTitle(("Grit — " + dir).c_str());
     RestoreSessionToView();
     StartConnect();
     MarkDirty();
@@ -2744,7 +2746,7 @@ void App::Run() {
         totalUs += frameUs;
         frameCount++;
         if (now - perfStart > 2.0 && frameCount > 0) {
-            FILE* pf = fopen("/tmp/fcn-native-perf.log", "a");
+            FILE* pf = fopen("/tmp/grit-perf.log", "a");
             if (pf) {
                 fprintf(pf, "PERF: %d frames in %.1fs (%.0f/s) | avg %.0fus (%.2fms)\n",
                         frameCount, now - perfStart,

@@ -1,4 +1,4 @@
-// FastCode Native — GPU-rendered AI coding harness
+// Gritcode — GPU-rendered AI coding harness
 // Copyright (C) 2026 luke@devmindscape.com
 //
 // This program is free software: you can redistribute it and/or modify
@@ -18,7 +18,7 @@
 #include "types.h"
 #include <cstdio>
 
-#ifdef FCN_MACOS
+#ifdef GRIT_MACOS
 extern "C" void MacStyleWindowChrome(GLFWwindow* gw, float r, float g, float b);
 #endif
 
@@ -69,7 +69,7 @@ bool GlfwWindow::Init(int width, int height, const char* title) {
     contentScale_ = sx;
     UpdateScale();
 
-#ifdef FCN_MACOS
+#ifdef GRIT_MACOS
     // Match the title bar to the GL clear color in gl_renderer.cpp so the
     // window reads as one surface, Terminal.app-style.
     MacStyleWindowChrome(window_, 0.12f, 0.12f, 0.13f);

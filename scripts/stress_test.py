@@ -1,19 +1,19 @@
 #!/usr/bin/env python3
 """
-FCN Stress Test — intense multi-phase agent testing.
+Grit Stress Test — intense multi-phase agent testing.
 Sends increasingly demanding tasks and monitors for stalls.
 """
 
 import sys, time, json, subprocess
-sys.path.insert(0, "/home/luke/Developer/fastcode-native/scripts")
-from mcp_client import FCN
+sys.path.insert(0, "/home/luke/Developer/gritcode/scripts")
+from mcp_client import Grit
 
 PORT = int(sys.argv[1]) if len(sys.argv) > 1 else 8765
 TIMEOUT = 600  # 10 min per phase
 STALL_THRESHOLD = 90  # seconds without progress = stall
 
-fcn = FCN(port=PORT)
-fcn.connect()
+grit = Grit(port=PORT)
+grit.connect()
 
 def run_phase(name, prompt, timeout=TIMEOUT):
     print(f"\n{'='*70}")
@@ -21,7 +21,7 @@ def run_phase(name, prompt, timeout=TIMEOUT):
     print(f"{'='*70}")
     print(f"Prompt: {prompt[:120]}...")
 
-    fcn.send(prompt)
+    grit.send(prompt)
     start = time.time()
     last_msgs = 0
     last_progress = time.time()
@@ -31,7 +31,7 @@ def run_phase(name, prompt, timeout=TIMEOUT):
     while time.time() - start < timeout:
         time.sleep(3)
         try:
-            s = fcn.status()
+            s = grit.status()
         except Exception as e:
             print(f"  CONNECTION ERROR: {e}")
             return False
@@ -63,7 +63,7 @@ def run_phase(name, prompt, timeout=TIMEOUT):
         return False
 
     elapsed = int(time.time() - start)
-    resp = fcn.last_assistant()
+    resp = grit.last_assistant()
     text = resp.get("text", "")
 
     print(f"\n  Completed in {elapsed}s, {peak_rounds} tool rounds, {last_msgs} messages")
@@ -76,7 +76,7 @@ def run_phase(name, prompt, timeout=TIMEOUT):
 
 def count_files():
     r = subprocess.run(
-        ["find", "/home/luke/Developer/fcn-testbed", "-type", "f",
+        ["find", "/home/luke/Developer/grit-testbed", "-type", "f",
          "-not", "-path", "*/venv/*", "-not", "-path", "*/__pycache__/*",
          "-not", "-name", "*.db"],
         capture_output=True, text=True
@@ -111,7 +111,7 @@ After creating everything, test it with curl: create 2 projects, 5 tasks across 
 n_files, files = count_files()
 print(f"\n  Files in testbed: {n_files}")
 for f in sorted(files):
-    print(f"    {f.replace('/home/luke/Developer/fcn-testbed/', '')}")
+    print(f"    {f.replace('/home/luke/Developer/grit-testbed/', '')}")
 
 # ─── PHASE 2: Major refactoring ───
 results["phase2"] = run_phase(
@@ -221,7 +221,7 @@ print(f"  Overall: {'ALL PASSED' if all_pass else 'FAILURES DETECTED'}")
 
 # Run final test count if pytest exists
 r = subprocess.run(
-    ["bash", "-c", "cd ~/Developer/fcn-testbed && source venv/bin/activate && pytest tests/ --tb=no -q 2>&1 | tail -5"],
+    ["bash", "-c", "cd ~/Developer/grit-testbed && source venv/bin/activate && pytest tests/ --tb=no -q 2>&1 | tail -5"],
     capture_output=True, text=True
 )
 print(f"\n  Final pytest run:\n{r.stdout}")

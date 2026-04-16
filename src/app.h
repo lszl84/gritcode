@@ -1,4 +1,4 @@
-// FastCode Native — GPU-rendered AI coding harness
+// Gritcode — GPU-rendered AI coding harness
 // Copyright (C) 2026 luke@devmindscape.com
 //
 // This program is free software: you can redistribute it and/or modify
@@ -22,7 +22,7 @@
 #include "keychain.h"
 #include "markdown_renderer.h"
 #include "session.h"
-#ifdef FCN_ENABLE_MCP
+#ifdef GRIT_ENABLE_MCP
 #include "mcp_server.h"
 #endif
 #include <string>
@@ -91,9 +91,9 @@ private:
     Label versionLabel_;
 
     // MCP server — dev/agent automation channel. Compiled out of Release
-    // builds (see CMakeLists.txt) so production fcn doesn't listen on any
+    // builds (see CMakeLists.txt) so production grit doesn't listen on any
     // port. Only present in Debug/RelWithDebInfo.
-#ifdef FCN_ENABLE_MCP
+#ifdef GRIT_ENABLE_MCP
     MCPServer mcpServer_;
 #endif
     void StartMCP();
@@ -112,8 +112,8 @@ private:
 
     // models.dev registry — canonical source for the Zen and OpenCode Go
     // provider/model lists. Fetched once at startup (with a disk cache at
-    // $XDG_CACHE_HOME/fastcode-native/models.json). Used to populate the
-    // model dropdown and to filter out models whose wire protocol fcn
+    // $XDG_CACHE_HOME/gritcode/models.json). Used to populate the
+    // model dropdown and to filter out models whose wire protocol grit
     // doesn't speak (e.g. @ai-sdk/anthropic — /messages instead of
     // /chat/completions).
     nlohmann::json modelsRegistry_;

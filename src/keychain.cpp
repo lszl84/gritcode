@@ -1,4 +1,4 @@
-// FastCode Native — GPU-rendered AI coding harness
+// Gritcode — GPU-rendered AI coding harness
 // Copyright (C) 2026 luke@devmindscape.com
 //
 // This program is free software: you can redistribute it and/or modify
@@ -16,14 +16,14 @@
 
 #include "keychain.h"
 
-#if defined(FCN_MACOS)
+#if defined(GRIT_MACOS)
 
 #include <Security/Security.h>
 #include <CoreFoundation/CoreFoundation.h>
 
 namespace keychain {
 
-static const char* SERVICE = "FastCodeNative/OpenCodeZen";
+static const char* SERVICE = "Gritcode/OpenCodeZen";
 static const char* ACCOUNT = "api-key";
 
 std::string LoadApiKey() {
@@ -88,7 +88,7 @@ bool ClearApiKey() {
 
 } // namespace keychain
 
-#elif defined(FCN_LINUX)
+#elif defined(GRIT_LINUX)
 
 #include <libsecret/secret.h>
 
@@ -106,7 +106,7 @@ static const SecretSchema SCHEMA = {
     0, NULL, NULL, NULL, NULL, NULL, NULL, NULL
 };
 
-static const char* SERVICE = "FastCodeNative/OpenCodeZen";
+static const char* SERVICE = "Gritcode/OpenCodeZen";
 
 std::string LoadApiKey() {
     GError* error = nullptr;
@@ -162,7 +162,7 @@ bool ClearApiKey() {
 
 } // namespace keychain
 
-#elif defined(FCN_WINDOWS)
+#elif defined(GRIT_WINDOWS)
 
 // TODO: implement with wincred.h
 #error "Windows keychain not yet implemented"

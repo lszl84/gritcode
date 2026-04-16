@@ -1,4 +1,4 @@
-// FastCode Native — GPU-rendered AI coding harness
+// Gritcode — GPU-rendered AI coding harness
 // Copyright (C) 2026 luke@devmindscape.com
 //
 // This program is free software: you can redistribute it and/or modify
@@ -29,7 +29,7 @@ SessionManager::SessionManager() {}
 std::string SessionManager::DataDir() {
     const char* home = getenv("HOME");
     if (!home) home = "/tmp";
-    return std::string(home) + "/.local/share/fastcode-native";
+    return std::string(home) + "/.local/share/gritcode";
 }
 
 std::string SessionManager::IndexPath() {
