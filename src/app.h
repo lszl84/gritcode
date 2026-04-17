@@ -134,7 +134,6 @@ private:
 
     // Waiting indicator (plain dots, not a block)
     double requestStartTime_ = 0;
-    bool waitingForResponse_ = false;  // True between send and first chunk
     float waitingDotTimer_ = 0;
     int waitingDotFrame_ = -1;  // current animation frame (-1 = not showing)
 

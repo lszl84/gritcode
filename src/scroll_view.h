@@ -65,6 +65,7 @@ public:
     void StartThinking(size_t blockIdx);
     void StopThinking(size_t blockIdx);
     void StopAllAnimations();
+    bool HasActiveThinking() const { return !animatedBlocks_.empty(); }
     void ToggleCollapse(size_t blockIdx);
     void Update(float dt);
 

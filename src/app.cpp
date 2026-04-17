@@ -860,7 +860,10 @@ void App::StartMCP() {
             {"provider", activeProvider_},
             {"model", activeModel_},
             {"toolRound", toolRound_},
-            {"messageCount", (int)session_.History().size()}
+            {"messageCount", (int)session_.History().size()},
+            {"waitingDotsVisible", waitingDotFrame_ >= 0},
+            {"thinkingDotsActive", scrollView_.HasActiveThinking()},
+            {"sendButtonEnabled", sendButton_.enabled}
         };
     };
 
@@ -1731,7 +1734,6 @@ void App::SendMessage() {
     sendButton_.enabled = false;
     toolRound_ = 0;
     requestStartTime_ = GetMonotonicTime();
-    waitingForResponse_ = true;
     waitingDotTimer_ = 0;
     waitingDotFrame_ = -1;
     MarkDirty();
@@ -1895,7 +1897,6 @@ void App::DoSendToProvider() {
                                     fullResponse += text;
                                     events_.Push([this, text, gen]() {
                                         if (gen != requestGen_.load()) return;
-                                        waitingForResponse_ = false;
                                         bool firstChunk = responseBuffer_.empty();
                                         if (receivingThinking_) {
                                             receivingThinking_ = false;
@@ -2004,7 +2005,6 @@ void App::DoSendToProvider() {
     receivingThinking_ = false;
     lastMarkdownLen_ = 0;
     lastMarkdownTime_ = GetMonotonicTime();
-    waitingForResponse_ = true;
     requestStartTime_ = GetMonotonicTime();
     waitingDotFrame_ = -1;
     waitingDotTimer_ = 0;
@@ -2022,7 +2022,6 @@ void App::DoSendToProvider() {
                         scrollView_.ContinueStream(chunk);
                     }
                 } else {
-                    waitingForResponse_ = false;
                     // Content — finalize thinking if transitioning
                     if (receivingThinking_) {
                         receivingThinking_ = false;
@@ -2056,8 +2055,6 @@ void App::DoSendToProvider() {
                const std::vector<json>& toolCalls, const std::string& finishReason,
                int, int) {
             events_.Push([this, ok, content, error, toolCalls, finishReason]() {
-                waitingForResponse_ = false;
-
                 if (!ok) {
                     if (!session_.History().empty() && session_.History().back().role == "user")
                         session_.History().pop_back();
@@ -2662,10 +2659,16 @@ void App::Run() {
             scrollView_.Update(dt);
         }
 
-        // Animate waiting dots (~4fps, only redraw on frame change)
-        if (waitingForResponse_ && (now - requestStartTime_ > 1.5)) {
+        // Animate waiting dots (~4fps, only redraw on frame change).
+        // Show whenever requestInProgress_ (send button disabled) and no
+        // other progress indicator is already visible (thinking dots or
+        // streaming content text).
+        bool showDots = requestInProgress_
+                        && !scrollView_.HasActiveThinking()
+                        && responseBuffer_.empty()
+                        && (now - requestStartTime_ > 1.5);
+        if (showDots) {
             if (waitingDotFrame_ < 0) {
-                // First appearance — show immediately
                 waitingDotFrame_ = 0;
                 waitingDotTimer_ = 0;
                 MarkDirty();
@@ -2678,6 +2681,9 @@ void App::Run() {
                     MarkDirty();
                 }
             }
+        } else if (waitingDotFrame_ >= 0) {
+            waitingDotFrame_ = -1;
+            MarkDirty();
         }
 
         if (!dirty_ && !scrollView_.NeedsRedraw()) continue;
@@ -2699,8 +2705,8 @@ void App::Run() {
             // Scroll view (top portion)
             scrollView_.Paint(renderer_);
 
-            // Waiting dots (plain, below last block, after 1.5s)
-            if (waitingForResponse_ && waitingDotFrame_ >= 0) {
+            // Waiting dots (plain, below last block)
+            if (waitingDotFrame_ >= 0) {
                 auto& fm = scrollView_.Fonts();
                 float dotR = fm.LineHeight(FontStyle::Regular) * 0.15f;
                 float spacing = dotR * 3;
