@@ -89,6 +89,10 @@ private:
 
     void UpdateScale();
 
+#ifndef GRIT_MACOS
+    void LoadIcon(GLFWwindow* win);
+#endif
+
     static void FramebufferSizeCb(GLFWwindow*, int, int);
     static void WindowContentScaleCb(GLFWwindow*, float, float);
     static void MouseButtonCb(GLFWwindow*, int, int, int);
