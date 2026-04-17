@@ -7,3 +7,4 @@ Type=Application
 Icon=grit
 Categories=Development;
 Keywords=AI;coding;assistant;
+StartupWMClass=grit

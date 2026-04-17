@@ -40,6 +40,11 @@ bool GlfwWindow::Init(int width, int height, const char* title) {
     glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR, 3);
     glfwWindowHint(GLFW_OPENGL_PROFILE, GLFW_OPENGL_CORE_PROFILE);
     glfwWindowHint(GLFW_VISIBLE, GLFW_FALSE);  // Don't show until first frame
+#ifdef GRIT_LINUX
+    glfwWindowHintString(GLFW_X11_CLASS_NAME, "grit");
+    glfwWindowHintString(GLFW_X11_INSTANCE_NAME, "grit");
+    glfwWindowHintString(GLFW_WAYLAND_APP_ID, "grit");
+#endif
 
     window_ = glfwCreateWindow(width, height, title, nullptr, nullptr);
     if (!window_) {
