@@ -17,7 +17,6 @@
 #include "glfw_window.h"
 #include "types.h"
 #include <cstdio>
-#include <cstring>
 
 #ifdef GRIT_MACOS
 extern "C" void MacStyleWindowChrome(GLFWwindow* gw, float r, float g, float b);
@@ -43,7 +42,9 @@ bool GlfwWindow::Init(int width, int height, const char* title) {
 #ifdef GRIT_LINUX
     glfwWindowHintString(GLFW_X11_CLASS_NAME, "grit");
     glfwWindowHintString(GLFW_X11_INSTANCE_NAME, "grit");
+#ifdef GLFW_WAYLAND_APP_ID
     glfwWindowHintString(GLFW_WAYLAND_APP_ID, "grit");
+#endif
 #endif
 
     window_ = glfwCreateWindow(width, height, title, nullptr, nullptr);
