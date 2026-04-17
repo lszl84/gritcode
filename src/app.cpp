@@ -29,6 +29,7 @@
 #include <poll.h>
 #include <chrono>
 #include "keysyms.h"
+#include "clipboard.h"
 
 // pipe2(O_CLOEXEC) is Linux-only; on macOS fall back to pipe + fcntl.
 static int CloexecPipe(int pfd[2]) {
@@ -641,12 +642,7 @@ bool App::Init(bool sessionChooser) {
 
     scrollView_.SetAutoScroll(true);
     scrollView_.SetClipboardFunc([&](const std::string& t) {
-#ifdef GRIT_LINUX
-        FILE* p = popen("wl-copy 2>/dev/null", "w");
-#else
-        FILE* p = popen("pbcopy 2>/dev/null", "w");
-#endif
-        if (p) { fwrite(t.c_str(), 1, t.size(), p); pclose(p); }
+        Clipboard::Copy(t);
     });
 
     if (!renderer_.Init()) {
@@ -703,19 +699,9 @@ bool App::Init(bool sessionChooser) {
         MarkDirty();
     };
 
-    // Clipboard paste helper (GLFW can't read cross-app clipboard on Wayland)
+    // Clipboard paste helper (works on Wayland, X11, and macOS)
     auto pasteFromClipboard = [&]() -> std::string {
-#ifdef GRIT_LINUX
-        FILE* p = popen("wl-paste --no-newline 2>/dev/null", "r");
-#else
-        FILE* p = popen("pbpaste 2>/dev/null", "r");
-#endif
-        if (!p) return "";
-        std::string result;
-        char buf[4096];
-        while (fgets(buf, sizeof(buf), p)) result += buf;
-        pclose(p);
-        return result;
+        return Clipboard::Paste();
     };
 
     apiKeyInput_.onPaste = pasteFromClipboard;
@@ -2488,12 +2474,7 @@ void App::OnKey(int key, int mods, bool pressed) {
         if (inp && inp->selStart != inp->selEnd) {
             std::string sel = inp->GetSelectedText();
             if (!sel.empty()) {
-#ifdef GRIT_LINUX
-                FILE* p = popen("wl-copy 2>/dev/null", "w");
-#else
-                FILE* p = popen("pbcopy 2>/dev/null", "w");
-#endif
-                if (p) { fwrite(sel.c_str(), 1, sel.size(), p); pclose(p); }
+                Clipboard::Copy(sel);
             }
         } else {
             scrollView_.OnKey(key, mods);

@@ -123,6 +123,7 @@ set(GRIT_SOURCES
     src/curl_http.cpp
     src/keychain.cpp
     src/session.cpp
+    src/clipboard.cpp
 )
 
 # MCP is the dev/agent automation channel — it lets scripts/mcp_client.py
