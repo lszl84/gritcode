@@ -16,12 +16,8 @@
 
 #include "glfw_window.h"
 #include "types.h"
-#define STB_IMAGE_IMPLEMENTATION
-#include "stb_image.h"
 #include <cstdio>
 #include <cstring>
-#include <filesystem>
-#include <vector>
 
 #ifdef GRIT_MACOS
 extern "C" void MacStyleWindowChrome(GLFWwindow* gw, float r, float g, float b);
@@ -78,9 +74,6 @@ bool GlfwWindow::Init(int width, int height, const char* title) {
     // Match the title bar to the GL clear color in gl_renderer.cpp so the
     // window reads as one surface, Terminal.app-style.
     MacStyleWindowChrome(window_, 0.12f, 0.12f, 0.13f);
-#else
-    // Set taskbar/window manager icon on Linux
-    LoadIcon(window_);
 #endif
 
     return true;
@@ -198,39 +191,3 @@ void GlfwWindow::CharCallbackCb(GLFWwindow* win, unsigned int codepoint) {
     if (self->superHeld_) return;
     if (self->charCb_) self->charCb_(codepoint);
 }
-
-#ifndef GRIT_MACOS
-void GlfwWindow::LoadIcon(GLFWwindow* win) {
-    // Try multiple icon paths
-    const char* paths[] = {
-        "grit.png",
-        "share/icons/hicolor/256x256/apps/grit.png",
-        ".local/share/icons/hicolor/256x256/apps/grit.png",
-    };
-
-    int w = 0, h = 0, n = 0;
-    stbi_uc* pixels = nullptr;
-
-    for (const char* p : paths) {
-        if (std::filesystem::exists(p)) {
-            pixels = stbi_load(p, &w, &h, &n, 4);
-            if (pixels) break;
-        }
-    }
-
-    if (!pixels) {
-        fprintf(stderr, "icon: could not load grit.png\n");
-        return;
-    }
-
-    // Convert RGBA to BGRA for GLFW (which expects Windows-style BGRA)
-    for (int i = 0; i < w * h * 4; i += 4) {
-        std::swap(pixels[i], pixels[i + 2]);
-    }
-
-    GLFWimage icon = {w, h, pixels};
-    glfwSetWindowIcon(win, 1, &icon);
-    stbi_image_free(pixels);
-    fprintf(stderr, "icon: loaded %dx%d icon\n", w, h);
-}
-#endif
