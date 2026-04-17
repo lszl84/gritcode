@@ -1875,14 +1875,13 @@ void App::DoSendToProvider() {
                         std::string evtType = evt.value("type", "");
 
                         if (evtType == "content_block_stop") {
-                            // End of a thinking block — clear thinking state
-                            // so the next text_delta starts a fresh text run
-                            // without animating the old thinking block.
                             events_.Push([this, gen]() {
                                 if (gen != requestGen_.load()) return;
                                 if (receivingThinking_) {
                                     receivingThinking_ = false;
-                                    scrollView_.StopAllAnimations();
+                                    // Don't stop thinking animation yet —
+                                    // keep dots visible until text_delta
+                                    // actually starts streaming content.
                                 }
                                 MarkDirty();
                             });
@@ -1897,14 +1896,17 @@ void App::DoSendToProvider() {
                                     events_.Push([this, text, gen]() {
                                         if (gen != requestGen_.load()) return;
                                         waitingForResponse_ = false;
+                                        bool firstChunk = responseBuffer_.empty();
                                         if (receivingThinking_) {
                                             receivingThinking_ = false;
-                                            scrollView_.StopAllAnimations();
+                                            firstChunk = true;
                                             responseBuffer_.clear();
                                             lastMarkdownLen_ = 0;
                                         }
-                                        if (responseBuffer_.empty())
+                                        if (firstChunk) {
+                                            scrollView_.StopAllAnimations();
                                             responseStartBlock_ = scrollView_.BlockCount();
+                                        }
                                         responseBuffer_ += text;
 
                                         double now = GetMonotonicTime();
@@ -1922,7 +1924,6 @@ void App::DoSendToProvider() {
                                 if (!thinking.empty()) {
                                     events_.Push([this, thinking, gen]() {
                                         if (gen != requestGen_.load()) return;
-                                        waitingForResponse_ = false;
                                         if (!receivingThinking_) {
                                             receivingThinking_ = true;
                                             scrollView_.AppendStream(BlockType::THINKING, thinking);
@@ -2012,9 +2013,6 @@ void App::DoSendToProvider() {
         // onChunk (bg thread)
         [this](const std::string& chunk, bool isThinking) {
             events_.Push([this, chunk, isThinking]() {
-                // First chunk received — stop waiting dots
-                waitingForResponse_ = false;
-
                 if (isThinking) {
                     if (!receivingThinking_) {
                         receivingThinking_ = true;
@@ -2024,6 +2022,7 @@ void App::DoSendToProvider() {
                         scrollView_.ContinueStream(chunk);
                     }
                 } else {
+                    waitingForResponse_ = false;
                     // Content — finalize thinking if transitioning
                     if (receivingThinking_) {
                         receivingThinking_ = false;
