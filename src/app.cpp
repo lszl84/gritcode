@@ -1072,7 +1072,7 @@ void App::Connect(const std::string& apiKey) {
         // If we have an API key, validate it against an authenticated endpoint
         int authStatus = 0;
         if (!apiKey.empty()) {
-            std::string testModel = models.empty() ? "kimi-k2.5" : models[0].id;
+            std::string testModel = models.empty() ? "minimax-m2.5-free" : models[0].id;
             authStatus = httpClient_.ValidateKey(testModel);
             if (authStatus == 401) {
                 events_.Push([this, apiKey]() {
@@ -1117,18 +1117,17 @@ void App::OnModelsReceived(std::vector<net::ModelInfo> models, int httpStatus) {
                       models[i].id.find("big-pickle") != std::string::npos;
         if (httpClient_.IsAnonymous() && !isFree) continue;
         modelDropdown_.items.push_back({models[i].id, models[i].name});
-        if (models[i].id == "kimi-k2.5") defaultIdx = modelDropdown_.items.size() - 1;
+        if (models[i].id == "minimax-m2.5-free") defaultIdx = modelDropdown_.items.size() - 1;
     }
 
     if (modelDropdown_.items.empty()) {
         modelDropdown_.items = {
-            {"big-pickle", "Big Pickle"},
-            {"kimi-k2.5", "Kimi K2.5"},
+            {"minimax-m2.5-free", "MiniMax M2.5 Free"},
         };
     }
 
     // Selection priority mirrors the registry path: restoredModelPref_ >
-    // activeModel_ > kimi-k2.5 > 0. Preserving activeModel_ keeps a second
+    // activeModel_ > minimax-m2.5-free > 0. Preserving activeModel_ keeps a second
     // Connect() from clobbering a session's restored selection.
     if (!activeModel_.empty()) {
         for (size_t i = 0; i < modelDropdown_.items.size(); i++) {
@@ -1296,11 +1295,11 @@ void App::PopulateModelsFromRegistry(const std::string& providerId) {
     //   1. restoredModelPref_ — explicit session-restore hint.
     //   2. activeModel_        — whatever is already selected (keeps a
     //      second Connect() from clobbering the first one's session restore).
-    //   3. kimi-k2.5           — legacy default.
+    //   3. minimax-m2.5-free   — default free model.
     //   4. index 0.
     int defaultIdx = 0;
     for (size_t i = 0; i < modelDropdown_.items.size(); i++) {
-        if (modelDropdown_.items[i].id == "kimi-k2.5") {
+        if (modelDropdown_.items[i].id == "minimax-m2.5-free") {
             defaultIdx = (int)i;
             break;
         }
@@ -1976,8 +1975,11 @@ void App::DoSendToProvider() {
                     RenderMarkdownToBlocks(true);
                     responseBuffer_.clear();
                 }
-                if (!fullResponse.empty())
+                if (!fullResponse.empty()) {
                     session_.History().push_back({"assistant", fullResponse, {}, {}});
+                } else if (responseBuffer_.empty()) {
+                    AppendSystem("Empty response from model");
+                }
                 requestInProgress_ = false;
                 sendButton_.enabled = true;
                 session_.SetProvider(activeProvider_);
@@ -2001,6 +2003,10 @@ void App::DoSendToProvider() {
     receivingThinking_ = false;
     lastMarkdownLen_ = 0;
     lastMarkdownTime_ = GetMonotonicTime();
+    waitingForResponse_ = true;
+    requestStartTime_ = GetMonotonicTime();
+    waitingDotFrame_ = -1;
+    waitingDotTimer_ = 0;
 
     httpClient_.SendStreaming(protocol, requestJson,
         // onChunk (bg thread)
@@ -2118,8 +2124,11 @@ void App::DoSendToProvider() {
                     responseBuffer_.clear();
                 }
 
-                if (!content.empty())
+                if (!content.empty()) {
                     session_.History().push_back({"assistant", content, {}, {}});
+                } else if (responseBuffer_.empty()) {
+                    AppendSystem("Empty response from model");
+                }
                 requestInProgress_ = false;
                 sendButton_.enabled = true;
                 scrollView_.StopAllAnimations();
