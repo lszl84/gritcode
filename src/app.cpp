@@ -1733,7 +1733,7 @@ void App::SendMessage() {
     requestInProgress_ = true;
     sendButton_.enabled = false;
     toolRound_ = 0;
-    requestStartTime_ = GetMonotonicTime();
+
     waitingDotTimer_ = 0;
     waitingDotFrame_ = -1;
     MarkDirty();
@@ -2005,7 +2005,7 @@ void App::DoSendToProvider() {
     receivingThinking_ = false;
     lastMarkdownLen_ = 0;
     lastMarkdownTime_ = GetMonotonicTime();
-    requestStartTime_ = GetMonotonicTime();
+
     waitingDotFrame_ = -1;
     waitingDotTimer_ = 0;
 
@@ -2665,8 +2665,7 @@ void App::Run() {
         // streaming content text).
         bool showDots = requestInProgress_
                         && !scrollView_.HasActiveThinking()
-                        && responseBuffer_.empty()
-                        && (now - requestStartTime_ > 1.5);
+                        && responseBuffer_.empty();
         if (showDots) {
             if (waitingDotFrame_ < 0) {
                 waitingDotFrame_ = 0;

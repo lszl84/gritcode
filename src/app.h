@@ -133,7 +133,6 @@ private:
     double lastMarkdownTime_ = 0;
 
     // Waiting indicator (plain dots, not a block)
-    double requestStartTime_ = 0;
     float waitingDotTimer_ = 0;
     int waitingDotFrame_ = -1;  // current animation frame (-1 = not showing)
 
