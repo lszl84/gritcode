@@ -15,17 +15,18 @@
 // along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 #pragma once
-
+#include <GLFW/glfw3.h>
 #include <string>
 
 namespace Clipboard {
 
-// Copy text to the system clipboard. Works on Wayland, X11, and macOS.
-// Returns true on success, false on failure.
-bool Copy(const std::string& text);
+// Initialize clipboard with a window handle. Must be called before Copy/Paste.
+void Init(GLFWwindow* window);
 
-// Get text from the system clipboard. Works on Wayland, X11, and macOS.
-// Returns the clipboard text, or empty string on failure.
+// Copy text to the system clipboard.
+void Copy(const std::string& text);
+
+// Get text from the system clipboard.
 std::string Paste();
 
 }  // namespace Clipboard
