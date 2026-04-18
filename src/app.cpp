@@ -1272,7 +1272,7 @@ void App::PopulateModelsFromRegistry(const std::string& providerId) {
                 m["provider"].contains("npm") && m["provider"]["npm"].is_string()) {
                 npm = m["provider"]["npm"].get<std::string>();
             }
-            if (npm != "@ai-sdk/openai-compatible" && npm != "@ai-sdk/anthropic") continue;
+            if (npm != "@ai-sdk/openai-compatible" && npm != "@ai-sdk/openai" && npm != "@ai-sdk/anthropic") continue;
 
             std::string name = m.value("name", mid);
             modelDropdown_.items.push_back({mid, name});
