@@ -68,6 +68,7 @@ FetchContent_MakeAvailable(sdl3)
 if(LINUX)
     # Linux: use system packages
     find_package(PkgConfig REQUIRED)
+    pkg_check_modules(GTK4 REQUIRED IMPORTED_TARGET gtk4)
     pkg_check_modules(FREETYPE REQUIRED IMPORTED_TARGET freetype2)
     pkg_check_modules(HARFBUZZ REQUIRED IMPORTED_TARGET harfbuzz)
     pkg_check_modules(FONTCONFIG REQUIRED IMPORTED_TARGET fontconfig)
@@ -154,6 +155,12 @@ set(GRIT_SOURCES
     src/session.cpp
     src/clipboard.cpp
 )
+
+if(LINUX)
+    add_executable(grit-gtk4 src/gtk4_main.cpp)
+    target_link_libraries(grit-gtk4 PRIVATE PkgConfig::GTK4)
+    target_compile_options(grit-gtk4 PRIVATE -Wall -Wextra -Wpedantic)
+endif()
 
 # MCP is the dev/agent automation channel — it lets scripts/mcp_client.py
 # drive a running grit for testing. Release builds don't need it (and end
