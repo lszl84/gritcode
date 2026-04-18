@@ -979,33 +979,33 @@ void App::LayoutWidgets() {
     maximizeButton_.bounds = {closeButton_.bounds.x - 4 * s - btnW, btnY, btnW, btnH};
     minimizeButton_.bounds = {maximizeButton_.bounds.x - 4 * s - btnW, btnY, btnW, btnH};
 
-    messageInput_.bounds = {8, inputY + 5, w - 103, inp - 10};
-    sendButton_.bounds = {w - 88, inputY + 5, 80, inp - 10};
+    messageInput_.bounds = {8 * s, inputY + 5 * s, w - 103 * s, inp - 10 * s};
+    sendButton_.bounds = {w - 88 * s, inputY + 5 * s, 80 * s, inp - 10 * s};
 
-    float bx = 8;
-    workspaceDropdown_.bounds = {bx, barY + 5, 200 * s, bar - 10}; bx += 205 * s;
-    providerDropdown_.bounds = {bx, barY + 5, 140 * s, bar - 10}; bx += 145 * s;
-    modelDropdown_.bounds = {bx, barY + 5, 150 * s, bar - 10}; bx += 155 * s;
-    statusLabel_.bounds = {bx, barY + 5, 180 * s, bar - 10}; bx += 185 * s;
+    float bx = 8 * s;
+    workspaceDropdown_.bounds = {bx, barY + 5 * s, 200 * s, bar - 10 * s}; bx += 205 * s;
+    providerDropdown_.bounds = {bx, barY + 5 * s, 140 * s, bar - 10 * s}; bx += 145 * s;
+    modelDropdown_.bounds = {bx, barY + 5 * s, 150 * s, bar - 10 * s}; bx += 155 * s;
+    statusLabel_.bounds = {bx, barY + 5 * s, 180 * s, bar - 10 * s}; bx += 185 * s;
 
-    // Right-edge of the bottom bar matches sendButton right edge above (w - 8).
-    float rightEdge = w - 8;
+    // Right-edge of the bottom bar matches sendButton right edge above.
+    float rightEdge = w - 8 * s;
     bool showApiKey = (activeProvider_ == "zen" || activeProvider_ == "opencode-go");
     if (showApiKey && apiKeyEditing_) {
         apiKeyButton_.visible = false;
         float btnW2 = 40 * s;
         float inputW = 220 * s;
-        float totalW = inputW + btnW2 * 2 + 8;
+        float totalW = inputW + btnW2 * 2 + 8 * s;
         float startX = rightEdge - totalW;
-        apiKeyInput_.bounds = {startX, barY + 5, inputW, bar - 10};
-        apiKeyAccept_.bounds = {startX + inputW + 4, barY + 5, btnW2, bar - 10};
-        apiKeyCancel_.bounds = {startX + inputW + btnW2 + 8, barY + 5, btnW2, bar - 10};
-        versionLabel_.bounds = {startX - 80 * s, barY + 5, 70 * s, bar - 10};
+        apiKeyInput_.bounds = {startX, barY + 5 * s, inputW, bar - 10 * s};
+        apiKeyAccept_.bounds = {startX + inputW + 4 * s, barY + 5 * s, btnW2, bar - 10 * s};
+        apiKeyCancel_.bounds = {startX + inputW + btnW2 + 8 * s, barY + 5 * s, btnW2, bar - 10 * s};
+        versionLabel_.bounds = {startX - 80 * s, barY + 5 * s, 70 * s, bar - 10 * s};
     } else {
         float apiW = 100 * s;
-        apiKeyButton_.bounds = {rightEdge - apiW, barY + 5, apiW, bar - 10};
+        apiKeyButton_.bounds = {rightEdge - apiW, barY + 5 * s, apiW, bar - 10 * s};
         apiKeyButton_.visible = showApiKey;
-        versionLabel_.bounds = {rightEdge - apiW - 80 * s, barY + 5, 70 * s, bar - 10};
+        versionLabel_.bounds = {rightEdge - apiW - 80 * s, barY + 5 * s, 70 * s, bar - 10 * s};
     }
 
     // Exclude CSD buttons from draggable title region

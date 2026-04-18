@@ -9,6 +9,7 @@
 #include <xkbcommon/xkbcommon-keysyms.h>
 #include <cstdio>
 #include <algorithm>
+#include <cmath>
 
 #ifdef GRIT_MACOS
 extern "C" void MacStyleWindowChrome(void*, float, float, float);
@@ -96,8 +97,15 @@ bool GlfwWindow::Init(int width, int height, const char* title) {
 void GlfwWindow::UpdateSizes() {
     SDL_GetWindowSize(window_, &winW_, &winH_);
     SDL_GetWindowSizeInPixels(window_, &fbW_, &fbH_);
-    contentScale_ = (winW_ > 0) ? (float)fbW_ / (float)winW_ : 1.0f;
-    bufferScale_ = contentScale_;
+
+    // SDL3 docs: use window display scale for content/UI scaling.
+    contentScale_ = SDL_GetWindowDisplayScale(window_);
+    if (contentScale_ <= 0.0f) contentScale_ = 1.0f;
+
+    // SDL3 docs: use pixel density for converting event coords (window units)
+    // to framebuffer coords (OpenGL pixel units).
+    bufferScale_ = SDL_GetWindowPixelDensity(window_);
+    if (bufferScale_ <= 0.0f) bufferScale_ = 1.0f;
 }
 
 void GlfwWindow::Show() { SDL_ShowWindow(window_); }
@@ -154,13 +162,21 @@ enum SDL_HitTestResult GlfwWindow::HitTest(SDL_Window*, const SDL_Point* area, v
     auto* self = static_cast<GlfwWindow*>(data);
     if (!self || !area) return SDL_HITTEST_NORMAL;
 
-    const int x = area->x;  // logical window coords
+    // SDL hit-test coords are in window coordinate space (not framebuffer px).
+    const int x = area->x;
     const int y = area->y;
-    const int px = (int)(x * self->contentScale_);  // framebuffer coords
-    const int py = (int)(y * self->contentScale_);
+    const float invScale = (self->contentScale_ > 0.0f) ? (1.0f / self->contentScale_) : 1.0f;
+
+    // Convert framebuffer-configured values to window coordinate space.
+    const int titlebarWin = std::max(0, (int)std::lround(self->titlebarHeight_ * invScale));
+    const int exX = (int)std::lround(self->dragExclusion_.x * invScale);
+    const int exY = (int)std::lround(self->dragExclusion_.y * invScale);
+    const int exW = std::max(0, (int)std::lround(self->dragExclusion_.w * invScale));
+    const int exH = std::max(0, (int)std::lround(self->dragExclusion_.h * invScale));
+
     const int w = self->winW_;
     const int h = self->winH_;
-    const int border = 6;
+    const int border = std::max(4, (int)std::lround(6.0f * invScale));
 
     const bool left = x < border;
     const bool right = x >= (w - border);
@@ -176,9 +192,8 @@ enum SDL_HitTestResult GlfwWindow::HitTest(SDL_Window*, const SDL_Point* area, v
     if (top) return SDL_HITTEST_RESIZE_TOP;
     if (bottom) return SDL_HITTEST_RESIZE_BOTTOM;
 
-    if (py < self->titlebarHeight_) {
-        const RectI ex = self->dragExclusion_;
-        const bool inEx = (px >= ex.x && px < ex.x + ex.w && py >= ex.y && py < ex.y + ex.h);
+    if (y < titlebarWin) {
+        const bool inEx = (x >= exX && x < exX + exW && y >= exY && y < exY + exH);
         if (!inEx) return SDL_HITTEST_DRAGGABLE;
     }
 
