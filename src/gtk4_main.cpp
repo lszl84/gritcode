@@ -57,6 +57,7 @@ struct UiState {
     std::vector<std::string> workspaceCwds;
     bool mutatingWorkspace = false;
     bool streaming = false;
+    bool alive = true;
 };
 
 static std::string current_cwd() {
@@ -239,6 +240,7 @@ static void fetch_models(UiState* s) {
     set_status(s, "Loading models...");
     s->http.FetchModels([s](std::vector<net::ModelInfo> models, int status) {
         post_main([s, models = std::move(models), status]() mutable {
+            if (!s->alive) return;
             replace_models(s, models);
             if (status == 200) set_status(s, "Models loaded");
             else if (status == 401) set_status(s, "Invalid API key (401)");
@@ -408,12 +410,14 @@ static void on_send_clicked(GtkButton*, gpointer user_data) {
         req,
         [s](const std::string& chunk, bool thinking) {
             post_main([s, chunk, thinking]() {
+                if (!s->alive) return;
                 append_stream_chunk(s, chunk, thinking);
             });
         },
         [s](bool ok, const std::string& content, const std::string& error,
             const std::vector<json>&, const std::string&, int, int) {
             post_main([s, ok, content, error]() {
+                if (!s->alive) return;
                 append_stream_footer(s);
 
                 if (ok) {
@@ -538,6 +542,14 @@ static void setup_tags(UiState* s) {
         nullptr);
 }
 
+static void ui_state_destroy(gpointer data) {
+    auto* s = static_cast<UiState*>(data);
+    if (!s) return;
+    s->alive = false;
+    s->http.Abort();
+    g_free(s);
+}
+
 static void activate(GtkApplication* app, gpointer) {
     auto* win = gtk_application_window_new(app);
     gtk_window_set_default_size(GTK_WINDOW(win), 1100, 760);
@@ -600,7 +612,7 @@ static void activate(GtkApplication* app, gpointer) {
     configure_http(state);
     fetch_models(state);
 
-    g_object_set_data_full(G_OBJECT(win), "ui-state", state, (GDestroyNotify)g_free);
+    g_object_set_data_full(G_OBJECT(win), "ui-state", state, ui_state_destroy);
     gtk_window_present(GTK_WINDOW(win));
 }
 
