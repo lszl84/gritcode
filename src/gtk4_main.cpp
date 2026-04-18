@@ -53,6 +53,7 @@ struct UiState {
     GtkTextTag* tagMeta = nullptr;
     GtkTextTag* tagError = nullptr;
     GtkTextTag* tagThinking = nullptr;
+    GtkTextTag* tagCode = nullptr;
 
     SessionManager session;
     net::CurlHttpClient http;
@@ -139,9 +140,43 @@ static void clear_transcript(UiState* s) {
     gtk_text_buffer_set_text(s->buffer, "", -1);
 }
 
+static void append_assistant_markdown(UiState* s, const std::string& text) {
+    GtkTextIter end;
+    gtk_text_buffer_get_end_iter(s->buffer, &end);
+    gtk_text_buffer_insert_with_tags(s->buffer, &end, "Assistant\n", -1, s->tagMeta, nullptr);
+
+    bool inCode = false;
+    size_t pos = 0;
+    while (pos < text.size()) {
+        size_t nl = text.find('\n', pos);
+        std::string line = (nl == std::string::npos) ? text.substr(pos) : text.substr(pos, nl - pos);
+
+        if (line.rfind("```", 0) == 0) {
+            inCode = !inCode;
+            if (inCode) {
+                gtk_text_buffer_insert(s->buffer, &end, "\n", 1);
+            } else {
+                gtk_text_buffer_insert(s->buffer, &end, "\n", 1);
+            }
+        } else {
+            gtk_text_buffer_insert_with_tags(
+                s->buffer, &end,
+                line.c_str(), -1,
+                inCode ? s->tagCode : s->tagAssistant,
+                nullptr);
+            gtk_text_buffer_insert(s->buffer, &end, "\n", 1);
+        }
+
+        if (nl == std::string::npos) break;
+        pos = nl + 1;
+    }
+    gtk_text_buffer_insert(s->buffer, &end, "\n", 1);
+    scroll_to_end(s);
+}
+
 static void append_from_message(UiState* s, const ChatMessage& m) {
     if (m.role == "user") append_block(s, "You", m.content.c_str(), s->tagUser);
-    else if (m.role == "assistant") append_block(s, "Assistant", m.content.c_str(), s->tagAssistant);
+    else if (m.role == "assistant") append_assistant_markdown(s, m.content);
     else if (m.role == "tool") append_block(s, "Tool", m.content.c_str(), s->tagThinking);
     else append_block(s, m.role.c_str(), m.content.c_str(), s->tagAssistant);
 }
@@ -605,6 +640,15 @@ static void setup_tags(UiState* s) {
         "foreground", "#7EC7FF",
         "style", PANGO_STYLE_ITALIC,
         "family", "monospace",
+        nullptr);
+
+    s->tagCode = gtk_text_buffer_create_tag(
+        s->buffer, "code",
+        "foreground", "#D8DEE9",
+        "background", "#1A1E24",
+        "family", "monospace",
+        "pixels-above-lines", 2,
+        "pixels-below-lines", 2,
         nullptr);
 }
 
