@@ -411,6 +411,15 @@ static std::string build_anthropic_request(UiState* s, const std::string& model)
     return j.dump();
 }
 
+static void append_tool_calls(UiState* s, const std::vector<json>& toolCalls) {
+    for (const auto& tc : toolCalls) {
+        std::string name = tc.value("name", "tool");
+        std::string args = tc.value("arguments", "{}");
+        std::string body = "name: " + name + "\narguments: " + args;
+        append_block(s, "Tool Call", body.c_str(), s->tagThinking);
+    }
+}
+
 static void on_workspace_changed(GtkDropDown*, GParamSpec*, gpointer user_data) {
     auto* s = static_cast<UiState*>(user_data);
     if (s->mutatingWorkspace || s->streaming) return;
@@ -508,8 +517,8 @@ static void on_send_clicked(GtkButton*, gpointer user_data) {
             });
         },
         [s](bool ok, const std::string& content, const std::string& error,
-            const std::vector<json>&, const std::string&, int, int) {
-            post_main([s, ok, content, error]() {
+            const std::vector<json>& toolCalls, const std::string&, int, int) {
+            post_main([s, ok, content, error, toolCalls]() mutable {
                 if (!s->alive) return;
                 append_stream_footer(s);
 
@@ -517,7 +526,9 @@ static void on_send_clicked(GtkButton*, gpointer user_data) {
                     ChatMessage a;
                     a.role = "assistant";
                     a.content = content;
+                    if (!toolCalls.empty()) a.toolCalls = toolCalls;
                     s->session.History().push_back(a);
+                    if (!toolCalls.empty()) append_tool_calls(s, toolCalls);
                     s->session.MarkDirty();
                     s->session.Save();
                     set_status(s, "Done");
