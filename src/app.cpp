@@ -635,7 +635,7 @@ static std::string ToolDefsJson() {
 bool App::Init(bool sessionChooser) {
     chooserMode_ = sessionChooser;
     if (!window_.Init(1000, 750, "Gritcode")) return false;
-    Clipboard::Init(window_.Handle());
+    Clipboard::Init(nullptr);
 
     if (!scrollView_.Init(window_.Width(), window_.Height() - (int)((barHeight_ + inputHeight_ + chromeTopPad_) * window_.Scale()),
                           window_.Scale()))
@@ -670,6 +670,25 @@ bool App::Init(bool sessionChooser) {
     // Send button
     sendButton_.text = "Send";
     sendButton_.onClick = [&]() { SendMessage(); };
+
+    // Custom CSD controls
+    closeButton_.text = "×";
+    closeButton_.bgColor = {0.35f, 0.16f, 0.16f};
+    closeButton_.hoverColor = {0.52f, 0.18f, 0.18f};
+    closeButton_.pressColor = {0.42f, 0.14f, 0.14f};
+    closeButton_.onClick = [&]() { window_.RequestClose(); };
+
+    maximizeButton_.text = "□";
+    maximizeButton_.bgColor = {0.18f, 0.18f, 0.20f};
+    maximizeButton_.hoverColor = {0.25f, 0.25f, 0.28f};
+    maximizeButton_.pressColor = {0.15f, 0.15f, 0.17f};
+    maximizeButton_.onClick = [&]() { window_.ToggleMaximize(); };
+
+    minimizeButton_.text = "–";
+    minimizeButton_.bgColor = {0.18f, 0.18f, 0.20f};
+    minimizeButton_.hoverColor = {0.25f, 0.25f, 0.28f};
+    minimizeButton_.pressColor = {0.15f, 0.15f, 0.17f};
+    minimizeButton_.onClick = [&]() { window_.Minimize(); };
 
     // API Key button + inline editor
     apiKeyButton_.text = "API Key...";
@@ -939,11 +958,10 @@ void App::StartMCP() {
 // ============================================================================
 
 void App::LayoutWidgets() {
-    // All coordinates in physical pixels (matching WaylandWindow and ScrollView)
+    // All coordinates in physical pixels
     float w = window_.Width();
     float s = window_.Scale();
-    // Leave a small gutter below the bottom bar so the rounded controls
-    // don't kiss the window edge.
+    float topBar = titlebarHeight_ * s;
     float bottomMargin = 2 * s;
     float h = window_.Height() - bottomMargin;
     float bar = barHeight_ * s;
@@ -951,6 +969,15 @@ void App::LayoutWidgets() {
 
     float barY = h - bar;
     float inputY = barY - inp;
+
+    // Top custom CSD controls
+    float btnPad = 6 * s;
+    float btnW = 34 * s;
+    float btnH = std::max(24.0f * s, topBar - 2 * btnPad);
+    float btnY = (topBar - btnH) * 0.5f;
+    closeButton_.bounds = {w - btnPad - btnW, btnY, btnW, btnH};
+    maximizeButton_.bounds = {closeButton_.bounds.x - 4 * s - btnW, btnY, btnW, btnH};
+    minimizeButton_.bounds = {maximizeButton_.bounds.x - 4 * s - btnW, btnY, btnW, btnH};
 
     messageInput_.bounds = {8, inputY + 5, w - 103, inp - 10};
     sendButton_.bounds = {w - 88, inputY + 5, 80, inp - 10};
@@ -966,13 +993,13 @@ void App::LayoutWidgets() {
     bool showApiKey = (activeProvider_ == "zen" || activeProvider_ == "opencode-go");
     if (showApiKey && apiKeyEditing_) {
         apiKeyButton_.visible = false;
-        float btnW = 40 * s;
+        float btnW2 = 40 * s;
         float inputW = 220 * s;
-        float totalW = inputW + btnW * 2 + 8;
+        float totalW = inputW + btnW2 * 2 + 8;
         float startX = rightEdge - totalW;
         apiKeyInput_.bounds = {startX, barY + 5, inputW, bar - 10};
-        apiKeyAccept_.bounds = {startX + inputW + 4, barY + 5, btnW, bar - 10};
-        apiKeyCancel_.bounds = {startX + inputW + btnW + 8, barY + 5, btnW, bar - 10};
+        apiKeyAccept_.bounds = {startX + inputW + 4, barY + 5, btnW2, bar - 10};
+        apiKeyCancel_.bounds = {startX + inputW + btnW2 + 8, barY + 5, btnW2, bar - 10};
         versionLabel_.bounds = {startX - 80 * s, barY + 5, 70 * s, bar - 10};
     } else {
         float apiW = 100 * s;
@@ -980,17 +1007,48 @@ void App::LayoutWidgets() {
         apiKeyButton_.visible = showApiKey;
         versionLabel_.bounds = {rightEdge - apiW - 80 * s, barY + 5, 70 * s, bar - 10};
     }
+
+    // Exclude CSD buttons from draggable title region
+    titleDragExclusion_ = {
+        (int)(minimizeButton_.bounds.x - 6 * s),
+        0,
+        (int)(w - (minimizeButton_.bounds.x - 6 * s)),
+        (int)topBar
+    };
+    window_.SetTitlebarConfigPx((int)topBar, titleDragExclusion_);
 }
 
 // ============================================================================
 // Paint
 // ============================================================================
 
+void App::PaintTopBar() {
+    float s = window_.Scale();
+    float w = window_.Width();
+    float topBar = titlebarHeight_ * s;
+    auto& fm = scrollView_.Fonts();
+
+    Color topBg{0.09f, 0.09f, 0.10f};
+    renderer_.DrawRect(0, 0, w, topBar, topBg);
+
+    Label title;
+    title.bounds = {10 * s, 0, w * 0.5f, topBar};
+    title.text = "Gritcode";
+    title.color = {0.78f, 0.78f, 0.80f};
+    title.style = FontStyle::Regular;
+    title.Paint(renderer_, fm);
+
+    minimizeButton_.Paint(renderer_, fm);
+    maximizeButton_.Paint(renderer_, fm);
+    closeButton_.Paint(renderer_, fm);
+}
+
 void App::PaintBottomBar() {
     float s = window_.Scale();
     float w = window_.Width();
     float h = window_.Height();
     auto& fm = scrollView_.Fonts();
+    float topBar = titlebarHeight_ * s;
 
     // Single unified dark chrome behind both the message row and the
     // dropdown bar, extending a few pixels above the message row so
@@ -1004,6 +1062,7 @@ void App::PaintBottomBar() {
     float topPad = chromeTopPad_ * s;
 
     renderer_.DrawRect(0, inputY - topPad, w, inp + bar + topPad, chromeBg);
+    renderer_.DrawRect(0, topBar, w, 1, {0.16f, 0.16f, 0.18f});
 
     // Scale transform: widgets use logical coords, renderer uses physical
     // For now, widgets draw at 1:1 since renderer works in physical pixels
@@ -2287,13 +2346,20 @@ void App::CancelInFlight() {
 // ============================================================================
 
 void App::OnMouseDown(float x, float y, bool shift) {
+    float s = window_.Scale();
+    float topBar = titlebarHeight_ * s;
+
     if (chooserMode_) {
-        float s = window_.Scale();
+        // Top CSD controls remain active in chooser mode.
+        if (closeButton_.OnMouseDown(x, y)) { MarkDirty(); return; }
+        if (maximizeButton_.OnMouseDown(x, y)) { MarkDirty(); return; }
+        if (minimizeButton_.OnMouseDown(x, y)) { MarkDirty(); return; }
+
         float lh = scrollView_.Fonts().LineHeight(FontStyle::Regular);
         float rowH = lh * 2.8f;
         float pad = 16 * s;
         float titleH = scrollView_.Fonts().LineHeight(FontStyle::Heading2) + pad;
-        float startY = titleH + pad;
+        float startY = topBar + titleH + pad;
         int idx = (int)((y + chooserScroll_ - startY) / rowH);
         if (idx >= 0 && idx < (int)chooserSessions_.size()) {
             ChooserSelect(idx);
@@ -2312,7 +2378,9 @@ void App::OnMouseDown(float x, float y, bool shift) {
         return;
     }
 
-    // All coords are physical pixels from WaylandWindow
+    if (closeButton_.OnMouseDown(x, y)) { MarkDirty(); return; }
+    if (maximizeButton_.OnMouseDown(x, y)) { MarkDirty(); return; }
+    if (minimizeButton_.OnMouseDown(x, y)) { MarkDirty(); return; }
 
     // Dropdowns: only one can be open at a time. If any popup is open and
     // the click landed inside it, let that dropdown handle it (select item
@@ -2361,7 +2429,6 @@ void App::OnMouseDown(float x, float y, bool shift) {
     }
 
     // Scroll view
-    float s = window_.Scale();
     float viewH = window_.Height() - (barHeight_ + inputHeight_ + chromeTopPad_) * s;
     if (y < viewH) {
         scrollView_.OnMouseDown(x, y, shift);
@@ -2371,27 +2438,40 @@ void App::OnMouseDown(float x, float y, bool shift) {
 }
 
 void App::OnMouseUp(float x, float y) {
+    closeButton_.OnMouseUp(x, y);
+    maximizeButton_.OnMouseUp(x, y);
+    minimizeButton_.OnMouseUp(x, y);
     sendButton_.OnMouseUp(x, y);
     if (apiKeyEditing_) { apiKeyAccept_.OnMouseUp(x, y); apiKeyCancel_.OnMouseUp(x, y); }
     else apiKeyButton_.OnMouseUp(x, y);
-    scrollView_.OnMouseUp(x, y);
+
+    float s = window_.Scale();
+    float viewH = window_.Height() - (barHeight_ + inputHeight_ + chromeTopPad_) * s;
+    if (y < viewH) scrollView_.OnMouseUp(x, y);
     MarkDirty();
 }
 
 void App::OnMouseMove(float x, float y, bool leftDown) {
+    float s = window_.Scale();
+    float topBar = titlebarHeight_ * s;
+
     if (chooserMode_) {
-        float s = window_.Scale();
+        closeButton_.OnMouseMove(x, y);
+        maximizeButton_.OnMouseMove(x, y);
+        minimizeButton_.OnMouseMove(x, y);
+
         float lh = scrollView_.Fonts().LineHeight(FontStyle::Regular);
         float rowH = lh * 2.8f;
         float pad = 16 * s;
         float titleH = scrollView_.Fonts().LineHeight(FontStyle::Heading2) + pad;
-        float startY = titleH + pad;
+        float startY = topBar + titleH + pad;
         int idx = (int)((y + chooserScroll_ - startY) / rowH);
         int maxIdx = (int)chooserSessions_.size(); // includes "New" row
         int newHov = (idx >= 0 && idx <= maxIdx) ? idx : -1;
         if (newHov != chooserHovered_) { chooserHovered_ = newHov; MarkDirty(); }
         return;
     }
+
     // Mouse drag in text input
     auto* focused = FocusedInput();
     if (leftDown && focused) {
@@ -2400,6 +2480,9 @@ void App::OnMouseMove(float x, float y, bool leftDown) {
         return;
     }
 
+    closeButton_.OnMouseMove(x, y);
+    maximizeButton_.OnMouseMove(x, y);
+    minimizeButton_.OnMouseMove(x, y);
     sendButton_.OnMouseMove(x, y);
     if (apiKeyEditing_) { apiKeyAccept_.OnMouseMove(x, y); apiKeyCancel_.OnMouseMove(x, y); }
     else apiKeyButton_.OnMouseMove(x, y);
@@ -2407,7 +2490,6 @@ void App::OnMouseMove(float x, float y, bool leftDown) {
     providerDropdown_.OnMouseMove(x, y);
     modelDropdown_.OnMouseMove(x, y);
 
-    float s = window_.Scale();
     float viewH = window_.Height() - (barHeight_ + inputHeight_ + chromeTopPad_) * s;
     if (y < viewH) {
         scrollView_.OnMouseMove(x, y, leftDown);
@@ -2416,11 +2498,18 @@ void App::OnMouseMove(float x, float y, bool leftDown) {
 }
 
 void App::OnScroll(float delta) {
+    float s = window_.Scale();
+    float topBar = titlebarHeight_ * s;
     if (chooserMode_) {
         chooserScroll_ -= delta * 40;
         if (chooserScroll_ < 0) chooserScroll_ = 0;
         MarkDirty();
         return;
+    }
+
+    // Ignore wheel over custom top bar area.
+    if (window_.Height() > 0 && topBar > 0) {
+        // no pointer-pos wheel routing yet; keep current behavior
     }
     scrollView_.OnScroll(delta);
     MarkDirty();
@@ -2454,7 +2543,7 @@ void App::OnKey(int key, int mods, bool pressed) {
             }
             MarkDirty();
         } else if (key == XKB_KEY_Escape) {
-            glfwSetWindowShouldClose(window_.Handle(), GLFW_TRUE);
+            window_.RequestClose();
         }
         return;
     }
@@ -2533,18 +2622,20 @@ void App::PaintChooser() {
     float lh = fm.LineHeight(FontStyle::Regular);
     float rowH = lh * 2.8f;
     float pad = 16 * s;
+    float topBar = titlebarHeight_ * s;
     float titleH = fm.LineHeight(FontStyle::Heading2) + pad;
 
     // Background
     renderer_.DrawRect(0, 0, w, h, {0.1f, 0.1f, 0.12f, 1});
+    PaintTopBar();
 
     // Title
     auto titleRun = fm.Shape("Select a workspace", FontStyle::Heading2);
     float titleX = (w - titleRun.totalWidth) / 2;
-    renderer_.DrawShapedRun(fm, titleRun, titleX, pad, fm.Ascent(FontStyle::Heading2),
+    renderer_.DrawShapedRun(fm, titleRun, titleX, topBar + pad, fm.Ascent(FontStyle::Heading2),
                             {0.9f, 0.9f, 0.9f, 1});
 
-    float startY = titleH + pad;
+    float startY = topBar + titleH + pad;
     float listW = std::min(w - pad * 2, 700 * s);
     float listX = (w - listW) / 2;
 
@@ -2691,6 +2782,7 @@ void App::Run() {
             PaintChooser();
         } else {
             // Scroll view (top portion)
+            float topBar = titlebarHeight_ * window_.Scale();
             scrollView_.Paint(renderer_);
 
             // Waiting dots (plain, below last block)
@@ -2699,7 +2791,7 @@ void App::Run() {
                 float dotR = fm.LineHeight(FontStyle::Regular) * 0.15f;
                 float spacing = dotR * 3;
                 float baseX = 20;
-                float baseY = scrollView_.ContentBottom() + fm.LineHeight(FontStyle::Regular);
+                float baseY = topBar + scrollView_.ContentBottom() + fm.LineHeight(FontStyle::Regular);
                 for (int d = 0; d < 3; d++) {
                     float alpha = (d == waitingDotFrame_) ? 1.0f : 0.3f;
                     Color c{0.5f, 0.5f, 0.5f, alpha};
@@ -2708,7 +2800,8 @@ void App::Run() {
                 }
             }
 
-            // Bottom bar + input
+            // Top bar + bottom bar + input
+            PaintTopBar();
             PaintBottomBar();
         }
 

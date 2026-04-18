@@ -53,14 +53,25 @@ FetchContent_MakeAvailable(json)
 find_package(OpenGL REQUIRED)
 
 if(LINUX)
-    # Linux: use system packages
+    # Linux: use system packages + vendored SDL3 (for CSD hit-test API)
     find_package(PkgConfig REQUIRED)
-    pkg_check_modules(GLFW REQUIRED IMPORTED_TARGET glfw3)
     pkg_check_modules(FREETYPE REQUIRED IMPORTED_TARGET freetype2)
     pkg_check_modules(HARFBUZZ REQUIRED IMPORTED_TARGET harfbuzz)
     pkg_check_modules(FONTCONFIG REQUIRED IMPORTED_TARGET fontconfig)
     pkg_check_modules(LIBCURL REQUIRED IMPORTED_TARGET libcurl)
     pkg_check_modules(LIBSECRET REQUIRED IMPORTED_TARGET libsecret-1)
+
+    set(SDL_SHARED OFF CACHE BOOL "" FORCE)
+    set(SDL_STATIC ON CACHE BOOL "" FORCE)
+    set(SDL_TEST_LIBRARY OFF CACHE BOOL "" FORCE)
+    set(SDL_TESTS OFF CACHE BOOL "" FORCE)
+    set(SDL_INSTALL OFF CACHE BOOL "" FORCE)
+    FetchContent_Declare(sdl3
+        GIT_REPOSITORY https://github.com/libsdl-org/SDL.git
+        GIT_TAG release-3.2.18
+        GIT_SHALLOW ON
+    )
+    FetchContent_MakeAvailable(sdl3)
 else()
     # macOS / Windows: build from source
     set(GLFW_BUILD_DOCS OFF CACHE BOOL "" FORCE)
@@ -188,7 +199,7 @@ target_link_libraries(grit PRIVATE
 
 if(LINUX)
     target_link_libraries(grit PRIVATE
-        PkgConfig::GLFW
+        SDL3::SDL3-static
         PkgConfig::FREETYPE
         PkgConfig::HARFBUZZ
         PkgConfig::FONTCONFIG

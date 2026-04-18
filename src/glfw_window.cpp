@@ -1,200 +1,252 @@
 // Gritcode — GPU-rendered AI coding harness
 // Copyright (C) 2026 luke@devmindscape.com
-//
-// This program is free software: you can redistribute it and/or modify
-// it under the terms of the GNU General Public License as published by
-// the Free Software Foundation, either version 3 of the License, or
-// (at your option) any later version.
-//
-// This program is distributed in the hope that it will be useful,
-// but WITHOUT ANY WARRANTY; without even the implied warranty of
-// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
-// GNU General Public License for more details.
-//
-// You should have received a copy of the GNU General Public License
-// along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 #include "glfw_window.h"
 #include "types.h"
+
+#include <SDL3/SDL.h>
+#include <SDL3/SDL_opengl.h>
+#include <xkbcommon/xkbcommon-keysyms.h>
 #include <cstdio>
+#include <algorithm>
 
 #ifdef GRIT_MACOS
-extern "C" void MacStyleWindowChrome(GLFWwindow* gw, float r, float g, float b);
+extern "C" void MacStyleWindowChrome(void*, float, float, float);
 #endif
+
+static int ToKeySym(SDL_Keycode key) {
+    switch (key) {
+    case SDLK_ESCAPE: return XKB_KEY_Escape;
+    case SDLK_BACKSPACE: return XKB_KEY_BackSpace;
+    case SDLK_DELETE: return XKB_KEY_Delete;
+    case SDLK_RETURN: return XKB_KEY_Return;
+    case SDLK_KP_ENTER: return XKB_KEY_KP_Enter;
+    case SDLK_LEFT: return XKB_KEY_Left;
+    case SDLK_RIGHT: return XKB_KEY_Right;
+    case SDLK_UP: return XKB_KEY_Up;
+    case SDLK_DOWN: return XKB_KEY_Down;
+    case SDLK_HOME: return XKB_KEY_Home;
+    case SDLK_END: return XKB_KEY_End;
+    case SDLK_PAGEUP: return 0xff55;
+    case SDLK_PAGEDOWN: return 0xff56;
+    case SDLK_SPACE: return Key::Space;
+    case SDLK_A: return Key::A;
+    case SDLK_C: return Key::C;
+    case SDLK_V: return 'V';
+    case SDLK_J: return XKB_KEY_j;
+    case SDLK_K: return XKB_KEY_k;
+    default: return 0;
+    }
+}
 
 GlfwWindow::GlfwWindow() = default;
 
 GlfwWindow::~GlfwWindow() {
-    if (window_) glfwDestroyWindow(window_);
-    glfwTerminate();
+    if (glCtx_) SDL_GL_DestroyContext(glCtx_);
+    if (window_) SDL_DestroyWindow(window_);
+    SDL_Quit();
 }
 
 bool GlfwWindow::Init(int width, int height, const char* title) {
-    if (!glfwInit()) {
-        fprintf(stderr, "GLFW init failed\n");
+    if (!SDL_Init(SDL_INIT_VIDEO)) {
+        fprintf(stderr, "SDL init failed: %s\n", SDL_GetError());
         return false;
     }
 
-    glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, 3);
-    glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR, 3);
-    glfwWindowHint(GLFW_OPENGL_PROFILE, GLFW_OPENGL_CORE_PROFILE);
-    glfwWindowHint(GLFW_VISIBLE, GLFW_FALSE);  // Don't show until first frame
 #ifdef GRIT_LINUX
-    glfwWindowHintString(GLFW_X11_CLASS_NAME, "grit");
-    glfwWindowHintString(GLFW_X11_INSTANCE_NAME, "grit");
-#ifdef GLFW_WAYLAND_APP_ID
-    glfwWindowHintString(GLFW_WAYLAND_APP_ID, "grit");
-#endif
+    SDL_SetHint(SDL_HINT_VIDEO_WAYLAND_ALLOW_LIBDECOR, "1");
 #endif
 
-    window_ = glfwCreateWindow(width, height, title, nullptr, nullptr);
+    SDL_GL_SetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION, 3);
+    SDL_GL_SetAttribute(SDL_GL_CONTEXT_MINOR_VERSION, 3);
+    SDL_GL_SetAttribute(SDL_GL_CONTEXT_PROFILE_MASK, SDL_GL_CONTEXT_PROFILE_CORE);
+    SDL_GL_SetAttribute(SDL_GL_DOUBLEBUFFER, 1);
+
+    window_ = SDL_CreateWindow(title, width, height,
+                               SDL_WINDOW_OPENGL | SDL_WINDOW_RESIZABLE | SDL_WINDOW_HIDDEN |
+                               SDL_WINDOW_HIGH_PIXEL_DENSITY | SDL_WINDOW_BORDERLESS);
     if (!window_) {
-        fprintf(stderr, "GLFW window creation failed\n");
-        glfwTerminate();
+        fprintf(stderr, "SDL window creation failed: %s\n", SDL_GetError());
         return false;
     }
 
-    glfwMakeContextCurrent(window_);
-    // Don't use swap interval 1 — on Wayland, SwapBuffers blocks
-    // indefinitely waiting for frame callbacks on invisible surfaces
-    // (non-focused workspaces). We throttle via WaitEvents instead.
-    glfwSwapInterval(0);
+    glCtx_ = SDL_GL_CreateContext(window_);
+    if (!glCtx_) {
+        fprintf(stderr, "SDL GL context creation failed: %s\n", SDL_GetError());
+        return false;
+    }
 
-    glfwSetWindowUserPointer(window_, this);
-    glfwSetFramebufferSizeCallback(window_, FramebufferSizeCb);
-    glfwSetWindowContentScaleCallback(window_, WindowContentScaleCb);
-    glfwSetMouseButtonCallback(window_, MouseButtonCb);
-    glfwSetCursorPosCallback(window_, CursorPosCb);
-    glfwSetScrollCallback(window_, ScrollCallbackCb);
-    glfwSetKeyCallback(window_, KeyCallbackCb);
-    glfwSetCharCallback(window_, CharCallbackCb);
+    if (!SDL_SetWindowHitTest(window_, HitTest, this)) {
+        fprintf(stderr, "SDL_SetWindowHitTest failed: %s\n", SDL_GetError());
+    }
 
-    glfwGetWindowSize(window_, &winW_, &winH_);
-    glfwGetFramebufferSize(window_, &fbW_, &fbH_);
-    float sx = 1.0f, sy = 1.0f;
-    glfwGetWindowContentScale(window_, &sx, &sy);
-    contentScale_ = sx;
-    UpdateScale();
+    if (!SDL_GL_SetSwapInterval(0)) {
+        fprintf(stderr, "SDL_GL_SetSwapInterval(0) failed: %s\n", SDL_GetError());
+    }
+
+    UpdateSizes();
 
 #ifdef GRIT_MACOS
-    // Match the title bar to the GL clear color in gl_renderer.cpp so the
-    // window reads as one surface, Terminal.app-style.
     MacStyleWindowChrome(window_, 0.12f, 0.12f, 0.13f);
 #endif
 
     return true;
 }
 
-void GlfwWindow::UpdateScale() {
-    // bufferScale_ converts GLFW's logical cursor/window coords into
-    // framebuffer pixels. On X11 winW == fbW so this stays at 1; on
-    // Wayland / macOS it jumps to the compositor buffer scale.
-    bufferScale_ = (winW_ > 0) ? (float)fbW_ / winW_ : 1.0f;
+void GlfwWindow::UpdateSizes() {
+    SDL_GetWindowSize(window_, &winW_, &winH_);
+    SDL_GetWindowSizeInPixels(window_, &fbW_, &fbH_);
+    contentScale_ = (winW_ > 0) ? (float)fbW_ / (float)winW_ : 1.0f;
+    bufferScale_ = contentScale_;
 }
 
-void GlfwWindow::Show() { glfwShowWindow(window_); }
-void GlfwWindow::SetTitle(const char* title) { glfwSetWindowTitle(window_, title); }
+void GlfwWindow::Show() { SDL_ShowWindow(window_); }
+void GlfwWindow::SetTitle(const char* title) { SDL_SetWindowTitle(window_, title); }
 
-bool GlfwWindow::ShouldClose() const {
-    return glfwWindowShouldClose(window_);
+bool GlfwWindow::ShouldClose() const { return shouldClose_; }
+void GlfwWindow::RequestClose() { shouldClose_ = true; }
+
+void GlfwWindow::PollEvents() {
+    SDL_Event ev;
+    while (SDL_PollEvent(&ev)) DispatchEvent(ev);
 }
 
-void GlfwWindow::PollEvents() { glfwPollEvents(); }
-void GlfwWindow::WaitEvents() { glfwWaitEventsTimeout(0.5); }
-void GlfwWindow::WaitEventsTimeout(double timeout) { glfwWaitEventsTimeout(timeout); }
-void GlfwWindow::SwapBuffers() { glfwSwapBuffers(window_); }
+void GlfwWindow::WaitEvents() { WaitEventsTimeout(0.5); }
+
+void GlfwWindow::WaitEventsTimeout(double timeout) {
+    SDL_Event ev;
+    Uint32 ms = (timeout <= 0.0) ? 0 : (Uint32)(timeout * 1000.0);
+    if (SDL_WaitEventTimeout(&ev, (int)ms)) {
+        DispatchEvent(ev);
+        while (SDL_PollEvent(&ev)) DispatchEvent(ev);
+    }
+}
+
+void GlfwWindow::SwapBuffers() { SDL_GL_SwapWindow(window_); }
 
 void GlfwWindow::SetClipboard(const std::string& text) {
-    glfwSetClipboardString(window_, text.c_str());
+    SDL_SetClipboardText(text.c_str());
 }
 
-// --- Callbacks ---
+void GlfwWindow::Minimize() { SDL_MinimizeWindow(window_); }
 
-void GlfwWindow::FramebufferSizeCb(GLFWwindow* win, int w, int h) {
-    auto* self = (GlfwWindow*)glfwGetWindowUserPointer(win);
-    self->fbW_ = w;
-    self->fbH_ = h;
-    glfwGetWindowSize(win, &self->winW_, &self->winH_);
-    self->UpdateScale();
-    if (self->resizeCb_) self->resizeCb_(w, h, self->contentScale_);
+void GlfwWindow::ToggleMaximize() {
+    if (SDL_GetWindowFlags(window_) & SDL_WINDOW_MAXIMIZED) SDL_RestoreWindow(window_);
+    else SDL_MaximizeWindow(window_);
 }
 
-void GlfwWindow::WindowContentScaleCb(GLFWwindow* win, float xs, float /*ys*/) {
-    // Fires when the window moves to a monitor with a different content
-    // scale (X11 + XRandR reconfig, Wayland per-monitor scale, macOS
-    // main→external 2x→1x). Re-issue the resize callback so scroll_view
-    // and widgets rebuild at the new DPI.
-    auto* self = (GlfwWindow*)glfwGetWindowUserPointer(win);
-    self->contentScale_ = xs;
-    if (self->resizeCb_) self->resizeCb_(self->fbW_, self->fbH_, self->contentScale_);
+bool GlfwWindow::IsMaximized() const {
+    return (SDL_GetWindowFlags(window_) & SDL_WINDOW_MAXIMIZED) != 0;
 }
 
-void GlfwWindow::MouseButtonCb(GLFWwindow* win, int button, int action, int mods) {
-    if (button != GLFW_MOUSE_BUTTON_LEFT) return;
-    auto* self = (GlfwWindow*)glfwGetWindowUserPointer(win);
-    bool pressed = (action == GLFW_PRESS);
-    self->leftDown_ = pressed;
-    bool shift = (mods & GLFW_MOD_SHIFT);
-    float px = (float)self->mouseX_ * self->bufferScale_;
-    float py = (float)self->mouseY_ * self->bufferScale_;
-    if (self->mouseBtnCb_) self->mouseBtnCb_(px, py, pressed, shift);
+void GlfwWindow::SetTitlebarConfigPx(int titlebarHeightPx, const RectI& dragExclusionPx) {
+    titlebarHeight_ = std::max(0, titlebarHeightPx);
+    dragExclusion_ = dragExclusionPx;
 }
 
-void GlfwWindow::CursorPosCb(GLFWwindow* win, double x, double y) {
-    auto* self = (GlfwWindow*)glfwGetWindowUserPointer(win);
-    self->mouseX_ = x;
-    self->mouseY_ = y;
-    float px = (float)x * self->bufferScale_;
-    float py = (float)y * self->bufferScale_;
-    if (self->mouseMoveCb_) self->mouseMoveCb_(px, py, self->leftDown_);
+void GlfwWindow::PostEmptyEvent() {
+    SDL_Event ev{};
+    ev.type = SDL_EVENT_USER;
+    SDL_PushEvent(&ev);
 }
 
-void GlfwWindow::ScrollCallbackCb(GLFWwindow* win, double, double yoff) {
-    auto* self = (GlfwWindow*)glfwGetWindowUserPointer(win);
-    if (self->scrollCb_) self->scrollCb_((float)(yoff));
-}
+enum SDL_HitTestResult GlfwWindow::HitTest(SDL_Window*, const SDL_Point* area, void* data) {
+    auto* self = static_cast<GlfwWindow*>(data);
+    if (!self || !area) return SDL_HITTEST_NORMAL;
 
-void GlfwWindow::KeyCallbackCb(GLFWwindow* win, int key, int, int action, int mods) {
-    auto* self = (GlfwWindow*)glfwGetWindowUserPointer(win);
-    if (!self->keyCb_) return;
-    bool pressed = (action == GLFW_PRESS || action == GLFW_REPEAT);
+    const int x = area->x;  // logical window coords
+    const int y = area->y;
+    const int px = (int)(x * self->contentScale_);  // framebuffer coords
+    const int py = (int)(y * self->contentScale_);
+    const int w = self->winW_;
+    const int h = self->winH_;
+    const int border = 6;
 
-    // Map GLFW keys to xkb-like keysyms for compatibility with existing code
-    int sym = 0;
-    switch (key) {
-    case GLFW_KEY_ESCAPE:    sym = 0xff1b; break;
-    case GLFW_KEY_BACKSPACE: sym = 0xff08; break;
-    case GLFW_KEY_DELETE:    sym = 0xffff; break;
-    case GLFW_KEY_ENTER:     sym = 0xff0d; break;
-    case GLFW_KEY_LEFT:      sym = 0xff51; break;
-    case GLFW_KEY_RIGHT:     sym = 0xff53; break;
-    case GLFW_KEY_UP:        sym = 0xff52; break;
-    case GLFW_KEY_DOWN:      sym = 0xff54; break;
-    case GLFW_KEY_HOME:      sym = 0xff50; break;
-    case GLFW_KEY_END:       sym = 0xff57; break;
-    case GLFW_KEY_PAGE_UP:   sym = 0xff55; break;
-    case GLFW_KEY_PAGE_DOWN: sym = 0xff56; break;
-    case GLFW_KEY_SPACE:     sym = 0x20; break;
-    case GLFW_KEY_A:         sym = Key::A; break;
-    case GLFW_KEY_C:         sym = Key::C; break;
-    case GLFW_KEY_V:         sym = 'V'; break;
-    default: break;
+    const bool left = x < border;
+    const bool right = x >= (w - border);
+    const bool top = y < border;
+    const bool bottom = y >= (h - border);
+
+    if (top && left) return SDL_HITTEST_RESIZE_TOPLEFT;
+    if (top && right) return SDL_HITTEST_RESIZE_TOPRIGHT;
+    if (bottom && left) return SDL_HITTEST_RESIZE_BOTTOMLEFT;
+    if (bottom && right) return SDL_HITTEST_RESIZE_BOTTOMRIGHT;
+    if (left) return SDL_HITTEST_RESIZE_LEFT;
+    if (right) return SDL_HITTEST_RESIZE_RIGHT;
+    if (top) return SDL_HITTEST_RESIZE_TOP;
+    if (bottom) return SDL_HITTEST_RESIZE_BOTTOM;
+
+    if (py < self->titlebarHeight_) {
+        const RectI ex = self->dragExclusion_;
+        const bool inEx = (px >= ex.x && px < ex.x + ex.w && py >= ex.y && py < ex.y + ex.h);
+        if (!inEx) return SDL_HITTEST_DRAGGABLE;
     }
 
-    int xmods = 0;
-    if (mods & GLFW_MOD_CONTROL) xmods |= Mod::Ctrl;
-#ifdef __APPLE__
-    if (mods & GLFW_MOD_SUPER) xmods |= Mod::Ctrl;  // Cmd acts as Ctrl on macOS
-    self->superHeld_ = (mods & GLFW_MOD_SUPER) != 0;
-#endif
-    if (mods & GLFW_MOD_SHIFT) xmods |= Mod::Shift;
-
-    if (sym && pressed) self->keyCb_(sym, xmods, true);
+    return SDL_HITTEST_NORMAL;
 }
 
-void GlfwWindow::CharCallbackCb(GLFWwindow* win, unsigned int codepoint) {
-    auto* self = (GlfwWindow*)glfwGetWindowUserPointer(win);
-    // On macOS, Cmd+key generates both key and char events — suppress the char
-    if (self->superHeld_) return;
-    if (self->charCb_) self->charCb_(codepoint);
+void GlfwWindow::DispatchEvent(const SDL_Event& ev) {
+    switch (ev.type) {
+    case SDL_EVENT_QUIT:
+    case SDL_EVENT_WINDOW_CLOSE_REQUESTED:
+        shouldClose_ = true;
+        break;
+    case SDL_EVENT_WINDOW_RESIZED:
+    case SDL_EVENT_WINDOW_PIXEL_SIZE_CHANGED:
+    case SDL_EVENT_WINDOW_DISPLAY_SCALE_CHANGED:
+        UpdateSizes();
+        if (resizeCb_) resizeCb_(fbW_, fbH_, contentScale_);
+        break;
+    case SDL_EVENT_MOUSE_BUTTON_DOWN:
+    case SDL_EVENT_MOUSE_BUTTON_UP: {
+        if (ev.button.button != SDL_BUTTON_LEFT) break;
+        leftDown_ = (ev.type == SDL_EVENT_MOUSE_BUTTON_DOWN);
+        float px = ev.button.x * bufferScale_;
+        float py = ev.button.y * bufferScale_;
+        mouseX_ = px;
+        mouseY_ = py;
+        bool shift = (SDL_GetModState() & SDL_KMOD_SHIFT) != 0;
+        if (mouseBtnCb_) mouseBtnCb_(px, py, leftDown_, shift);
+        break;
+    }
+    case SDL_EVENT_MOUSE_MOTION: {
+        float px = ev.motion.x * bufferScale_;
+        float py = ev.motion.y * bufferScale_;
+        mouseX_ = px;
+        mouseY_ = py;
+        if (mouseMoveCb_) mouseMoveCb_(px, py, leftDown_);
+        break;
+    }
+    case SDL_EVENT_MOUSE_WHEEL:
+        if (scrollCb_) scrollCb_((float)ev.wheel.y);
+        break;
+    case SDL_EVENT_KEY_DOWN:
+    case SDL_EVENT_KEY_UP: {
+        int sym = ToKeySym(ev.key.key);
+        if (!sym || !keyCb_) break;
+        int mods = 0;
+        SDL_Keymod m = SDL_GetModState();
+        if (m & SDL_KMOD_CTRL) mods |= Mod::Ctrl;
+#ifdef __APPLE__
+        if (m & SDL_KMOD_GUI) mods |= Mod::Ctrl;
+#endif
+        if (m & SDL_KMOD_SHIFT) mods |= Mod::Shift;
+        keyCb_(sym, mods, ev.type == SDL_EVENT_KEY_DOWN);
+        break;
+    }
+    case SDL_EVENT_TEXT_INPUT:
+        if (charCb_ && ev.text.text[0]) {
+            const unsigned char* s = (const unsigned char*)ev.text.text;
+            uint32_t cp = 0;
+            if (s[0] < 0x80) cp = s[0];
+            else if ((s[0] & 0xE0) == 0xC0) cp = ((s[0] & 0x1F) << 6) | (s[1] & 0x3F);
+            else if ((s[0] & 0xF0) == 0xE0) cp = ((s[0] & 0x0F) << 12) | ((s[1] & 0x3F) << 6) | (s[2] & 0x3F);
+            else if ((s[0] & 0xF8) == 0xF0) cp = ((s[0] & 0x07) << 18) | ((s[1] & 0x3F) << 12) |
+                                                      ((s[2] & 0x3F) << 6) | (s[3] & 0x3F);
+            if (cp) charCb_(cp);
+        }
+        break;
+    default:
+        break;
+    }
 }

@@ -22,6 +22,7 @@
 #include "keychain.h"
 #include "markdown_renderer.h"
 #include "session.h"
+#include <SDL3/SDL.h>
 #ifdef GRIT_ENABLE_MCP
 #include "mcp_server.h"
 #endif
@@ -41,7 +42,7 @@ public:
     void Push(std::function<void()> fn) {
         std::lock_guard<std::mutex> lock(mu_);
         q_.push(std::move(fn));
-        glfwPostEmptyEvent();  // Wake up WaitEvents
+        GlfwWindow::PostEmptyEvent();  // Wake up WaitEvents
     }
     void Drain() {
         std::lock_guard<std::mutex> lock(mu_);
@@ -140,7 +141,13 @@ private:
     float barHeight_ = 40;
     float inputHeight_ = 50;
     float chromeTopPad_ = 4;  // Padding above the message row inside the bottom chrome
+    float titlebarHeight_ = 34;
+    Button closeButton_;
+    Button maximizeButton_;
+    Button minimizeButton_;
+    RectI titleDragExclusion_{};
     void LayoutWidgets();
+    void PaintTopBar();
     void PaintBottomBar();
 
     // Actions
