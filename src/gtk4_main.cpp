@@ -40,6 +40,7 @@ struct UiState {
     GtkWidget* model = nullptr;     // GtkDropDown
     GtkWidget* workspace = nullptr; // GtkDropDown
     GtkWidget* status = nullptr;
+    GtkWidget* apiKeyBtn = nullptr;
 
     GtkStringList* providerList = nullptr;
     GtkStringList* modelList = nullptr;
@@ -213,6 +214,82 @@ static void configure_http(UiState* s) {
     s->http.SetApiKey(api);
 }
 
+static void replace_models(UiState* s, const std::vector<net::ModelInfo>& models) {
+    std::string keep;
+    if (const char* cur = dropdown_selected(s->model, s->modelList)) keep = cur;
+
+    auto* newList = gtk_string_list_new(nullptr);
+    if (models.empty()) {
+        gtk_string_list_append(newList, "kimi-k2.5");
+    } else {
+        for (const auto& m : models) {
+            gtk_string_list_append(newList, m.id.c_str());
+        }
+    }
+
+    if (s->modelList) g_object_unref(s->modelList);
+    s->modelList = newList;
+    gtk_drop_down_set_model(GTK_DROP_DOWN(s->model), G_LIST_MODEL(s->modelList));
+
+    int idx = keep.empty() ? -1 : list_index_of(s->modelList, keep);
+    gtk_drop_down_set_selected(GTK_DROP_DOWN(s->model), (idx >= 0) ? (guint)idx : 0);
+}
+
+static void fetch_models(UiState* s) {
+    set_status(s, "Loading models...");
+    s->http.FetchModels([s](std::vector<net::ModelInfo> models, int status) {
+        post_main([s, models = std::move(models), status]() mutable {
+            replace_models(s, models);
+            if (status == 200) set_status(s, "Models loaded");
+            else if (status == 401) set_status(s, "Invalid API key (401)");
+            else set_status(s, "Model fetch failed");
+        });
+    });
+}
+
+static void set_api_key(UiState* s) {
+    auto* dialog = gtk_dialog_new_with_buttons(
+        "Set API Key",
+        GTK_WINDOW(gtk_widget_get_root(s->apiKeyBtn)),
+        GTK_DIALOG_MODAL,
+        "Cancel", GTK_RESPONSE_CANCEL,
+        "Save", GTK_RESPONSE_OK,
+        nullptr);
+
+    auto* box = gtk_dialog_get_content_area(GTK_DIALOG(dialog));
+    auto* entry = gtk_password_entry_new();
+    gtk_widget_set_margin_top(entry, 10);
+    gtk_widget_set_margin_bottom(entry, 10);
+    gtk_widget_set_margin_start(entry, 10);
+    gtk_widget_set_margin_end(entry, 10);
+    gtk_password_entry_set_show_peek_icon(GTK_PASSWORD_ENTRY(entry), TRUE);
+
+    std::string cur = keychain::LoadApiKey();
+    if (!cur.empty()) gtk_editable_set_text(GTK_EDITABLE(entry), cur.c_str());
+    gtk_box_append(GTK_BOX(box), entry);
+    g_object_set_data(G_OBJECT(dialog), "api-entry", entry);
+
+    g_signal_connect(dialog, "response", G_CALLBACK(+[](GtkDialog* d, int response, gpointer user_data) {
+        auto* st = static_cast<UiState*>(user_data);
+        if (response == GTK_RESPONSE_OK) {
+            GtkWidget* e = GTK_WIDGET(g_object_get_data(G_OBJECT(d), "api-entry"));
+            const char* key = gtk_editable_get_text(GTK_EDITABLE(e));
+            if (key && *key) {
+                keychain::SaveApiKey(key);
+                set_status(st, "API key saved");
+            } else {
+                keychain::ClearApiKey();
+                set_status(st, "API key cleared");
+            }
+            configure_http(st);
+            fetch_models(st);
+        }
+        gtk_window_destroy(GTK_WINDOW(d));
+    }), s);
+
+    gtk_window_present(GTK_WINDOW(dialog));
+}
+
 static net::CurlHttpClient::Protocol protocol_for_model(const std::string& model) {
     std::string m = model;
     std::transform(m.begin(), m.end(), m.begin(), ::tolower);
@@ -280,10 +357,13 @@ static void on_workspace_changed(GtkDropDown*, GParamSpec*, gpointer user_data) 
     }
 }
 
-static void on_provider_or_model_changed(GtkDropDown*, GParamSpec*, gpointer user_data) {
+static void on_provider_or_model_changed(GtkDropDown* which, GParamSpec*, gpointer user_data) {
     auto* s = static_cast<UiState*>(user_data);
     session_save_from_ui(s);
     configure_http(s);
+    if (which == GTK_DROP_DOWN(s->provider)) {
+        fetch_models(s);
+    }
 }
 
 static void on_send_clicked(GtkButton*, gpointer user_data) {
@@ -400,12 +480,16 @@ static GtkWidget* build_controls(UiState* s) {
     gtk_entry_set_placeholder_text(GTK_ENTRY(s->input), "Message...");
 
     auto* send = gtk_button_new_with_label("Send");
+    s->apiKeyBtn = gtk_button_new_with_label("API Key");
 
     auto* key = gtk_event_controller_key_new();
     gtk_widget_add_controller(s->input, key);
 
     g_signal_connect(key, "key-pressed", G_CALLBACK(on_input_key), s);
     g_signal_connect(send, "clicked", G_CALLBACK(on_send_clicked), s);
+    g_signal_connect(s->apiKeyBtn, "clicked", G_CALLBACK(+[](GtkButton*, gpointer user_data) {
+        set_api_key(static_cast<UiState*>(user_data));
+    }), s);
     g_signal_connect(s->input, "activate", G_CALLBACK(on_input_activate), s);
     g_signal_connect(s->workspace, "notify::selected", G_CALLBACK(on_workspace_changed), s);
     g_signal_connect(s->provider, "notify::selected", G_CALLBACK(on_provider_or_model_changed), s);
@@ -414,6 +498,7 @@ static GtkWidget* build_controls(UiState* s) {
     gtk_box_append(GTK_BOX(row), s->workspace);
     gtk_box_append(GTK_BOX(row), s->provider);
     gtk_box_append(GTK_BOX(row), s->model);
+    gtk_box_append(GTK_BOX(row), s->apiKeyBtn);
     gtk_box_append(GTK_BOX(row), s->input);
     gtk_box_append(GTK_BOX(row), send);
     return row;
@@ -513,6 +598,7 @@ static void activate(GtkApplication* app, gpointer) {
     }
     reload_workspaces(state);
     configure_http(state);
+    fetch_models(state);
 
     g_object_set_data_full(G_OBJECT(win), "ui-state", state, (GDestroyNotify)g_free);
     gtk_window_present(GTK_WINDOW(win));
