@@ -11,6 +11,8 @@
 #include <cstring>
 #include <algorithm>
 #include <cmath>
+#include <cstdlib>
+#include <string>
 
 #ifdef GRIT_LINUX
 #include <wayland-client.h>
@@ -131,6 +133,24 @@ static bool WaylandHasSSD() {
 
     return ssd;
 }
+
+static bool ShouldForceCSDForGnome() {
+    // GNOME advertises xdg-decoration but still expects CSD-style behavior.
+    // Force our custom CSD on GNOME to avoid incorrect SSD detection.
+    const char* desktop = std::getenv("XDG_CURRENT_DESKTOP");
+    const char* session = std::getenv("DESKTOP_SESSION");
+    const char* shell = std::getenv("GNOME_SHELL_SESSION_MODE");
+    auto has = [](const char* v, const char* needle) {
+        if (!v || !needle) return false;
+        std::string s(v), n(needle);
+        std::transform(s.begin(), s.end(), s.begin(), ::tolower);
+        std::transform(n.begin(), n.end(), n.begin(), ::tolower);
+        return s.find(n) != std::string::npos;
+    };
+    return has(desktop, "gnome") || has(desktop, "zorin") ||
+           has(session, "gnome") || has(session, "zorin") ||
+           has(shell, "gnome");
+}
 #endif
 
 static int ToKeySym(SDL_Keycode key) {
@@ -180,10 +200,15 @@ bool GlfwWindow::Init(int width, int height, const char* title) {
 #ifdef GRIT_LINUX
     const char* driver = SDL_GetCurrentVideoDriver();
     if (driver && strcmp(driver, "wayland") == 0) {
-        useCSD_ = !WaylandHasSSD();
-        fprintf(stderr, "wayland: compositor %s SSD → %s\n",
-                useCSD_ ? "lacks" : "provides",
-                useCSD_ ? "using custom CSD" : "using server decorations");
+        if (ShouldForceCSDForGnome()) {
+            useCSD_ = true;
+            fprintf(stderr, "wayland: GNOME/Zorin detected → forcing custom CSD\n");
+        } else {
+            useCSD_ = !WaylandHasSSD();
+            fprintf(stderr, "wayland: compositor %s SSD → %s\n",
+                    useCSD_ ? "lacks" : "provides",
+                    useCSD_ ? "using custom CSD" : "using server decorations");
+        }
     }
     // X11: window manager always provides SSD.
 #endif
