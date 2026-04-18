@@ -2659,13 +2659,8 @@ void App::Run() {
             scrollView_.Update(dt);
         }
 
-        // Animate waiting dots (~4fps, only redraw on frame change).
-        // Show whenever requestInProgress_ (send button disabled) and no
-        // other progress indicator is already visible (thinking dots or
-        // streaming content text).
         bool showDots = requestInProgress_
-                        && !scrollView_.HasActiveThinking()
-                        && responseBuffer_.empty();
+                        && !scrollView_.HasActiveThinking();
         if (showDots) {
             if (waitingDotFrame_ < 0) {
                 waitingDotFrame_ = 0;
