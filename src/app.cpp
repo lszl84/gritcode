@@ -1008,11 +1008,15 @@ void App::LayoutWidgets() {
         versionLabel_.bounds = {rightEdge - apiW - 80 * s, barY + 5 * s, 70 * s, bar - 10 * s};
     }
 
-    // Exclude CSD buttons from draggable title region
+    // Exclude CSD buttons from draggable title region.
+    // Include full button bounds + the gaps between them so all hoverable
+    // button-area pixels are guaranteed click-through to widgets (not drag).
+    float exX = minimizeButton_.bounds.x - 4 * s;
+    float exW = (closeButton_.bounds.x + closeButton_.bounds.w) - exX + 4 * s;
     titleDragExclusion_ = {
-        (int)(minimizeButton_.bounds.x - 6 * s),
+        (int)exX,
         0,
-        (int)(w - (minimizeButton_.bounds.x - 6 * s)),
+        (int)exW,
         (int)topBar
     };
     window_.SetTitlebarConfigPx((int)topBar, titleDragExclusion_);

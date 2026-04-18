@@ -66,8 +66,8 @@ private:
     bool leftDown_ = false;
     float mouseX_ = 0.0f, mouseY_ = 0.0f; // framebuffer pixels
 
-    int titlebarHeight_ = 34; // logical px
-    RectI dragExclusion_{};   // logical px
+    int titlebarHeight_ = 34; // window-coordinate units
+    RectI dragExclusion_{};   // window-coordinate units
 
     std::function<void(int, int, float)> resizeCb_;
     std::function<void(float, float, bool, bool)> mouseBtnCb_;

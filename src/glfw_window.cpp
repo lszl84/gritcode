@@ -148,8 +148,25 @@ bool GlfwWindow::IsMaximized() const {
 }
 
 void GlfwWindow::SetTitlebarConfigPx(int titlebarHeightPx, const RectI& dragExclusionPx) {
-    titlebarHeight_ = std::max(0, titlebarHeightPx);
-    dragExclusion_ = dragExclusionPx;
+    // Inputs are framebuffer pixels (app layout/render space).
+    // SDL hit-test coordinates are window-space units.
+    const float invScale = (bufferScale_ > 0.0f) ? (1.0f / bufferScale_) : 1.0f;
+
+    // Slightly enlarge exclusion to avoid rounding gaps where hover works
+    // but click gets captured by drag/resize hit-test.
+    const int padPx = 2;
+    const int exPxX = dragExclusionPx.x - padPx;
+    const int exPxY = dragExclusionPx.y;
+    const int exPxW = dragExclusionPx.w + padPx * 2;
+    const int exPxH = dragExclusionPx.h + padPx;
+
+    titlebarHeight_ = std::max(0, (int)std::ceil(titlebarHeightPx * invScale));
+    dragExclusion_ = {
+        (int)std::floor(exPxX * invScale),
+        std::max(0, (int)std::floor(exPxY * invScale)),
+        std::max(0, (int)std::ceil(exPxW * invScale)),
+        std::max(0, (int)std::ceil(exPxH * invScale)),
+    };
 }
 
 void GlfwWindow::PostEmptyEvent() {
@@ -162,21 +179,22 @@ enum SDL_HitTestResult GlfwWindow::HitTest(SDL_Window*, const SDL_Point* area, v
     auto* self = static_cast<GlfwWindow*>(data);
     if (!self || !area) return SDL_HITTEST_NORMAL;
 
-    // SDL hit-test coords are in window coordinate space (not framebuffer px).
+    // SDL hit-test callback gives window-coordinate units.
     const int x = area->x;
     const int y = area->y;
-    const float invScale = (self->contentScale_ > 0.0f) ? (1.0f / self->contentScale_) : 1.0f;
-
-    // Convert framebuffer-configured values to window coordinate space.
-    const int titlebarWin = std::max(0, (int)std::lround(self->titlebarHeight_ * invScale));
-    const int exX = (int)std::lround(self->dragExclusion_.x * invScale);
-    const int exY = (int)std::lround(self->dragExclusion_.y * invScale);
-    const int exW = std::max(0, (int)std::lround(self->dragExclusion_.w * invScale));
-    const int exH = std::max(0, (int)std::lround(self->dragExclusion_.h * invScale));
 
     const int w = self->winW_;
     const int h = self->winH_;
-    const int border = std::max(4, (int)std::lround(6.0f * invScale));
+    // Border resize should be subtle and never steal top-bar button clicks.
+    const int border = 4;
+
+    // Invariant: full top bar draggable, except exact button area exclusion.
+    if (y < self->titlebarHeight_) {
+        const RectI ex = self->dragExclusion_;
+        const bool inEx = (x >= ex.x && x < ex.x + ex.w && y >= ex.y && y < ex.y + ex.h);
+        if (inEx) return SDL_HITTEST_NORMAL;      // let UI button click win
+        return SDL_HITTEST_DRAGGABLE;
+    }
 
     const bool left = x < border;
     const bool right = x >= (w - border);
@@ -191,11 +209,6 @@ enum SDL_HitTestResult GlfwWindow::HitTest(SDL_Window*, const SDL_Point* area, v
     if (right) return SDL_HITTEST_RESIZE_RIGHT;
     if (top) return SDL_HITTEST_RESIZE_TOP;
     if (bottom) return SDL_HITTEST_RESIZE_BOTTOM;
-
-    if (y < titlebarWin) {
-        const bool inEx = (x >= exX && x < exX + exW && y >= exY && y < exY + exH);
-        if (!inEx) return SDL_HITTEST_DRAGGABLE;
-    }
 
     return SDL_HITTEST_NORMAL;
 }
