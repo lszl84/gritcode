@@ -2629,18 +2629,12 @@ void App::Run() {
     double lastTime = GetMonotonicTime();
 
     while (!window_.ShouldClose()) {
-        // Block until something happens. Bg threads call glfwPostEmptyEvent
-        // via EventQueue::Push, so streaming chunks and onComplete wake the
-        // main thread without polling. Only poll when there's already work to
-        // do this iteration (dirty UI, queued events, scroll/anim in flight,
-        // or the waiting-dots animation that needs per-frame ticks).
-        //
-        // Polling during requestInProgress_ used to pin one core at 100%:
-        // between chunks (and especially during Anthropic tool_use streaming,
-        // which accumulates partial_json server-side without posting any UI
-        // events) the loop would PollEvents → drain → continue with no sleep.
+        bool needsAnim = scrollView_.HasActiveThinking() || waitingDotFrame_ >= 0;
         if (!dirty_ && events_.Empty() && !scrollView_.NeedsRedraw()) {
-            window_.WaitEvents();
+            if (needsAnim)
+                window_.WaitEventsTimeout(0.1);
+            else
+                window_.WaitEvents();
         } else {
             window_.PollEvents();
         }
@@ -2720,12 +2714,6 @@ void App::Run() {
 
         renderer_.EndFrame();
         window_.SwapBuffers();
-
-        // Throttle to ~60fps since vsync is off (Wayland frame callback issue)
-        struct timespec sleepTime = {0, 8000000};  // 8ms (~120fps headroom)
-        nanosleep(&sleepTime, nullptr);
-
-        if (!events_.Empty()) dirty_ = true;
 
         // Perf tracking
         clock_gettime(CLOCK_MONOTONIC, &t1);

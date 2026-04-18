@@ -118,6 +118,7 @@ private:
     float cachedTotalH_ = 0;
     int cachedW_ = -1;
     bool needsFullRebuild_ = true;
+    bool streamDirty_ = false;
     bool needsRedraw_ = true;
 
     struct TextSegment {
@@ -153,6 +154,7 @@ private:
     WrappedLine MakeLine(const std::string& text, bool rtl, float textW,
                          float textH, float margin, float clientW, int indent = 0);
 
+    void RebuildSingleBlock(size_t idx, float textAreaW, float clientW);
     void RebuildBlockTopCache();
     void UpdateBlockTopCacheTail(size_t from);
     size_t FindFirstVisible(float scrollPos) const;

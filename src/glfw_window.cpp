@@ -100,7 +100,8 @@ bool GlfwWindow::ShouldClose() const {
 }
 
 void GlfwWindow::PollEvents() { glfwPollEvents(); }
-void GlfwWindow::WaitEvents() { glfwWaitEventsTimeout(0.5); }  // Wake periodically for bg events
+void GlfwWindow::WaitEvents() { glfwWaitEventsTimeout(0.5); }
+void GlfwWindow::WaitEventsTimeout(double timeout) { glfwWaitEventsTimeout(timeout); }
 void GlfwWindow::SwapBuffers() { glfwSwapBuffers(window_); }
 
 void GlfwWindow::SetClipboard(const std::string& text) {

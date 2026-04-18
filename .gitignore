@@ -36,3 +36,4 @@ desktop.ini
 # wxWidgets specific
 wx_pch.h
 .claude
+__pycache__

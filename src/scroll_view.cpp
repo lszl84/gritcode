@@ -106,19 +106,12 @@ void ScrollView::ContinueStream(const std::string& text) {
     last->text += text;
     if (!last->rightToLeft) last->rightToLeft = DetectRTL(last->text);
 
-    // Invalidate cache for last block
     size_t idx = blocks_.size() - 1;
     if (idx < segValid_.size()) segValid_[idx] = false;
-    if (idx < wrappedCache_.size()) {
-        for (auto& wl : wrappedCache_[idx]) {
-            wl.caretXValid = false;
-            wl.shapedValid = false;
-        }
-    }
     if (idx < shapedCache_.size()) shapedCache_[idx].clear();
 
     if (autoScroll_) scrollPos_ = 999999;
-    if (!inBatch_) needsFullRebuild_ = true;
+    if (!inBatch_) streamDirty_ = true;
     needsRedraw_ = true;
 }
 
@@ -193,11 +186,14 @@ void ScrollView::OnResize(int w, int h) {
 // --- Animation ---
 
 void ScrollView::StartThinking(size_t idx) {
-    if (idx < blocks_.size()) {
-        blocks_[idx]->isLoading = true;
-        animatedBlocks_.insert(idx);
-        needsRedraw_ = true;
+    if (idx >= blocks_.size()) return;
+    for (auto i : animatedBlocks_) {
+        if (i < blocks_.size()) blocks_[i]->isLoading = false;
     }
+    animatedBlocks_.clear();
+    blocks_[idx]->isLoading = true;
+    animatedBlocks_.insert(idx);
+    needsRedraw_ = true;
 }
 
 void ScrollView::StopThinking(size_t idx) {
@@ -856,6 +852,66 @@ void ScrollView::LayoutTable(size_t idx, float textAreaW, float,
     }
 }
 
+void ScrollView::RebuildSingleBlock(size_t i, float textAreaW, float clientW) {
+    auto& block = *blocks_[i];
+    float h = 0;
+    if (block.type == BlockType::TABLE) {
+        if (i >= tableLayoutCache_.size()) tableLayoutCache_.resize(i + 1);
+        LayoutTable(i, textAreaW, clientW, wrappedCache_[i], h);
+        shapedCache_[i].clear();
+        segValid_[i] = true;
+        blockHeightCache_[i] = h;
+        charHeightCache_[i] = fonts_.LineHeight(FontStyle::Regular);
+        return;
+    }
+    if (!segValid_[i]) {
+        if (block.HasStyledRuns())
+            MeasureStyledSegments(i);
+        else
+            MeasureSegments(i);
+    }
+
+    LayoutFromSegments(i, textAreaW, clientW, wrappedCache_[i], h);
+    shapedCache_[i].clear();
+
+    if (block.type == BlockType::THINKING) {
+        block.isExpandable = (wrappedCache_[i].size() > 1);
+        if (!block.isExpandable && !block.isLoading) block.isCollapsed = false;
+
+        if (block.isCollapsed && block.isExpandable) {
+            float firstH = wrappedCache_[i][0].height;
+            wrappedCache_[i].resize(1);
+            h = firstH;
+
+            if (block.isLoading) {
+                float ch = fonts_.LineHeight(FontStyle::ThinkingItalic);
+                float dotSpace = ch * 2.5f;
+                float maxTextW = textAreaW - dotSpace - 20;
+                auto& wl = wrappedCache_[i][0];
+                if (wl.width > maxTextW && !wl.text.empty()) {
+                    std::string truncated = wl.text;
+                    while (!truncated.empty() && fonts_.MeasureWidth(truncated, FontStyle::ThinkingItalic) > maxTextW) {
+                        size_t sp = truncated.rfind(' ');
+                        if (sp == std::string::npos) { truncated.clear(); break; }
+                        truncated = truncated.substr(0, sp);
+                    }
+                    if (!truncated.empty() && truncated.size() < wl.text.size())
+                        truncated += "\xe2\x80\xa6";
+                    wl.text = truncated;
+                    wl.width = fonts_.MeasureWidth(truncated, FontStyle::ThinkingItalic);
+                    wl.shapedValid = false;
+                    shapedCache_[i].clear();
+                }
+            }
+        }
+    }
+
+    float ch = fonts_.LineHeight(StyleForType(block.type));
+    if (block.isLoading && !block.isCollapsed && block.isExpandable) h += ch;
+    blockHeightCache_[i] = h;
+    charHeightCache_[i] = ch;
+}
+
 void ScrollView::RebuildBlockTopCache() {
     size_t n = blockHeightCache_.size();
     blockTopCache_.resize(n + 1);
@@ -1312,6 +1368,16 @@ void ScrollView::Paint(GLRenderer& renderer) {
     float clientH = (float)windowH_;
     float textAreaW = clientW - leftMargin_ * 2;
 
+    // Incremental rebuild: only last block changed (streaming)
+    if (streamDirty_ && !needsFullRebuild_ && blockCount > 0) {
+        size_t lastIdx = blockCount - 1;
+        if (lastIdx < wrappedCache_.size()) {
+            RebuildSingleBlock(lastIdx, textAreaW, clientW);
+            UpdateBlockTopCacheTail(lastIdx);
+        }
+        streamDirty_ = false;
+    }
+
     // Full rebuild
     if (needsFullRebuild_) {
         wrappedCache_.resize(blockCount);
@@ -1319,78 +1385,23 @@ void ScrollView::Paint(GLRenderer& renderer) {
         blockHeightCache_.resize(blockCount);
         charHeightCache_.resize(blockCount);
         segCache_.resize(blockCount);
-        segValid_.assign(blockCount, false);    // Force re-measure ALL
-        segTextLen_.assign(blockCount, 0);
+        size_t oldValidSize = segValid_.size();
+        segValid_.resize(blockCount, false);
+        segTextLen_.resize(blockCount, 0);
+        if ((int)clientW != cachedW_) {
+            for (size_t i = 0; i < oldValidSize && i < blockCount; i++)
+                segValid_[i] = false;
+        }
         tableLayoutCache_.clear();
         tableLayoutCache_.resize(blockCount);
 
         for (size_t i = 0; i < blockCount; i++) {
-            auto& block = *blocks_[i];
-            float h = 0;
-            if (block.type == BlockType::TABLE) {
-                LayoutTable(i, textAreaW, clientW, wrappedCache_[i], h);
-                shapedCache_[i].clear();
-                segValid_[i] = true;
-                blockHeightCache_[i] = h;
-                charHeightCache_[i] = fonts_.LineHeight(FontStyle::Regular);
-                continue;
-            }
-            if (!segValid_[i]) {
-                if (block.HasStyledRuns())
-                    MeasureStyledSegments(i);
-                else
-                    MeasureSegments(i);
-            }
-
-            LayoutFromSegments(i, textAreaW, clientW, wrappedCache_[i], h);
-            shapedCache_[i].clear(); // New lines need fresh shapes
-
-            // Track expandability and handle collapse
-            if (block.type == BlockType::THINKING) {
-                block.isExpandable = (wrappedCache_[i].size() > 1);
-                // Single-line AND done loading: not expandable, show uncollapsed
-                // But keep collapsed while loading (block may grow)
-                if (!block.isExpandable && !block.isLoading) block.isCollapsed = false;
-
-                if (block.isCollapsed && block.isExpandable) {
-                    // Collapsed: show only first line, truncated to leave room for dots
-                    float firstH = wrappedCache_[i][0].height;
-                    wrappedCache_[i].resize(1);
-                    h = firstH;
-
-                    if (block.isLoading) {
-                        // Truncate first line text to fit dots
-                        float ch = fonts_.LineHeight(FontStyle::ThinkingItalic);
-                        float dotSpace = ch * 2.5f;  // Space needed for 3 dots
-                        float maxTextW = textAreaW - dotSpace - 20;  // 20 for triangle
-                        auto& wl = wrappedCache_[i][0];
-                        if (wl.width > maxTextW && !wl.text.empty()) {
-                            // Truncate word by word
-                            std::string truncated = wl.text;
-                            while (!truncated.empty() && fonts_.MeasureWidth(truncated, FontStyle::ThinkingItalic) > maxTextW) {
-                                size_t sp = truncated.rfind(' ');
-                                if (sp == std::string::npos) { truncated.clear(); break; }
-                                truncated = truncated.substr(0, sp);
-                            }
-                            if (!truncated.empty() && truncated.size() < wl.text.size())
-                                truncated += "\xe2\x80\xa6";  // …
-                            wl.text = truncated;
-                            wl.width = fonts_.MeasureWidth(truncated, FontStyle::ThinkingItalic);
-                            wl.shapedValid = false;
-                            if (i < shapedCache_.size()) shapedCache_[i].clear();
-                        }
-                    }
-                }
-            }
-
-            float ch = fonts_.LineHeight(StyleForType(block.type));
-            if (block.isLoading && !block.isCollapsed && block.isExpandable) h += ch;
-            blockHeightCache_[i] = h;
-            charHeightCache_[i] = ch;
+            RebuildSingleBlock(i, textAreaW, clientW);
         }
 
         cachedW_ = (int)clientW;
         needsFullRebuild_ = false;
+        streamDirty_ = false;
         RebuildBlockTopCache();
     }
 

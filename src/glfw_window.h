@@ -33,6 +33,7 @@ public:
     bool ShouldClose() const;
     void PollEvents();
     void WaitEvents();
+    void WaitEventsTimeout(double timeout);
     void SwapBuffers();
 
     int Width() const { return fbW_; }       // framebuffer pixels
