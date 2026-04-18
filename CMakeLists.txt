@@ -5,19 +5,28 @@ set(CMAKE_CXX_STANDARD 23)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
-# Build number from git commit count
+# Version string from git state.
+# Tagged commit:        v0.1.0
+# After tag:            v0.1.0-14-g3a7f2c1
+# Uncommitted changes:  v0.1.0-14-g3a7f2c1-dirty
+# No tags yet:          0.1.0-g3a7f2c1 or 0.1.0-g3a7f2c1-dirty
 execute_process(
-    COMMAND git rev-list --count HEAD
+    COMMAND git describe --tags --always --dirty
     WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
-    OUTPUT_VARIABLE BUILD_NUMBER
+    OUTPUT_VARIABLE GIT_DESCRIBE
     OUTPUT_STRIP_TRAILING_WHITESPACE
     ERROR_QUIET
 )
-if(NOT BUILD_NUMBER)
-    set(BUILD_NUMBER "0")
+# If git describe returned a tag-based version (starts with v), use it directly.
+# Otherwise (no tags), prepend the project version.
+if(GIT_DESCRIBE MATCHES "^v")
+    string(SUBSTRING "${GIT_DESCRIBE}" 1 -1 VERSION_STRING)
+else()
+    set(VERSION_STRING "${PROJECT_VERSION_MAJOR}.${PROJECT_VERSION_MINOR}.0-${GIT_DESCRIBE}")
 endif()
-
-set(VERSION_STRING "${PROJECT_VERSION_MAJOR}.${PROJECT_VERSION_MINOR}.${BUILD_NUMBER}")
+if(NOT GIT_DESCRIBE)
+    set(VERSION_STRING "${PROJECT_VERSION_MAJOR}.${PROJECT_VERSION_MINOR}.0")
+endif()
 message(STATUS "Version: ${VERSION_STRING}")
 
 include(FetchContent)

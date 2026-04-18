@@ -502,6 +502,24 @@ void CurlHttpClient::SendStreaming(
         if (res != CURLE_OK || httpCode >= 400) {
             std::string err = "HTTP " + std::to_string(httpCode);
             if (res != CURLE_OK) err = curl_easy_strerror(res);
+            // Include the response body so the user sees the server's error
+            // message (rate limit details, auth errors, etc.)
+            std::string body = ctx.sseBuffer;
+            if (body.empty()) body = ctx.accContent;
+            if (!body.empty()) {
+                // Try to extract a message from JSON error responses
+                try {
+                    auto j = json::parse(body);
+                    if (j.contains("error") && j["error"].is_object() && j["error"].contains("message"))
+                        body = j["error"]["message"].get<std::string>();
+                    else if (j.contains("error") && j["error"].is_string())
+                        body = j["error"].get<std::string>();
+                    else if (j.contains("message") && j["message"].is_string())
+                        body = j["message"].get<std::string>();
+                } catch (...) {}
+                if (body.size() > 500) body.resize(500);
+                err += " — " + body;
+            }
             onComplete(false, ctx.accContent, err, {}, ctx.finishReason, 0, 0);
         } else {
             onComplete(true, ctx.accContent, "", toolCallsJson, ctx.finishReason, 0, 0);
