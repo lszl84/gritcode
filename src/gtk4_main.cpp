@@ -41,6 +41,8 @@ struct UiState {
     GtkWidget* workspace = nullptr; // GtkDropDown
     GtkWidget* status = nullptr;
     GtkWidget* apiKeyBtn = nullptr;
+    GtkWidget* sendBtn = nullptr;
+    GtkWidget* cancelBtn = nullptr;
 
     GtkStringList* providerList = nullptr;
     GtkStringList* modelList = nullptr;
@@ -163,8 +165,7 @@ static void reload_workspaces(UiState* s) {
     s->mutatingWorkspace = true;
     s->workspaceCwds.clear();
 
-    if (s->workspaceList) g_object_unref(s->workspaceList);
-    s->workspaceList = gtk_string_list_new(nullptr);
+    auto* newList = gtk_string_list_new(nullptr);
 
     std::vector<SessionInfo> all = SessionManager::ListSessions();
     std::sort(all.begin(), all.end(), [](const SessionInfo& a, const SessionInfo& b) {
@@ -172,16 +173,18 @@ static void reload_workspaces(UiState* s) {
     });
 
     std::string cwd = current_cwd();
-    gtk_string_list_append(s->workspaceList, cwd.c_str());
+    gtk_string_list_append(newList, cwd.c_str());
     s->workspaceCwds.push_back(cwd);
 
     for (const auto& si : all) {
         if (si.cwd == cwd) continue;
-        gtk_string_list_append(s->workspaceList, si.cwd.c_str());
+        gtk_string_list_append(newList, si.cwd.c_str());
         s->workspaceCwds.push_back(si.cwd);
     }
 
+    s->workspaceList = newList;
     gtk_drop_down_set_model(GTK_DROP_DOWN(s->workspace), G_LIST_MODEL(s->workspaceList));
+
     gtk_drop_down_set_selected(GTK_DROP_DOWN(s->workspace), 0);
     s->mutatingWorkspace = false;
 }
@@ -228,7 +231,6 @@ static void replace_models(UiState* s, const std::vector<net::ModelInfo>& models
         }
     }
 
-    if (s->modelList) g_object_unref(s->modelList);
     s->modelList = newList;
     gtk_drop_down_set_model(GTK_DROP_DOWN(s->model), G_LIST_MODEL(s->modelList));
 
@@ -403,6 +405,27 @@ static void on_provider_or_model_changed(GtkDropDown* which, GParamSpec*, gpoint
     }
 }
 
+static void set_controls_enabled(UiState* s, bool enabled) {
+    gtk_widget_set_sensitive(s->input, enabled);
+    gtk_widget_set_sensitive(s->provider, enabled);
+    gtk_widget_set_sensitive(s->model, enabled);
+    gtk_widget_set_sensitive(s->workspace, enabled);
+    gtk_widget_set_sensitive(s->sendBtn, enabled);
+}
+
+static void set_streaming(UiState* s, bool streaming) {
+    s->streaming = streaming;
+    gtk_widget_set_visible(s->cancelBtn, streaming);
+    set_controls_enabled(s, !streaming);
+}
+
+static void on_cancel_clicked(GtkButton*, gpointer user_data) {
+    auto* s = static_cast<UiState*>(user_data);
+    if (!s->streaming) return;
+    s->http.Abort();
+    set_status(s, "Cancelling...");
+}
+
 static void on_send_clicked(GtkButton*, gpointer user_data) {
     auto* s = static_cast<UiState*>(user_data);
     if (s->streaming) return;
@@ -436,7 +459,7 @@ static void on_send_clicked(GtkButton*, gpointer user_data) {
         ? build_anthropic_request(s, model)
         : build_openai_request(s, model);
 
-    s->streaming = true;
+    set_streaming(s, true);
     append_assistant_header(s);
     set_status(s, "Streaming...");
 
@@ -464,11 +487,15 @@ static void on_send_clicked(GtkButton*, gpointer user_data) {
                     s->session.Save();
                     set_status(s, "Done");
                 } else {
-                    append_block(s, "Error", error.c_str(), s->tagError);
-                    set_status(s, "Error");
+                    if (error == "Cancelled") {
+                        set_status(s, "Cancelled");
+                    } else {
+                        append_block(s, "Error", error.c_str(), s->tagError);
+                        set_status(s, "Error");
+                    }
                 }
 
-                s->streaming = false;
+                set_streaming(s, false);
                 reload_workspaces(s);
             });
         }
@@ -518,14 +545,17 @@ static GtkWidget* build_controls(UiState* s) {
     gtk_widget_set_hexpand(s->input, TRUE);
     gtk_entry_set_placeholder_text(GTK_ENTRY(s->input), "Message...");
 
-    auto* send = gtk_button_new_with_label("Send");
+    s->sendBtn = gtk_button_new_with_label("Send");
+    s->cancelBtn = gtk_button_new_with_label("Cancel");
+    gtk_widget_set_visible(s->cancelBtn, FALSE);
     s->apiKeyBtn = gtk_button_new_with_label("API Key");
 
     auto* key = gtk_event_controller_key_new();
     gtk_widget_add_controller(s->input, key);
 
     g_signal_connect(key, "key-pressed", G_CALLBACK(on_input_key), s);
-    g_signal_connect(send, "clicked", G_CALLBACK(on_send_clicked), s);
+    g_signal_connect(s->sendBtn, "clicked", G_CALLBACK(on_send_clicked), s);
+    g_signal_connect(s->cancelBtn, "clicked", G_CALLBACK(on_cancel_clicked), s);
     g_signal_connect(s->apiKeyBtn, "clicked", G_CALLBACK(+[](GtkButton*, gpointer user_data) {
         set_api_key(static_cast<UiState*>(user_data));
     }), s);
@@ -538,8 +568,9 @@ static GtkWidget* build_controls(UiState* s) {
     gtk_box_append(GTK_BOX(row), s->provider);
     gtk_box_append(GTK_BOX(row), s->model);
     gtk_box_append(GTK_BOX(row), s->apiKeyBtn);
+    gtk_box_append(GTK_BOX(row), s->cancelBtn);
     gtk_box_append(GTK_BOX(row), s->input);
-    gtk_box_append(GTK_BOX(row), send);
+    gtk_box_append(GTK_BOX(row), s->sendBtn);
     return row;
 }
 
@@ -582,7 +613,7 @@ static void ui_state_destroy(gpointer data) {
     if (!s) return;
     s->alive = false;
     s->http.Abort();
-    g_free(s);
+    delete s;
 }
 
 static void activate(GtkApplication* app, gpointer) {
@@ -613,7 +644,7 @@ static void activate(GtkApplication* app, gpointer) {
 
     auto* buf = gtk_text_view_get_buffer(GTK_TEXT_VIEW(tv));
 
-    auto* state = g_new0(UiState, 1);
+    auto* state = new UiState();
     state->buffer = buf;
     state->textView = tv;
 
