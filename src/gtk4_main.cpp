@@ -4,13 +4,33 @@
 #include <gtk/gtk.h>
 #include <algorithm>
 #include <filesystem>
+#include <functional>
 #include <string>
 #include <vector>
 #include <unistd.h>
 
 #include "session.h"
+#include "curl_http.h"
+#include "keychain.h"
+#include <nlohmann/json.hpp>
 
 namespace fs = std::filesystem;
+using json = nlohmann::json;
+
+struct MainTask {
+    std::function<void()> fn;
+};
+
+static gboolean run_main_task(gpointer data) {
+    auto* t = static_cast<MainTask*>(data);
+    t->fn();
+    delete t;
+    return G_SOURCE_REMOVE;
+}
+
+static void post_main(std::function<void()> fn) {
+    g_idle_add_full(G_PRIORITY_DEFAULT, run_main_task, new MainTask{std::move(fn)}, nullptr);
+}
 
 struct UiState {
     GtkTextBuffer* buffer = nullptr;
@@ -29,10 +49,13 @@ struct UiState {
     GtkTextTag* tagAssistant = nullptr;
     GtkTextTag* tagMeta = nullptr;
     GtkTextTag* tagError = nullptr;
+    GtkTextTag* tagThinking = nullptr;
 
     SessionManager session;
+    net::CurlHttpClient http;
     std::vector<std::string> workspaceCwds;
     bool mutatingWorkspace = false;
+    bool streaming = false;
 };
 
 static std::string current_cwd() {
@@ -86,6 +109,28 @@ static void append_block(UiState* s, const char* role, const char* text, GtkText
     scroll_to_end(s);
 }
 
+static void append_assistant_header(UiState* s) {
+    GtkTextIter end;
+    gtk_text_buffer_get_end_iter(s->buffer, &end);
+    gtk_text_buffer_insert_with_tags(s->buffer, &end, "Assistant\n", -1, s->tagMeta, nullptr);
+}
+
+static void append_stream_chunk(UiState* s, const std::string& text, bool thinking) {
+    GtkTextIter end;
+    gtk_text_buffer_get_end_iter(s->buffer, &end);
+    gtk_text_buffer_insert_with_tags(s->buffer, &end, text.c_str(), -1,
+                                     thinking ? s->tagThinking : s->tagAssistant,
+                                     nullptr);
+    scroll_to_end(s);
+}
+
+static void append_stream_footer(UiState* s) {
+    GtkTextIter end;
+    gtk_text_buffer_get_end_iter(s->buffer, &end);
+    gtk_text_buffer_insert(s->buffer, &end, "\n\n", -1);
+    scroll_to_end(s);
+}
+
 static void clear_transcript(UiState* s) {
     gtk_text_buffer_set_text(s->buffer, "", -1);
 }
@@ -93,6 +138,7 @@ static void clear_transcript(UiState* s) {
 static void append_from_message(UiState* s, const ChatMessage& m) {
     if (m.role == "user") append_block(s, "You", m.content.c_str(), s->tagUser);
     else if (m.role == "assistant") append_block(s, "Assistant", m.content.c_str(), s->tagAssistant);
+    else if (m.role == "tool") append_block(s, "Tool", m.content.c_str(), s->tagThinking);
     else append_block(s, m.role.c_str(), m.content.c_str(), s->tagAssistant);
 }
 
@@ -154,9 +200,69 @@ static void load_session_for_cwd(UiState* s, const std::string& cwd) {
     set_status(s, st);
 }
 
+static void configure_http(UiState* s) {
+    const char* provider = dropdown_selected(s->provider, s->providerList);
+    if (!provider) provider = "zen";
+
+    std::string baseUrl = (std::string(provider) == "opencode-go")
+        ? "https://opencode.ai/zen/go/v1"
+        : "https://opencode.ai/zen/v1";
+
+    s->http.SetBaseUrl(baseUrl);
+    std::string api = keychain::LoadApiKey();
+    s->http.SetApiKey(api);
+}
+
+static net::CurlHttpClient::Protocol protocol_for_model(const std::string& model) {
+    std::string m = model;
+    std::transform(m.begin(), m.end(), m.begin(), ::tolower);
+    if (m.find("claude") != std::string::npos) return net::CurlHttpClient::Protocol::Anthropic;
+    return net::CurlHttpClient::Protocol::OpenAI;
+}
+
+static std::string build_openai_request(UiState* s, const std::string& model) {
+    json j;
+    j["model"] = model;
+    j["stream"] = true;
+    j["max_tokens"] = 32000;
+
+    json msgs = json::array();
+    std::string sys =
+        "You are an AI coding assistant. Keep responses concise and practical. "
+        "When code changes are required, provide exact steps and patches.";
+    msgs.push_back({{"role", "system"}, {"content", sys}});
+
+    for (const auto& m : s->session.History()) {
+        if (m.role == "user" || m.role == "assistant") {
+            msgs.push_back({{"role", m.role}, {"content", m.content}});
+        }
+    }
+    j["messages"] = std::move(msgs);
+    return j.dump();
+}
+
+static std::string build_anthropic_request(UiState* s, const std::string& model) {
+    json j;
+    j["model"] = model;
+    j["stream"] = true;
+    j["max_tokens"] = 32000;
+    j["system"] =
+        "You are an AI coding assistant. Keep responses concise and practical. "
+        "When code changes are required, provide exact steps and patches.";
+
+    json msgs = json::array();
+    for (const auto& m : s->session.History()) {
+        if (m.role == "user" || m.role == "assistant") {
+            msgs.push_back({{"role", m.role}, {"content", m.content}});
+        }
+    }
+    j["messages"] = std::move(msgs);
+    return j.dump();
+}
+
 static void on_workspace_changed(GtkDropDown*, GParamSpec*, gpointer user_data) {
     auto* s = static_cast<UiState*>(user_data);
-    if (s->mutatingWorkspace) return;
+    if (s->mutatingWorkspace || s->streaming) return;
 
     guint idx = gtk_drop_down_get_selected(GTK_DROP_DOWN(s->workspace));
     if (idx >= s->workspaceCwds.size()) return;
@@ -164,7 +270,10 @@ static void on_workspace_changed(GtkDropDown*, GParamSpec*, gpointer user_data) 
 
     std::error_code ec;
     if (fs::exists(cwd, ec) && fs::is_directory(cwd, ec)) {
-        chdir(cwd.c_str());
+        if (chdir(cwd.c_str()) != 0) {
+            append_block(s, "Error", "Failed to switch working directory.", s->tagError);
+            return;
+        }
         load_session_for_cwd(s, cwd);
     } else {
         append_block(s, "Error", "Selected workspace no longer exists on disk.", s->tagError);
@@ -174,10 +283,13 @@ static void on_workspace_changed(GtkDropDown*, GParamSpec*, gpointer user_data) 
 static void on_provider_or_model_changed(GtkDropDown*, GParamSpec*, gpointer user_data) {
     auto* s = static_cast<UiState*>(user_data);
     session_save_from_ui(s);
+    configure_http(s);
 }
 
 static void on_send_clicked(GtkButton*, gpointer user_data) {
     auto* s = static_cast<UiState*>(user_data);
+    if (s->streaming) return;
+
     const char* text = gtk_editable_get_text(GTK_EDITABLE(s->input));
     if (!text || !*text) {
         append_block(s, "Error", "Cannot send empty message.", s->tagError);
@@ -191,24 +303,57 @@ static void on_send_clicked(GtkButton*, gpointer user_data) {
     append_from_message(s, u);
 
     const char* provider = dropdown_selected(s->provider, s->providerList);
-    const char* model = dropdown_selected(s->model, s->modelList);
+    const char* modelC = dropdown_selected(s->model, s->modelList);
+    std::string model = modelC ? modelC : "kimi-k2.5";
+
     if (provider) s->session.SetProvider(provider);
-    if (model) s->session.SetModel(model);
-
-    ChatMessage a;
-    a.role = "assistant";
-    a.content = "GTK4 WIP response path active.\n"
-                "This branch is migrating rendering/input to GTK4 while preserving behavior parity.\n"
-                "(Backend network path wiring is next milestone.)";
-    s->session.History().push_back(a);
-    append_from_message(s, a);
-
+    s->session.SetModel(model);
     s->session.MarkDirty();
     s->session.Save();
 
     gtk_editable_set_text(GTK_EDITABLE(s->input), "");
-    set_status(s, "Saved");
-    reload_workspaces(s);
+
+    configure_http(s);
+    auto protocol = protocol_for_model(model);
+    std::string req = (protocol == net::CurlHttpClient::Protocol::Anthropic)
+        ? build_anthropic_request(s, model)
+        : build_openai_request(s, model);
+
+    s->streaming = true;
+    append_assistant_header(s);
+    set_status(s, "Streaming...");
+
+    s->http.SendStreaming(
+        protocol,
+        req,
+        [s](const std::string& chunk, bool thinking) {
+            post_main([s, chunk, thinking]() {
+                append_stream_chunk(s, chunk, thinking);
+            });
+        },
+        [s](bool ok, const std::string& content, const std::string& error,
+            const std::vector<json>&, const std::string&, int, int) {
+            post_main([s, ok, content, error]() {
+                append_stream_footer(s);
+
+                if (ok) {
+                    ChatMessage a;
+                    a.role = "assistant";
+                    a.content = content;
+                    s->session.History().push_back(a);
+                    s->session.MarkDirty();
+                    s->session.Save();
+                    set_status(s, "Done");
+                } else {
+                    append_block(s, "Error", error.c_str(), s->tagError);
+                    set_status(s, "Error");
+                }
+
+                s->streaming = false;
+                reload_workspaces(s);
+            });
+        }
+    );
 }
 
 static void on_input_activate(GtkEditable*, gpointer user_data) {
@@ -239,8 +384,8 @@ static GtkWidget* build_controls(UiState* s) {
     gtk_widget_set_margin_top(row, 8);
     gtk_widget_set_margin_bottom(row, 8);
 
-    const char* providers[] = {"openai", "anthropic", "local", nullptr};
-    const char* models[] = {"gpt-4.1", "o4-mini", "claude-sonnet", nullptr};
+    const char* providers[] = {"zen", "opencode-go", nullptr};
+    const char* models[] = {"kimi-k2.5", "gpt-4.1", "claude-3-7-sonnet-latest", nullptr};
 
     s->workspaceList = gtk_string_list_new(nullptr);
     s->workspace = gtk_drop_down_new(G_LIST_MODEL(s->workspaceList), nullptr);
@@ -297,6 +442,13 @@ static void setup_tags(UiState* s) {
     s->tagError = gtk_text_buffer_create_tag(
         s->buffer, "error",
         "foreground", "#FFB3B3",
+        "family", "monospace",
+        nullptr);
+
+    s->tagThinking = gtk_text_buffer_create_tag(
+        s->buffer, "thinking",
+        "foreground", "#7EC7FF",
+        "style", PANGO_STYLE_ITALIC,
         "family", "monospace",
         nullptr);
 }
@@ -360,6 +512,7 @@ static void activate(GtkApplication* app, gpointer) {
                      state->tagAssistant);
     }
     reload_workspaces(state);
+    configure_http(state);
 
     g_object_set_data_full(G_OBJECT(win), "ui-state", state, (GDestroyNotify)g_free);
     gtk_window_present(GTK_WINDOW(win));
