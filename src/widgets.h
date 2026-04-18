@@ -40,6 +40,7 @@ public:
     std::string text;
     Color color{0.6f, 0.6f, 0.6f};
     FontStyle style = FontStyle::Regular;
+    bool rightAlign = false;
 
     void Paint(GLRenderer& r, FontManager& fm) const;
 };

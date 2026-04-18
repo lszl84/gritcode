@@ -26,8 +26,13 @@
 void Label::Paint(GLRenderer& r, FontManager& fm) const {
     if (text.empty()) return;
     auto run = fm.Shape(text, style);
+    float x = bounds.x;
+    if (rightAlign) {
+        float tw = run.totalWidth;
+        x = bounds.x + bounds.w - tw;
+    }
     float y = bounds.y + (bounds.h - fm.LineHeight(style)) / 2;
-    r.DrawShapedRun(fm, run, bounds.x, y, fm.Ascent(style), color);
+    r.DrawShapedRun(fm, run, x, y, fm.Ascent(style), color);
 }
 
 // ============================================================================

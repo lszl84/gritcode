@@ -715,6 +715,7 @@ bool App::Init(bool sessionChooser) {
     statusLabel_.text = "Disconnected";
     versionLabel_.text = "v" GRIT_VERSION;
     versionLabel_.color = {0.35f, 0.35f, 0.37f};
+    versionLabel_.rightAlign = true;
 
     // Window callbacks
     float currentScale = window_.Scale();
@@ -973,12 +974,13 @@ void App::LayoutWidgets() {
         apiKeyInput_.bounds = {startX, barY + 5, inputW, bar - 10};
         apiKeyAccept_.bounds = {startX + inputW + 4, barY + 5, btnW, bar - 10};
         apiKeyCancel_.bounds = {startX + inputW + btnW + 8, barY + 5, btnW, bar - 10};
-        versionLabel_.bounds = {startX - 80 * s, barY + 5, 70 * s, bar - 10};
+        versionLabel_.bounds = {startX - 130 * s, barY + 5, 120 * s, bar - 10};
     } else {
         float apiW = 100 * s;
         apiKeyButton_.bounds = {rightEdge - apiW, barY + 5, apiW, bar - 10};
         apiKeyButton_.visible = showApiKey;
-        versionLabel_.bounds = {rightEdge - apiW - 80 * s, barY + 5, 70 * s, bar - 10};
+        float vlX = showApiKey ? rightEdge - apiW - 130 * s : rightEdge - 130 * s;
+        versionLabel_.bounds = {vlX, barY + 5, 120 * s, bar - 10};
     }
 }
 
