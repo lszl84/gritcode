@@ -74,6 +74,23 @@ if(LINUX)
     pkg_check_modules(LIBCURL REQUIRED IMPORTED_TARGET libcurl)
     pkg_check_modules(LIBSECRET REQUIRED IMPORTED_TARGET libsecret-1)
     pkg_check_modules(WAYLAND_CLIENT REQUIRED IMPORTED_TARGET wayland-client)
+
+    # Generate xdg-shell and xdg-decoration protocol headers for SSD detection
+    find_program(WAYLAND_SCANNER NAMES wayland-scanner REQUIRED)
+    set(WL_PROTO_DIR "${CMAKE_CURRENT_BINARY_DIR}/wayland-protocols")
+    file(MAKE_DIRECTORY "${WL_PROTO_DIR}")
+
+    macro(WaylandProtocolGen _XML _PROTO)
+        set(_H "${WL_PROTO_DIR}/${_PROTO}-client-protocol.h")
+        set(_C "${WL_PROTO_DIR}/${_PROTO}-protocol.c")
+        add_custom_command(OUTPUT "${_H}"
+            DEPENDS "${_XML}"
+            COMMAND "${WAYLAND_SCANNER}" ARGS client-header "${_XML}" "${_H}")
+        add_custom_command(OUTPUT "${_C}"
+            DEPENDS "${_H}"
+            COMMAND "${WAYLAND_SCANNER}" ARGS private-code "${_XML}" "${_C}")
+        target_sources(grit PRIVATE "${_C}")
+    endmacro()
 elseif(NOT LINUX)
     # macOS / Windows: build from source
     set(FT_DISABLE_BZIP2 ON CACHE BOOL "" FORCE)
@@ -182,6 +199,16 @@ target_include_directories(grit PRIVATE
     ${cmark_SOURCE_DIR}/src
     src
 )
+
+if(LINUX)
+    target_include_directories(grit PRIVATE "${WL_PROTO_DIR}")
+    WaylandProtocolGen(
+        /usr/share/wayland-protocols/stable/xdg-shell/xdg-shell.xml
+        xdg-shell)
+    WaylandProtocolGen(
+        /usr/share/wayland-protocols/unstable/xdg-decoration/xdg-decoration-unstable-v1.xml
+        xdg-decoration-unstable-v1)
+endif()
 
 target_link_libraries(grit PRIVATE
     OpenGL::GL

@@ -14,6 +14,8 @@
 
 #ifdef GRIT_LINUX
 #include <wayland-client.h>
+#include "xdg-shell-client-protocol.h"
+#include "xdg-decoration-unstable-v1-client-protocol.h"
 #endif
 
 #ifdef GRIT_MACOS
@@ -21,30 +23,113 @@ extern "C" void MacStyleWindowChrome(void*, float, float, float);
 #endif
 
 #ifdef GRIT_LINUX
-// Query the Wayland compositor directly for xdg-decoration support.
-// Opens an independent connection, enumerates globals, and disconnects.
-// Returns true if the compositor advertises zxdg_decoration_manager_v1
-// (meaning it can provide server-side decorations).
-static void WlRegistryGlobal(void* data, struct wl_registry*, uint32_t,
-                              const char* interface, uint32_t) {
-    if (strcmp(interface, "zxdg_decoration_manager_v1") == 0)
-        *static_cast<bool*>(data) = true;
-}
-static void WlRegistryRemove(void*, struct wl_registry*, uint32_t) {}
-static const struct wl_registry_listener kRegistryListener = {
-    WlRegistryGlobal, WlRegistryRemove,
+// Probe the Wayland compositor to determine whether it actually grants
+// server-side decorations (SSD). Simply checking whether the compositor
+// advertises zxdg_decoration_manager_v1 is not enough — GNOME 42+
+// advertises the protocol but responds with CLIENT_SIDE when you request
+// SERVER_SIDE. The only source of truth is to create a temporary surface,
+// request SSD, and read the compositor's configure response.
+struct SsdProbeState {
+    struct wl_compositor* compositor = nullptr;
+    struct xdg_wm_base* wmBase = nullptr;
+    struct zxdg_decoration_manager_v1* decoMgr = nullptr;
+    uint32_t compName = 0, wmName = 0, decoName = 0;
+    uint32_t grantedMode = 0;  // 0 = no answer yet
 };
+
+static void ProbeRegistryGlobal(void* data, struct wl_registry* reg, uint32_t name,
+                                 const char* interface, uint32_t version) {
+    auto* s = static_cast<SsdProbeState*>(data);
+    if (strcmp(interface, "wl_compositor") == 0) {
+        s->compositor = static_cast<struct wl_compositor*>(
+            wl_registry_bind(reg, name, &wl_compositor_interface, std::min(version, 4u)));
+        s->compName = name;
+    } else if (strcmp(interface, "xdg_wm_base") == 0) {
+        s->wmBase = static_cast<struct xdg_wm_base*>(
+            wl_registry_bind(reg, name, &xdg_wm_base_interface, 1));
+        s->wmName = name;
+    } else if (strcmp(interface, "zxdg_decoration_manager_v1") == 0) {
+        s->decoMgr = static_cast<struct zxdg_decoration_manager_v1*>(
+            wl_registry_bind(reg, name, &zxdg_decoration_manager_v1_interface, 1));
+        s->decoName = name;
+    }
+}
+static void ProbeRegistryRemove(void*, struct wl_registry*, uint32_t) {}
+static const struct wl_registry_listener kProbeRegistryListener = {
+    ProbeRegistryGlobal, ProbeRegistryRemove,
+};
+
+static void ProbeWmBasePing(void*, struct xdg_wm_base* base, uint32_t serial) {
+    xdg_wm_base_pong(base, serial);
+}
+static const struct xdg_wm_base_listener kProbeWmBaseListener = { ProbeWmBasePing };
+
+static void ProbeXdgSurfaceConfigure(void*, struct xdg_surface* surf, uint32_t serial) {
+    xdg_surface_ack_configure(surf, serial);
+}
+static const struct xdg_surface_listener kProbeXdgSurfaceListener = { ProbeXdgSurfaceConfigure };
+
+static void ProbeToplevelConfigure(void*, struct xdg_toplevel*, int32_t, int32_t, struct wl_array*) {}
+static void ProbeToplevelClose(void*, struct xdg_toplevel*) {}
+static void ProbeToplevelBounds(void*, struct xdg_toplevel*, int32_t, int32_t) {}
+static void ProbeToplevelCaps(void*, struct xdg_toplevel*, struct wl_array*) {}
+static const struct xdg_toplevel_listener kProbeToplevelListener = {
+    ProbeToplevelConfigure, ProbeToplevelClose, ProbeToplevelBounds, ProbeToplevelCaps,
+};
+
+static void ProbeDecoConfigure(void* data, struct zxdg_toplevel_decoration_v1*, uint32_t mode) {
+    static_cast<SsdProbeState*>(data)->grantedMode = mode;
+}
+static const struct zxdg_toplevel_decoration_v1_listener kProbeDecoListener = { ProbeDecoConfigure };
 
 static bool WaylandHasSSD() {
     struct wl_display* dpy = wl_display_connect(nullptr);
     if (!dpy) return false;
-    bool found = false;
+
+    SsdProbeState state;
     struct wl_registry* reg = wl_display_get_registry(dpy);
-    wl_registry_add_listener(reg, &kRegistryListener, &found);
+    wl_registry_add_listener(reg, &kProbeRegistryListener, &state);
     wl_display_roundtrip(dpy);
+
+    if (!state.compositor || !state.wmBase || !state.decoMgr) {
+        if (state.decoMgr) zxdg_decoration_manager_v1_destroy(state.decoMgr);
+        if (state.wmBase) xdg_wm_base_destroy(state.wmBase);
+        if (state.compositor) wl_compositor_destroy(state.compositor);
+        wl_registry_destroy(reg);
+        wl_display_disconnect(dpy);
+        return false;
+    }
+
+    xdg_wm_base_add_listener(state.wmBase, &kProbeWmBaseListener, nullptr);
+
+    struct wl_surface* surf = wl_compositor_create_surface(state.compositor);
+    struct xdg_surface* xsurf = xdg_wm_base_get_xdg_surface(state.wmBase, surf);
+    xdg_surface_add_listener(xsurf, &kProbeXdgSurfaceListener, nullptr);
+
+    struct xdg_toplevel* toplevel = xdg_surface_get_toplevel(xsurf);
+    xdg_toplevel_add_listener(toplevel, &kProbeToplevelListener, nullptr);
+
+    struct zxdg_toplevel_decoration_v1* deco =
+        zxdg_decoration_manager_v1_get_toplevel_decoration(state.decoMgr, toplevel);
+    zxdg_toplevel_decoration_v1_add_listener(deco, &kProbeDecoListener, &state);
+    zxdg_toplevel_decoration_v1_set_mode(deco, ZXDG_TOPLEVEL_DECORATION_V1_MODE_SERVER_SIDE);
+
+    wl_surface_commit(surf);
+    wl_display_roundtrip(dpy);
+
+    bool ssd = (state.grantedMode == ZXDG_TOPLEVEL_DECORATION_V1_MODE_SERVER_SIDE);
+
+    zxdg_toplevel_decoration_v1_destroy(deco);
+    xdg_toplevel_destroy(toplevel);
+    xdg_surface_destroy(xsurf);
+    wl_surface_destroy(surf);
+    zxdg_decoration_manager_v1_destroy(state.decoMgr);
+    xdg_wm_base_destroy(state.wmBase);
+    wl_compositor_destroy(state.compositor);
     wl_registry_destroy(reg);
     wl_display_disconnect(dpy);
-    return found;
+
+    return ssd;
 }
 #endif
 
@@ -134,6 +219,8 @@ bool GlfwWindow::Init(int width, int height, const char* title) {
     }
 
     UpdateSizes();
+
+    SDL_StartTextInput(window_);
 
 #ifdef GRIT_MACOS
     MacStyleWindowChrome(window_, 0.12f, 0.12f, 0.13f);
@@ -310,8 +397,13 @@ void GlfwWindow::DispatchEvent(const SDL_Event& ev) {
         keyCb_(sym, mods, ev.type == SDL_EVENT_KEY_DOWN);
         break;
     }
-    case SDL_EVENT_TEXT_INPUT:
-        if (charCb_ && ev.text.text[0]) {
+    case SDL_EVENT_TEXT_INPUT: {
+        SDL_Keymod km = SDL_GetModState();
+        bool suppress = (km & SDL_KMOD_CTRL) != 0;
+#ifdef __APPLE__
+        suppress = suppress || (km & SDL_KMOD_GUI) != 0;
+#endif
+        if (charCb_ && ev.text.text[0] && !suppress) {
             const unsigned char* s = (const unsigned char*)ev.text.text;
             uint32_t cp = 0;
             if (s[0] < 0x80) cp = s[0];
@@ -322,6 +414,7 @@ void GlfwWindow::DispatchEvent(const SDL_Event& ev) {
             if (cp) charCb_(cp);
         }
         break;
+    }
     default:
         break;
     }
