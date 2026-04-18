@@ -249,47 +249,82 @@ static void fetch_models(UiState* s) {
     });
 }
 
+struct ApiKeyDialogCtx {
+    UiState* state;
+    GtkWidget* entry;
+};
+
+static void on_api_save_clicked(GtkButton*, gpointer user_data) {
+    auto* w = GTK_WINDOW(user_data);
+    auto* ctx = static_cast<ApiKeyDialogCtx*>(g_object_get_data(G_OBJECT(w), "api-ctx"));
+    if (!ctx) return;
+
+    const char* key = gtk_editable_get_text(GTK_EDITABLE(ctx->entry));
+    if (key && *key) {
+        keychain::SaveApiKey(key);
+        set_status(ctx->state, "API key saved");
+    } else {
+        keychain::ClearApiKey();
+        set_status(ctx->state, "API key cleared");
+    }
+    configure_http(ctx->state);
+    fetch_models(ctx->state);
+    gtk_window_destroy(w);
+}
+
 static void set_api_key(UiState* s) {
-    auto* dialog = gtk_dialog_new_with_buttons(
-        "Set API Key",
-        GTK_WINDOW(gtk_widget_get_root(s->apiKeyBtn)),
-        GTK_DIALOG_MODAL,
-        "Cancel", GTK_RESPONSE_CANCEL,
-        "Save", GTK_RESPONSE_OK,
-        nullptr);
+    auto* parent = GTK_WINDOW(gtk_widget_get_root(s->apiKeyBtn));
+    auto* win = gtk_window_new();
+    gtk_window_set_title(GTK_WINDOW(win), "Set API Key");
+    gtk_window_set_modal(GTK_WINDOW(win), TRUE);
+    gtk_window_set_transient_for(GTK_WINDOW(win), parent);
+    gtk_window_set_default_size(GTK_WINDOW(win), 420, -1);
 
-    auto* box = gtk_dialog_get_content_area(GTK_DIALOG(dialog));
+    auto* root = gtk_box_new(GTK_ORIENTATION_VERTICAL, 10);
+    gtk_widget_set_margin_top(root, 12);
+    gtk_widget_set_margin_bottom(root, 12);
+    gtk_widget_set_margin_start(root, 12);
+    gtk_widget_set_margin_end(root, 12);
+
     auto* entry = gtk_password_entry_new();
-    gtk_widget_set_margin_top(entry, 10);
-    gtk_widget_set_margin_bottom(entry, 10);
-    gtk_widget_set_margin_start(entry, 10);
-    gtk_widget_set_margin_end(entry, 10);
     gtk_password_entry_set_show_peek_icon(GTK_PASSWORD_ENTRY(entry), TRUE);
-
     std::string cur = keychain::LoadApiKey();
     if (!cur.empty()) gtk_editable_set_text(GTK_EDITABLE(entry), cur.c_str());
-    gtk_box_append(GTK_BOX(box), entry);
-    g_object_set_data(G_OBJECT(dialog), "api-entry", entry);
 
-    g_signal_connect(dialog, "response", G_CALLBACK(+[](GtkDialog* d, int response, gpointer user_data) {
+    auto* row = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 8);
+    auto* clearBtn = gtk_button_new_with_label("Clear");
+    auto* cancelBtn = gtk_button_new_with_label("Cancel");
+    auto* saveBtn = gtk_button_new_with_label("Save");
+
+    gtk_box_append(GTK_BOX(row), clearBtn);
+    gtk_box_append(GTK_BOX(row), gtk_separator_new(GTK_ORIENTATION_VERTICAL));
+    gtk_box_append(GTK_BOX(row), cancelBtn);
+    gtk_box_append(GTK_BOX(row), saveBtn);
+
+    gtk_box_append(GTK_BOX(root), entry);
+    gtk_box_append(GTK_BOX(root), row);
+    gtk_window_set_child(GTK_WINDOW(win), root);
+
+    g_signal_connect(clearBtn, "clicked", G_CALLBACK(+[](GtkButton*, gpointer user_data) {
         auto* st = static_cast<UiState*>(user_data);
-        if (response == GTK_RESPONSE_OK) {
-            GtkWidget* e = GTK_WIDGET(g_object_get_data(G_OBJECT(d), "api-entry"));
-            const char* key = gtk_editable_get_text(GTK_EDITABLE(e));
-            if (key && *key) {
-                keychain::SaveApiKey(key);
-                set_status(st, "API key saved");
-            } else {
-                keychain::ClearApiKey();
-                set_status(st, "API key cleared");
-            }
-            configure_http(st);
-            fetch_models(st);
-        }
-        gtk_window_destroy(GTK_WINDOW(d));
+        keychain::ClearApiKey();
+        configure_http(st);
+        fetch_models(st);
+        set_status(st, "API key cleared");
     }), s);
 
-    gtk_window_present(GTK_WINDOW(dialog));
+    g_signal_connect(cancelBtn, "clicked", G_CALLBACK(+[](GtkButton*, gpointer user_data) {
+        gtk_window_destroy(GTK_WINDOW(user_data));
+    }), win);
+
+    auto* ctx = new ApiKeyDialogCtx{s, entry};
+    g_object_set_data_full(G_OBJECT(win), "api-ctx", ctx, +[](gpointer p) {
+        delete static_cast<ApiKeyDialogCtx*>(p);
+    });
+
+    g_signal_connect(saveBtn, "clicked", G_CALLBACK(on_api_save_clicked), win);
+
+    gtk_window_present(GTK_WINDOW(win));
 }
 
 static net::CurlHttpClient::Protocol protocol_for_model(const std::string& model) {
