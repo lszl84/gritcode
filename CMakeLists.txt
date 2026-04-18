@@ -52,38 +52,30 @@ FetchContent_MakeAvailable(json)
 # --- Platform dependencies ---
 find_package(OpenGL REQUIRED)
 
+# --- SDL3 (all platforms) ---
+set(SDL_SHARED OFF CACHE BOOL "" FORCE)
+set(SDL_STATIC ON CACHE BOOL "" FORCE)
+set(SDL_TEST_LIBRARY OFF CACHE BOOL "" FORCE)
+set(SDL_TESTS OFF CACHE BOOL "" FORCE)
+set(SDL_INSTALL OFF CACHE BOOL "" FORCE)
+FetchContent_Declare(sdl3
+    GIT_REPOSITORY https://github.com/libsdl-org/SDL.git
+    GIT_TAG release-3.2.18
+    GIT_SHALLOW ON
+)
+FetchContent_MakeAvailable(sdl3)
+
 if(LINUX)
-    # Linux: use system packages + vendored SDL3 (for CSD hit-test API)
+    # Linux: use system packages
     find_package(PkgConfig REQUIRED)
     pkg_check_modules(FREETYPE REQUIRED IMPORTED_TARGET freetype2)
     pkg_check_modules(HARFBUZZ REQUIRED IMPORTED_TARGET harfbuzz)
     pkg_check_modules(FONTCONFIG REQUIRED IMPORTED_TARGET fontconfig)
     pkg_check_modules(LIBCURL REQUIRED IMPORTED_TARGET libcurl)
     pkg_check_modules(LIBSECRET REQUIRED IMPORTED_TARGET libsecret-1)
-
-    set(SDL_SHARED OFF CACHE BOOL "" FORCE)
-    set(SDL_STATIC ON CACHE BOOL "" FORCE)
-    set(SDL_TEST_LIBRARY OFF CACHE BOOL "" FORCE)
-    set(SDL_TESTS OFF CACHE BOOL "" FORCE)
-    set(SDL_INSTALL OFF CACHE BOOL "" FORCE)
-    FetchContent_Declare(sdl3
-        GIT_REPOSITORY https://github.com/libsdl-org/SDL.git
-        GIT_TAG release-3.2.18
-        GIT_SHALLOW ON
-    )
-    FetchContent_MakeAvailable(sdl3)
-else()
+    pkg_check_modules(WAYLAND_CLIENT REQUIRED IMPORTED_TARGET wayland-client)
+elseif(NOT LINUX)
     # macOS / Windows: build from source
-    set(GLFW_BUILD_DOCS OFF CACHE BOOL "" FORCE)
-    set(GLFW_BUILD_TESTS OFF CACHE BOOL "" FORCE)
-    set(GLFW_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
-    set(GLFW_INSTALL OFF CACHE BOOL "" FORCE)
-    FetchContent_Declare(glfw
-        GIT_REPOSITORY https://github.com/glfw/glfw.git
-        GIT_TAG 3.4
-        GIT_SHALLOW ON
-    )
-
     set(FT_DISABLE_BZIP2 ON CACHE BOOL "" FORCE)
     set(FT_DISABLE_BROTLI ON CACHE BOOL "" FORCE)
     set(FT_DISABLE_HARFBUZZ ON CACHE BOOL "" FORCE)
@@ -127,7 +119,7 @@ else()
         GIT_SHALLOW ON
     )
 
-    FetchContent_MakeAvailable(glfw freetype harfbuzz curl)
+    FetchContent_MakeAvailable(freetype harfbuzz curl)
 endif()
 
 # --- Executable ---
@@ -193,22 +185,22 @@ target_include_directories(grit PRIVATE
 
 target_link_libraries(grit PRIVATE
     OpenGL::GL
+    SDL3::SDL3-static
     nlohmann_json::nlohmann_json
     cmark
 )
 
 if(LINUX)
     target_link_libraries(grit PRIVATE
-        SDL3::SDL3-static
         PkgConfig::FREETYPE
         PkgConfig::HARFBUZZ
         PkgConfig::FONTCONFIG
         PkgConfig::LIBCURL
         PkgConfig::LIBSECRET
+        PkgConfig::WAYLAND_CLIENT
     )
 else()
     target_link_libraries(grit PRIVATE
-        glfw
         freetype
         harfbuzz
         CURL::libcurl

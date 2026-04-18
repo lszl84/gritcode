@@ -6,13 +6,46 @@
 
 #include <SDL3/SDL.h>
 #include <SDL3/SDL_opengl.h>
-#include <xkbcommon/xkbcommon-keysyms.h>
+#include "keysyms.h"
 #include <cstdio>
+#include <cstring>
 #include <algorithm>
 #include <cmath>
 
+#ifdef GRIT_LINUX
+#include <wayland-client.h>
+#endif
+
 #ifdef GRIT_MACOS
 extern "C" void MacStyleWindowChrome(void*, float, float, float);
+#endif
+
+#ifdef GRIT_LINUX
+// Query the Wayland compositor directly for xdg-decoration support.
+// Opens an independent connection, enumerates globals, and disconnects.
+// Returns true if the compositor advertises zxdg_decoration_manager_v1
+// (meaning it can provide server-side decorations).
+static void WlRegistryGlobal(void* data, struct wl_registry*, uint32_t,
+                              const char* interface, uint32_t) {
+    if (strcmp(interface, "zxdg_decoration_manager_v1") == 0)
+        *static_cast<bool*>(data) = true;
+}
+static void WlRegistryRemove(void*, struct wl_registry*, uint32_t) {}
+static const struct wl_registry_listener kRegistryListener = {
+    WlRegistryGlobal, WlRegistryRemove,
+};
+
+static bool WaylandHasSSD() {
+    struct wl_display* dpy = wl_display_connect(nullptr);
+    if (!dpy) return false;
+    bool found = false;
+    struct wl_registry* reg = wl_display_get_registry(dpy);
+    wl_registry_add_listener(reg, &kRegistryListener, &found);
+    wl_display_roundtrip(dpy);
+    wl_registry_destroy(reg);
+    wl_display_disconnect(dpy);
+    return found;
+}
 #endif
 
 static int ToKeySym(SDL_Keycode key) {
@@ -49,13 +82,25 @@ GlfwWindow::~GlfwWindow() {
 }
 
 bool GlfwWindow::Init(int width, int height, const char* title) {
+    SDL_SetAppMetadata("Gritcode", GRIT_VERSION, "ai.gritcode.app");
+    SDL_SetHint(SDL_HINT_APP_ID, "ai.gritcode.app");
+
     if (!SDL_Init(SDL_INIT_VIDEO)) {
         fprintf(stderr, "SDL init failed: %s\n", SDL_GetError());
         return false;
     }
 
+    // Decide CSD vs SSD before creating the window.
+    useCSD_ = false;
 #ifdef GRIT_LINUX
-    SDL_SetHint(SDL_HINT_VIDEO_WAYLAND_ALLOW_LIBDECOR, "1");
+    const char* driver = SDL_GetCurrentVideoDriver();
+    if (driver && strcmp(driver, "wayland") == 0) {
+        useCSD_ = !WaylandHasSSD();
+        fprintf(stderr, "wayland: compositor %s SSD → %s\n",
+                useCSD_ ? "lacks" : "provides",
+                useCSD_ ? "using custom CSD" : "using server decorations");
+    }
+    // X11: window manager always provides SSD.
 #endif
 
     SDL_GL_SetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION, 3);
@@ -63,9 +108,11 @@ bool GlfwWindow::Init(int width, int height, const char* title) {
     SDL_GL_SetAttribute(SDL_GL_CONTEXT_PROFILE_MASK, SDL_GL_CONTEXT_PROFILE_CORE);
     SDL_GL_SetAttribute(SDL_GL_DOUBLEBUFFER, 1);
 
-    window_ = SDL_CreateWindow(title, width, height,
-                               SDL_WINDOW_OPENGL | SDL_WINDOW_RESIZABLE | SDL_WINDOW_HIDDEN |
-                               SDL_WINDOW_HIGH_PIXEL_DENSITY | SDL_WINDOW_BORDERLESS);
+    Uint32 flags = SDL_WINDOW_OPENGL | SDL_WINDOW_RESIZABLE | SDL_WINDOW_HIDDEN
+                 | SDL_WINDOW_HIGH_PIXEL_DENSITY;
+    if (useCSD_) flags |= SDL_WINDOW_BORDERLESS;
+
+    window_ = SDL_CreateWindow(title, width, height, flags);
     if (!window_) {
         fprintf(stderr, "SDL window creation failed: %s\n", SDL_GetError());
         return false;
@@ -77,8 +124,9 @@ bool GlfwWindow::Init(int width, int height, const char* title) {
         return false;
     }
 
-    if (!SDL_SetWindowHitTest(window_, HitTest, this)) {
-        fprintf(stderr, "SDL_SetWindowHitTest failed: %s\n", SDL_GetError());
+    if (useCSD_) {
+        if (!SDL_SetWindowHitTest(window_, HitTest, this))
+            fprintf(stderr, "SDL_SetWindowHitTest failed: %s\n", SDL_GetError());
     }
 
     if (!SDL_GL_SetSwapInterval(0)) {
@@ -177,7 +225,7 @@ void GlfwWindow::PostEmptyEvent() {
 
 enum SDL_HitTestResult GlfwWindow::HitTest(SDL_Window*, const SDL_Point* area, void* data) {
     auto* self = static_cast<GlfwWindow*>(data);
-    if (!self || !area) return SDL_HITTEST_NORMAL;
+    if (!self || !area || !self->useCSD_) return SDL_HITTEST_NORMAL;
 
     // SDL hit-test callback gives window-coordinate units.
     const int x = area->x;

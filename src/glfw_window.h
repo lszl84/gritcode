@@ -34,12 +34,16 @@ public:
 
     void SetClipboard(const std::string& text);
 
+    // True when the compositor lacks server-side decorations and we draw our own.
+    bool UseCSD() const { return useCSD_; }
+
     // Window controls for custom CSD buttons
     void Minimize();
     void ToggleMaximize();
     bool IsMaximized() const;
 
-    // Custom titlebar hit-test config (values in framebuffer pixels)
+    // Custom titlebar hit-test config (values in framebuffer pixels).
+    // Only meaningful when UseCSD() is true.
     void SetTitlebarConfigPx(int titlebarHeightPx, const RectI& dragExclusionPx);
 
     // Wake WaitEvents from bg thread
@@ -65,8 +69,9 @@ private:
 
     bool leftDown_ = false;
     float mouseX_ = 0.0f, mouseY_ = 0.0f; // framebuffer pixels
+    bool useCSD_ = false;
 
-    int titlebarHeight_ = 34; // window-coordinate units
+    int titlebarHeight_ = 0; // window-coordinate units (0 when SSD)
     RectI dragExclusion_{};   // window-coordinate units
 
     std::function<void(int, int, float)> resizeCb_;
