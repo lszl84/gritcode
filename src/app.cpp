@@ -671,24 +671,16 @@ bool App::Init(bool sessionChooser) {
     sendButton_.text = "Send";
     sendButton_.onClick = [&]() { SendMessage(); };
 
-    // Custom CSD controls
-    closeButton_.text = "×";
-    closeButton_.bgColor = {0.35f, 0.16f, 0.16f};
-    closeButton_.hoverColor = {0.52f, 0.18f, 0.18f};
-    closeButton_.pressColor = {0.42f, 0.14f, 0.14f};
+    // Custom CSD close control (Adwaita-like, neutral)
+    closeButton_.text.clear(); // painted manually in PaintTopBar for precise centering
+    closeButton_.style = FontStyle::Bold;
+    closeButton_.circular = true;
+    closeButton_.textColor = {0.92f, 0.92f, 0.94f};
+    // Adwaita-like neutral titlebutton tones
+    closeButton_.bgColor = {0.24f, 0.24f, 0.26f};
+    closeButton_.hoverColor = {0.30f, 0.30f, 0.33f};
+    closeButton_.pressColor = {0.19f, 0.19f, 0.21f};
     closeButton_.onClick = [&]() { window_.RequestClose(); };
-
-    maximizeButton_.text = "□";
-    maximizeButton_.bgColor = {0.18f, 0.18f, 0.20f};
-    maximizeButton_.hoverColor = {0.25f, 0.25f, 0.28f};
-    maximizeButton_.pressColor = {0.15f, 0.15f, 0.17f};
-    maximizeButton_.onClick = [&]() { window_.ToggleMaximize(); };
-
-    minimizeButton_.text = "–";
-    minimizeButton_.bgColor = {0.18f, 0.18f, 0.20f};
-    minimizeButton_.hoverColor = {0.25f, 0.25f, 0.28f};
-    minimizeButton_.pressColor = {0.15f, 0.15f, 0.17f};
-    minimizeButton_.onClick = [&]() { window_.Minimize(); };
 
     // API Key button + inline editor
     apiKeyButton_.text = "API Key...";
@@ -970,14 +962,11 @@ void App::LayoutWidgets() {
     float barY = h - bar;
     float inputY = barY - inp;
 
-    // Top custom CSD controls
-    float btnPad = 6 * s;
-    float btnW = 34 * s;
-    float btnH = std::max(24.0f * s, topBar - 2 * btnPad);
-    float btnY = (topBar - btnH) * 0.5f;
-    closeButton_.bounds = {w - btnPad - btnW, btnY, btnW, btnH};
-    maximizeButton_.bounds = {closeButton_.bounds.x - 4 * s - btnW, btnY, btnW, btnH};
-    minimizeButton_.bounds = {maximizeButton_.bounds.x - 4 * s - btnW, btnY, btnW, btnH};
+    // Top custom CSD controls (closer to Adwaita metrics)
+    float btnPad = 10 * s;
+    float btnD = std::clamp(24.0f * s, 22.0f * s, 28.0f * s);
+    float btnY = std::floor((topBar - btnD) * 0.5f);
+    closeButton_.bounds = {std::floor(w - btnPad - btnD), btnY, btnD, btnD};
 
     messageInput_.bounds = {8 * s, inputY + 5 * s, w - 103 * s, inp - 10 * s};
     sendButton_.bounds = {w - 88 * s, inputY + 5 * s, 80 * s, inp - 10 * s};
@@ -1011,7 +1000,7 @@ void App::LayoutWidgets() {
     // Exclude CSD buttons from draggable title region.
     // Include full button bounds + the gaps between them so all hoverable
     // button-area pixels are guaranteed click-through to widgets (not drag).
-    float exX = minimizeButton_.bounds.x - 4 * s;
+    float exX = closeButton_.bounds.x - 4 * s;
     float exW = (closeButton_.bounds.x + closeButton_.bounds.w) - exX + 4 * s;
     titleDragExclusion_ = {
         (int)exX,
@@ -1042,9 +1031,28 @@ void App::PaintTopBar() {
     title.style = FontStyle::Regular;
     title.Paint(renderer_, fm);
 
-    minimizeButton_.Paint(renderer_, fm);
-    maximizeButton_.Paint(renderer_, fm);
     closeButton_.Paint(renderer_, fm);
+
+    // Pixel-precise X icon (not font glyph), tuned to Adwaita symbolic proportions.
+    float cx = closeButton_.bounds.x + closeButton_.bounds.w * 0.5f;
+    float cy = closeButton_.bounds.y + closeButton_.bounds.h * 0.5f;
+    float arm = closeButton_.bounds.w * 0.165f;
+    float t = std::max(1.0f, std::round(1.15f * s));
+    Color xColor{0.90f, 0.90f, 0.92f, 1.0f};
+
+    // Two diagonals composed from square pixels for deterministic centering.
+    // Diagonal 1: top-left -> bottom-right
+    for (int i = -(int)std::round(arm); i <= (int)std::round(arm); ++i) {
+        float px = std::round(cx + i);
+        float py = std::round(cy + i);
+        renderer_.DrawRect(px - t * 0.5f, py - t * 0.5f, t, t, xColor);
+    }
+    // Diagonal 2: top-right -> bottom-left
+    for (int i = -(int)std::round(arm); i <= (int)std::round(arm); ++i) {
+        float px = std::round(cx + i);
+        float py = std::round(cy - i);
+        renderer_.DrawRect(px - t * 0.5f, py - t * 0.5f, t, t, xColor);
+    }
 }
 
 void App::PaintBottomBar() {
@@ -2356,8 +2364,6 @@ void App::OnMouseDown(float x, float y, bool shift) {
     if (chooserMode_) {
         // Top CSD controls remain active in chooser mode.
         if (closeButton_.OnMouseDown(x, y)) { MarkDirty(); return; }
-        if (maximizeButton_.OnMouseDown(x, y)) { MarkDirty(); return; }
-        if (minimizeButton_.OnMouseDown(x, y)) { MarkDirty(); return; }
 
         float lh = scrollView_.Fonts().LineHeight(FontStyle::Regular);
         float rowH = lh * 2.8f;
@@ -2383,8 +2389,6 @@ void App::OnMouseDown(float x, float y, bool shift) {
     }
 
     if (closeButton_.OnMouseDown(x, y)) { MarkDirty(); return; }
-    if (maximizeButton_.OnMouseDown(x, y)) { MarkDirty(); return; }
-    if (minimizeButton_.OnMouseDown(x, y)) { MarkDirty(); return; }
 
     // Dropdowns: only one can be open at a time. If any popup is open and
     // the click landed inside it, let that dropdown handle it (select item
@@ -2443,8 +2447,6 @@ void App::OnMouseDown(float x, float y, bool shift) {
 
 void App::OnMouseUp(float x, float y) {
     closeButton_.OnMouseUp(x, y);
-    maximizeButton_.OnMouseUp(x, y);
-    minimizeButton_.OnMouseUp(x, y);
     sendButton_.OnMouseUp(x, y);
     if (apiKeyEditing_) { apiKeyAccept_.OnMouseUp(x, y); apiKeyCancel_.OnMouseUp(x, y); }
     else apiKeyButton_.OnMouseUp(x, y);
@@ -2461,8 +2463,6 @@ void App::OnMouseMove(float x, float y, bool leftDown) {
 
     if (chooserMode_) {
         closeButton_.OnMouseMove(x, y);
-        maximizeButton_.OnMouseMove(x, y);
-        minimizeButton_.OnMouseMove(x, y);
 
         float lh = scrollView_.Fonts().LineHeight(FontStyle::Regular);
         float rowH = lh * 2.8f;
@@ -2485,8 +2485,6 @@ void App::OnMouseMove(float x, float y, bool leftDown) {
     }
 
     closeButton_.OnMouseMove(x, y);
-    maximizeButton_.OnMouseMove(x, y);
-    minimizeButton_.OnMouseMove(x, y);
     sendButton_.OnMouseMove(x, y);
     if (apiKeyEditing_) { apiKeyAccept_.OnMouseMove(x, y); apiKeyCancel_.OnMouseMove(x, y); }
     else apiKeyButton_.OnMouseMove(x, y);

@@ -143,8 +143,6 @@ private:
     float chromeTopPad_ = 4;  // Padding above the message row inside the bottom chrome
     float titlebarHeight_ = 34;
     Button closeButton_;
-    Button maximizeButton_;
-    Button minimizeButton_;
     RectI titleDragExclusion_{};
     void LayoutWidgets();
     void PaintTopBar();

@@ -57,6 +57,8 @@ public:
     Color pressColor{0.18f, 0.18f, 0.20f};
     Color disabledText{0.4f, 0.4f, 0.4f};
     FontStyle style = FontStyle::Regular;
+    bool circular = false;
+    float cornerRadius = 14.0f;
     bool hovered = false;
     bool pressed = false;
     bool enabled = true;

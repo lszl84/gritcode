@@ -36,7 +36,7 @@ void Label::Paint(GLRenderer& r, FontManager& fm) const {
 
 void Button::Paint(GLRenderer& r, FontManager& fm) const {
     if (!visible) return;
-    float radius = 14;
+    float radius = circular ? std::min(bounds.w, bounds.h) * 0.5f : cornerRadius;
     Color bg = !enabled ? bgColor : pressed ? pressColor : hovered ? hoverColor : bgColor;
     r.DrawRoundedRect(bounds.x, bounds.y, bounds.w, bounds.h, radius, bg);
 
