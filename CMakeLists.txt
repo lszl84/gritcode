@@ -157,8 +157,14 @@ set(GRIT_SOURCES
 )
 
 if(LINUX)
-    add_executable(grit-gtk4 src/gtk4_main.cpp)
-    target_link_libraries(grit-gtk4 PRIVATE PkgConfig::GTK4)
+    add_executable(grit-gtk4
+        src/gtk4_main.cpp
+        src/session.cpp
+    )
+    target_link_libraries(grit-gtk4 PRIVATE
+        PkgConfig::GTK4
+        nlohmann_json::nlohmann_json
+    )
     target_compile_options(grit-gtk4 PRIVATE -Wall -Wextra -Wpedantic)
 endif()
 

@@ -2,22 +2,48 @@
 // Incremental migration path from custom GL UI to native GTK rendering.
 
 #include <gtk/gtk.h>
+#include <algorithm>
+#include <filesystem>
 #include <string>
 #include <vector>
+#include <unistd.h>
+
+#include "session.h"
+
+namespace fs = std::filesystem;
 
 struct UiState {
     GtkTextBuffer* buffer = nullptr;
     GtkWidget* textView = nullptr;
     GtkWidget* input = nullptr;
-    GtkWidget* provider = nullptr; // GtkDropDown
-    GtkWidget* model = nullptr;    // GtkDropDown
+    GtkWidget* provider = nullptr;  // GtkDropDown
+    GtkWidget* model = nullptr;     // GtkDropDown
+    GtkWidget* workspace = nullptr; // GtkDropDown
+    GtkWidget* status = nullptr;
+
     GtkStringList* providerList = nullptr;
     GtkStringList* modelList = nullptr;
+    GtkStringList* workspaceList = nullptr;
+
     GtkTextTag* tagUser = nullptr;
     GtkTextTag* tagAssistant = nullptr;
     GtkTextTag* tagMeta = nullptr;
     GtkTextTag* tagError = nullptr;
+
+    SessionManager session;
+    std::vector<std::string> workspaceCwds;
+    bool mutatingWorkspace = false;
 };
+
+static std::string current_cwd() {
+    char buf[4096];
+    if (getcwd(buf, sizeof(buf))) return std::string(buf);
+    return ".";
+}
+
+static void set_status(UiState* s, const std::string& t) {
+    gtk_label_set_text(GTK_LABEL(s->status), t.c_str());
+}
 
 static const char* dropdown_selected(GtkWidget* dd, GtkStringList* list) {
     guint idx = gtk_drop_down_get_selected(GTK_DROP_DOWN(dd));
@@ -25,6 +51,16 @@ static const char* dropdown_selected(GtkWidget* dd, GtkStringList* list) {
     guint n = g_list_model_get_n_items(G_LIST_MODEL(list));
     if (idx >= n) return nullptr;
     return gtk_string_list_get_string(list, idx);
+}
+
+static int list_index_of(GtkStringList* list, const std::string& value) {
+    if (!list) return -1;
+    guint n = g_list_model_get_n_items(G_LIST_MODEL(list));
+    for (guint i = 0; i < n; ++i) {
+        const char* s = gtk_string_list_get_string(list, i);
+        if (s && value == s) return (int)i;
+    }
+    return -1;
 }
 
 static void scroll_to_end(UiState* s) {
@@ -40,53 +76,139 @@ static void append_block(UiState* s, const char* role, const char* text, GtkText
     GtkTextIter end;
     gtk_text_buffer_get_end_iter(s->buffer, &end);
 
-    // Header
     std::string hdr = role;
     hdr += "\n";
     gtk_text_buffer_insert_with_tags(s->buffer, &end, hdr.c_str(), -1, s->tagMeta, nullptr);
 
-    // Body
     gtk_text_buffer_insert_with_tags(s->buffer, &end, text, -1, bodyTag, nullptr);
     gtk_text_buffer_insert(s->buffer, &end, "\n\n", -1);
 
     scroll_to_end(s);
 }
 
-static void append_user(UiState* s, const char* text) {
-    append_block(s, "You", text, s->tagUser);
+static void clear_transcript(UiState* s) {
+    gtk_text_buffer_set_text(s->buffer, "", -1);
 }
 
-static void append_assistant(UiState* s, const std::string& text) {
-    append_block(s, "Assistant", text.c_str(), s->tagAssistant);
+static void append_from_message(UiState* s, const ChatMessage& m) {
+    if (m.role == "user") append_block(s, "You", m.content.c_str(), s->tagUser);
+    else if (m.role == "assistant") append_block(s, "Assistant", m.content.c_str(), s->tagAssistant);
+    else append_block(s, m.role.c_str(), m.content.c_str(), s->tagAssistant);
 }
 
-static void append_error(UiState* s, const char* text) {
-    append_block(s, "Error", text, s->tagError);
+static void sync_provider_model_from_session(UiState* s) {
+    int p = list_index_of(s->providerList, s->session.Provider());
+    if (p >= 0) gtk_drop_down_set_selected(GTK_DROP_DOWN(s->provider), (guint)p);
+    int m = list_index_of(s->modelList, s->session.Model());
+    if (m >= 0) gtk_drop_down_set_selected(GTK_DROP_DOWN(s->model), (guint)m);
+}
+
+static void session_save_from_ui(UiState* s) {
+    const char* p = dropdown_selected(s->provider, s->providerList);
+    const char* m = dropdown_selected(s->model, s->modelList);
+    if (p) s->session.SetProvider(p);
+    if (m) s->session.SetModel(m);
+    s->session.Save();
+}
+
+static void reload_workspaces(UiState* s) {
+    s->mutatingWorkspace = true;
+    s->workspaceCwds.clear();
+
+    if (s->workspaceList) g_object_unref(s->workspaceList);
+    s->workspaceList = gtk_string_list_new(nullptr);
+
+    std::vector<SessionInfo> all = SessionManager::ListSessions();
+    std::sort(all.begin(), all.end(), [](const SessionInfo& a, const SessionInfo& b) {
+        return a.lastUsed > b.lastUsed;
+    });
+
+    std::string cwd = current_cwd();
+    gtk_string_list_append(s->workspaceList, cwd.c_str());
+    s->workspaceCwds.push_back(cwd);
+
+    for (const auto& si : all) {
+        if (si.cwd == cwd) continue;
+        gtk_string_list_append(s->workspaceList, si.cwd.c_str());
+        s->workspaceCwds.push_back(si.cwd);
+    }
+
+    gtk_drop_down_set_model(GTK_DROP_DOWN(s->workspace), G_LIST_MODEL(s->workspaceList));
+    gtk_drop_down_set_selected(GTK_DROP_DOWN(s->workspace), 0);
+    s->mutatingWorkspace = false;
+}
+
+static void load_session_for_cwd(UiState* s, const std::string& cwd) {
+    s->session.SetCwd(cwd);
+    s->session.LoadForCwd(cwd);
+
+    clear_transcript(s);
+    for (const auto& m : s->session.History()) append_from_message(s, m);
+
+    sync_provider_model_from_session(s);
+
+    std::string st = "Workspace: ";
+    st += cwd;
+    st += "  | Messages: ";
+    st += std::to_string(s->session.History().size());
+    set_status(s, st);
+}
+
+static void on_workspace_changed(GtkDropDown*, GParamSpec*, gpointer user_data) {
+    auto* s = static_cast<UiState*>(user_data);
+    if (s->mutatingWorkspace) return;
+
+    guint idx = gtk_drop_down_get_selected(GTK_DROP_DOWN(s->workspace));
+    if (idx >= s->workspaceCwds.size()) return;
+    std::string cwd = s->workspaceCwds[idx];
+
+    std::error_code ec;
+    if (fs::exists(cwd, ec) && fs::is_directory(cwd, ec)) {
+        chdir(cwd.c_str());
+        load_session_for_cwd(s, cwd);
+    } else {
+        append_block(s, "Error", "Selected workspace no longer exists on disk.", s->tagError);
+    }
+}
+
+static void on_provider_or_model_changed(GtkDropDown*, GParamSpec*, gpointer user_data) {
+    auto* s = static_cast<UiState*>(user_data);
+    session_save_from_ui(s);
 }
 
 static void on_send_clicked(GtkButton*, gpointer user_data) {
     auto* s = static_cast<UiState*>(user_data);
     const char* text = gtk_editable_get_text(GTK_EDITABLE(s->input));
     if (!text || !*text) {
-        append_error(s, "Cannot send empty message.");
+        append_block(s, "Error", "Cannot send empty message.", s->tagError);
         return;
     }
 
-    append_user(s, text);
+    ChatMessage u;
+    u.role = "user";
+    u.content = text;
+    s->session.History().push_back(u);
+    append_from_message(s, u);
 
     const char* provider = dropdown_selected(s->provider, s->providerList);
     const char* model = dropdown_selected(s->model, s->modelList);
+    if (provider) s->session.SetProvider(provider);
+    if (model) s->session.SetModel(model);
 
-    std::string reply = "GTK4 WIP response path active.\n";
-    reply += "provider: ";
-    reply += (provider ? provider : "unknown");
-    reply += "\nmodel: ";
-    reply += (model ? model : "unknown");
-    reply += "\n\n";
-    reply += "This branch is migrating rendering/input to GTK4 while preserving behavior parity.";
+    ChatMessage a;
+    a.role = "assistant";
+    a.content = "GTK4 WIP response path active.\n"
+                "This branch is migrating rendering/input to GTK4 while preserving behavior parity.\n"
+                "(Backend network path wiring is next milestone.)";
+    s->session.History().push_back(a);
+    append_from_message(s, a);
 
-    append_assistant(s, reply);
+    s->session.MarkDirty();
+    s->session.Save();
+
     gtk_editable_set_text(GTK_EDITABLE(s->input), "");
+    set_status(s, "Saved");
+    reload_workspaces(s);
 }
 
 static void on_input_activate(GtkEditable*, gpointer user_data) {
@@ -120,6 +242,11 @@ static GtkWidget* build_controls(UiState* s) {
     const char* providers[] = {"openai", "anthropic", "local", nullptr};
     const char* models[] = {"gpt-4.1", "o4-mini", "claude-sonnet", nullptr};
 
+    s->workspaceList = gtk_string_list_new(nullptr);
+    s->workspace = gtk_drop_down_new(G_LIST_MODEL(s->workspaceList), nullptr);
+    gtk_drop_down_set_enable_search(GTK_DROP_DOWN(s->workspace), FALSE);
+    gtk_widget_set_tooltip_text(s->workspace, "Workspace / session");
+
     s->provider = build_dropdown(providers, &s->providerList);
     s->model = build_dropdown(models, &s->modelList);
 
@@ -135,7 +262,11 @@ static GtkWidget* build_controls(UiState* s) {
     g_signal_connect(key, "key-pressed", G_CALLBACK(on_input_key), s);
     g_signal_connect(send, "clicked", G_CALLBACK(on_send_clicked), s);
     g_signal_connect(s->input, "activate", G_CALLBACK(on_input_activate), s);
+    g_signal_connect(s->workspace, "notify::selected", G_CALLBACK(on_workspace_changed), s);
+    g_signal_connect(s->provider, "notify::selected", G_CALLBACK(on_provider_or_model_changed), s);
+    g_signal_connect(s->model, "notify::selected", G_CALLBACK(on_provider_or_model_changed), s);
 
+    gtk_box_append(GTK_BOX(row), s->workspace);
     gtk_box_append(GTK_BOX(row), s->provider);
     gtk_box_append(GTK_BOX(row), s->model);
     gtk_box_append(GTK_BOX(row), s->input);
@@ -204,21 +335,33 @@ static void activate(GtkApplication* app, gpointer) {
 
     setup_tags(state);
 
-    append_block(state, "System",
-                 "Gritcode GTK4 WIP\n"
-                 "- Native GTK4 text rendering and selection\n"
-                 "- Native controls instead of hand-drawn GL widgets\n"
-                 "- Incremental migration toward parity",
-                 state->tagAssistant);
-
     gtk_scrolled_window_set_child(GTK_SCROLLED_WINDOW(sw), tv);
     auto* controls = build_controls(state);
 
+    state->status = gtk_label_new("");
+    gtk_widget_set_margin_start(state->status, 10);
+    gtk_widget_set_margin_end(state->status, 10);
+    gtk_widget_set_margin_bottom(state->status, 8);
+    gtk_label_set_xalign(GTK_LABEL(state->status), 0.0f);
+
     gtk_box_append(GTK_BOX(root), sw);
     gtk_box_append(GTK_BOX(root), controls);
+    gtk_box_append(GTK_BOX(root), state->status);
+
+    // Initial workspace/session load
+    std::string cwd = current_cwd();
+    load_session_for_cwd(state, cwd);
+    if (state->session.History().empty()) {
+        append_block(state, "System",
+                     "Gritcode GTK4 WIP\n"
+                     "- Native GTK4 text rendering and selection\n"
+                     "- Native controls instead of hand-drawn GL widgets\n"
+                     "- Incremental migration toward parity",
+                     state->tagAssistant);
+    }
+    reload_workspaces(state);
 
     g_object_set_data_full(G_OBJECT(win), "ui-state", state, (GDestroyNotify)g_free);
-
     gtk_window_present(GTK_WINDOW(win));
 }
 
