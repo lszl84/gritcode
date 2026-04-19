@@ -53,26 +53,45 @@ FetchContent_MakeAvailable(json)
 find_package(OpenGL REQUIRED)
 
 if(LINUX)
-    # Build GLFW from source with Wayland + X11 support.
-    # System libglfw3 on Ubuntu/Zorin is X11-only, forcing XWayland on GNOME
-    # and causing the rounded-corner overflow bug.
-    set(GLFW_BUILD_DOCS OFF CACHE BOOL "" FORCE)
-    set(GLFW_BUILD_TESTS OFF CACHE BOOL "" FORCE)
-    set(GLFW_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
-    set(GLFW_INSTALL OFF CACHE BOOL "" FORCE)
-    FetchContent_Declare(glfw
-        GIT_REPOSITORY https://github.com/glfw/glfw.git
-        GIT_TAG 3.4
-        GIT_SHALLOW ON
-    )
-    FetchContent_MakeAvailable(glfw)
-
+    # Native Wayland + X11 backends (no GLFW dependency)
     find_package(PkgConfig REQUIRED)
+    pkg_check_modules(EGL REQUIRED IMPORTED_TARGET egl)
     pkg_check_modules(FREETYPE REQUIRED IMPORTED_TARGET freetype2)
     pkg_check_modules(HARFBUZZ REQUIRED IMPORTED_TARGET harfbuzz)
     pkg_check_modules(FONTCONFIG REQUIRED IMPORTED_TARGET fontconfig)
     pkg_check_modules(LIBCURL REQUIRED IMPORTED_TARGET libcurl)
     pkg_check_modules(LIBSECRET REQUIRED IMPORTED_TARGET libsecret-1)
+    pkg_check_modules(WAYLAND_CLIENT IMPORTED_TARGET wayland-client)
+    pkg_check_modules(WAYLAND_EGL IMPORTED_TARGET wayland-egl)
+    pkg_check_modules(WAYLAND_CURSOR IMPORTED_TARGET wayland-cursor)
+    pkg_check_modules(X11 IMPORTED_TARGET x11)
+    pkg_check_modules(XEXT IMPORTED_TARGET xext)
+
+    find_program(WAYLAND_SCANNER wayland-scanner)
+    pkg_get_variable(WAYLAND_PROTOCOLS_DIR wayland-protocols pkgdatadir)
+    set(PROTO_GEN_DIR ${CMAKE_CURRENT_BINARY_DIR}/proto)
+    file(MAKE_DIRECTORY ${PROTO_GEN_DIR})
+
+    set(PROTOCOLS
+        unstable/xdg-decoration/xdg-decoration-unstable-v1.xml
+        stable/xdg-shell/xdg-shell.xml
+    )
+
+    foreach(PROTO ${PROTOCOLS})
+        get_filename_component(BASE ${PROTO} NAME_WE)
+        set(XML ${WAYLAND_PROTOCOLS_DIR}/${PROTO})
+        set(HEADER ${PROTO_GEN_DIR}/${BASE}-client-protocol.h)
+        set(SOURCE ${PROTO_GEN_DIR}/${BASE}-protocol.c)
+        add_custom_command(OUTPUT ${HEADER}
+            COMMAND ${WAYLAND_SCANNER} client-header ${XML} ${HEADER}
+            DEPENDS ${XML} VERBATIM)
+        add_custom_command(OUTPUT ${SOURCE}
+            COMMAND ${WAYLAND_SCANNER} private-code ${XML} ${SOURCE}
+            DEPENDS ${XML} VERBATIM)
+        list(APPEND PROTO_GENERATED ${HEADER} ${SOURCE})
+    endforeach()
+
+    list(APPEND GRIT_SOURCES ${PROTO_GENERATED})
 else()
     # macOS / Windows: build from source
     set(GLFW_BUILD_DOCS OFF CACHE BOOL "" FORCE)
@@ -135,7 +154,7 @@ endif()
 set(GRIT_SOURCES
     src/main.cpp
     src/app.cpp
-    src/glfw_window.cpp
+    src/window.cpp
     src/gl_renderer.cpp
     src/font.cpp
     src/scroll_view.cpp
@@ -190,6 +209,7 @@ target_include_directories(grit PRIVATE
     ${cmark_BINARY_DIR}/src
     ${cmark_SOURCE_DIR}/src
     src
+    ${PROTO_GEN_DIR}
 )
 
 target_link_libraries(grit PRIVATE
@@ -200,12 +220,18 @@ target_link_libraries(grit PRIVATE
 
 if(LINUX)
     target_link_libraries(grit PRIVATE
-        glfw
+        PkgConfig::EGL
         PkgConfig::FREETYPE
         PkgConfig::HARFBUZZ
         PkgConfig::FONTCONFIG
         PkgConfig::LIBCURL
         PkgConfig::LIBSECRET
+        PkgConfig::WAYLAND_CLIENT
+        PkgConfig::WAYLAND_EGL
+        PkgConfig::WAYLAND_CURSOR
+        PkgConfig::X11
+        PkgConfig::XEXT
+        OpenGL::GL
     )
 else()
     target_link_libraries(grit PRIVATE
@@ -233,7 +259,11 @@ if(GRIT_ENABLE_MCP)
 endif()
 
 if(LINUX)
-    target_compile_definitions(grit PRIVATE GRIT_LINUX)
+    target_compile_definitions(grit PRIVATE
+        GRIT_LINUX
+        HAVE_WAYLAND=1
+        HAVE_X11=1
+    )
 elseif(APPLE)
     target_compile_definitions(grit PRIVATE GRIT_MACOS)
 elseif(WIN32)

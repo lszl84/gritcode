@@ -635,11 +635,9 @@ static std::string ToolDefsJson() {
 bool App::Init(bool sessionChooser) {
     chooserMode_ = sessionChooser;
     if (!window_.Init(1000, 750, "Gritcode")) return false;
-    Clipboard::Init(window_.Handle());
 
     if (!scrollView_.Init(window_.Width(), window_.Height() - (int)((barHeight_ + inputHeight_ + chromeTopPad_) * window_.Scale()),
                           window_.Scale()))
-        return false;
 
     scrollView_.SetAutoScroll(true);
     scrollView_.SetClipboardFunc([&](const std::string& t) {
@@ -2456,7 +2454,7 @@ void App::OnKey(int key, int mods, bool pressed) {
             }
             MarkDirty();
         } else if (key == XKB_KEY_Escape) {
-            glfwSetWindowShouldClose(window_.Handle(), GLFW_TRUE);
+            window_.RequestClose();
         }
         return;
     }

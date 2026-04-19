@@ -15,7 +15,7 @@
 // along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 #pragma once
-#include "glfw_window.h"
+#include "window.h"
 #include "scroll_view.h"
 #include "widgets.h"
 #include "curl_http.h"
@@ -41,7 +41,7 @@ public:
     void Push(std::function<void()> fn) {
         std::lock_guard<std::mutex> lock(mu_);
         q_.push(std::move(fn));
-        glfwPostEmptyEvent();  // Wake up WaitEvents
+        GlfwWindow::PostEmptyEvent();  // Wake up WaitEvents
     }
     void Drain() {
         std::lock_guard<std::mutex> lock(mu_);
