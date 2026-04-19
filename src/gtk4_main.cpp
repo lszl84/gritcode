@@ -102,6 +102,11 @@ struct UiState {
     int toolRound = 0;
     std::atomic<uint64_t> requestGen{0};
 
+    // Currently-open streaming thinking section, if any. Non-null means
+    // the next `thinking=true` chunk should append to the already-opened
+    // block instead of starting a new one.
+    GtkTextTag* activeThinkingTag = nullptr;  // per-section invisible tag
+
     // Scroll anchoring — see scroll_to_end and on_vadj_* handlers.
     GtkWidget* scrolledWindow = nullptr;
     GtkAdjustment* vadj = nullptr;
@@ -222,16 +227,73 @@ static void append_assistant_header(UiState* s) {
     gtk_text_buffer_insert_with_tags(s->buffer, &end, "Assistant\n", -1, s->tagMeta, nullptr);
 }
 
-static void append_stream_chunk(UiState* s, const std::string& text, bool thinking) {
+// Close any currently-open thinking section. After this, further
+// thinking chunks will start a fresh collapsible block.
+static void close_thinking_section(UiState* s) {
+    s->activeThinkingTag = nullptr;
+}
+
+static void on_thinking_expander_toggled(GObject* obj, GParamSpec*, gpointer data) {
+    auto* tag = static_cast<GtkTextTag*>(data);
+    gboolean expanded = gtk_expander_get_expanded(GTK_EXPANDER(obj));
+    g_object_set(tag, "invisible", expanded ? FALSE : TRUE, nullptr);
+}
+
+// Open a fresh collapsible thinking section. Inserts an inline
+// GtkExpander as a child widget at the current buffer end; subsequent
+// thinking chunks go into a per-section invisible-by-default tag. The
+// user clicks the expander to reveal.
+static void open_thinking_section(UiState* s) {
     GtkTextIter end;
     gtk_text_buffer_get_end_iter(s->buffer, &end);
-    gtk_text_buffer_insert_with_tags(s->buffer, &end, text.c_str(), -1,
-                                     thinking ? s->tagThinking : s->tagAssistant,
-                                     nullptr);
+
+    // Per-section tag: independent `invisible` property so each block
+    // can be toggled on its own. Anonymous tag (no name) to avoid
+    // collisions across blocks.
+    auto* tag = gtk_text_tag_new(nullptr);
+    g_object_set(tag, "invisible", TRUE,
+                      "foreground", "#7EC7FF",
+                      "style", PANGO_STYLE_ITALIC,
+                      "family", "monospace",
+                      nullptr);
+    gtk_text_tag_table_add(gtk_text_buffer_get_tag_table(s->buffer), tag);
+    g_object_unref(tag);  // table holds the only strong ref we need
+
+    auto* anchor = gtk_text_buffer_create_child_anchor(s->buffer, &end);
+
+    auto* expander = gtk_expander_new("▸ Thinking");
+    gtk_expander_set_expanded(GTK_EXPANDER(expander), FALSE);
+    g_signal_connect(expander, "notify::expanded",
+                     G_CALLBACK(on_thinking_expander_toggled), tag);
+
+    gtk_text_view_add_child_at_anchor(GTK_TEXT_VIEW(s->textView), expander, anchor);
+
+    gtk_text_buffer_get_end_iter(s->buffer, &end);
+    gtk_text_buffer_insert(s->buffer, &end, "\n", 1);
+
+    s->activeThinkingTag = tag;
+}
+
+static void append_stream_chunk(UiState* s, const std::string& text, bool thinking) {
+    if (thinking && !s->activeThinkingTag) open_thinking_section(s);
+    if (!thinking && s->activeThinkingTag) close_thinking_section(s);
+
+    GtkTextIter end;
+    gtk_text_buffer_get_end_iter(s->buffer, &end);
+    if (thinking) {
+        // Tag text with both the base tagThinking (for style when visible)
+        // and the per-section invisible tag (for toggleable visibility).
+        gtk_text_buffer_insert_with_tags(s->buffer, &end, text.c_str(), -1,
+                                         s->tagThinking, s->activeThinkingTag, nullptr);
+    } else {
+        gtk_text_buffer_insert_with_tags(s->buffer, &end, text.c_str(), -1,
+                                         s->tagAssistant, nullptr);
+    }
     scroll_to_end(s);
 }
 
 static void append_stream_footer(UiState* s) {
+    close_thinking_section(s);
     GtkTextIter end;
     gtk_text_buffer_get_end_iter(s->buffer, &end);
     gtk_text_buffer_insert(s->buffer, &end, "\n\n", -1);
