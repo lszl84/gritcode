@@ -53,9 +53,21 @@ FetchContent_MakeAvailable(json)
 find_package(OpenGL REQUIRED)
 
 if(LINUX)
-    # Linux: use system packages
+    # Build GLFW from source with Wayland + X11 support.
+    # System libglfw3 on Ubuntu/Zorin is X11-only, forcing XWayland on GNOME
+    # and causing the rounded-corner overflow bug.
+    set(GLFW_BUILD_DOCS OFF CACHE BOOL "" FORCE)
+    set(GLFW_BUILD_TESTS OFF CACHE BOOL "" FORCE)
+    set(GLFW_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
+    set(GLFW_INSTALL OFF CACHE BOOL "" FORCE)
+    FetchContent_Declare(glfw
+        GIT_REPOSITORY https://github.com/glfw/glfw.git
+        GIT_TAG 3.4
+        GIT_SHALLOW ON
+    )
+    FetchContent_MakeAvailable(glfw)
+
     find_package(PkgConfig REQUIRED)
-    pkg_check_modules(GLFW REQUIRED IMPORTED_TARGET glfw3)
     pkg_check_modules(FREETYPE REQUIRED IMPORTED_TARGET freetype2)
     pkg_check_modules(HARFBUZZ REQUIRED IMPORTED_TARGET harfbuzz)
     pkg_check_modules(FONTCONFIG REQUIRED IMPORTED_TARGET fontconfig)
@@ -188,7 +200,7 @@ target_link_libraries(grit PRIVATE
 
 if(LINUX)
     target_link_libraries(grit PRIVATE
-        PkgConfig::GLFW
+        glfw
         PkgConfig::FREETYPE
         PkgConfig::HARFBUZZ
         PkgConfig::FONTCONFIG
