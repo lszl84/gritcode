@@ -67,6 +67,12 @@ struct UiState {
     bool mutatingWorkspace = false;
     bool streaming = false;
     bool alive = true;
+
+    // Scroll anchoring — see scroll_to_end and on_vadj_* handlers.
+    GtkWidget* scrolledWindow = nullptr;
+    GtkAdjustment* vadj = nullptr;
+    bool stickToBottom = true;      // Auto-follow new content until user scrolls up.
+    bool internalScroll = false;    // Guard: ignore value-changed from our own snap.
 };
 
 static std::string current_cwd() {
@@ -102,13 +108,57 @@ static int list_index_of(GtkStringList* list, const std::string& value) {
     return -1;
 }
 
+static bool adj_at_bottom(GtkAdjustment* a) {
+    if (!a) return true;
+    double upper = gtk_adjustment_get_upper(a);
+    double page  = gtk_adjustment_get_page_size(a);
+    double val   = gtk_adjustment_get_value(a);
+    return (upper - page - val) < 2.0;
+}
+
+static void snap_to_bottom(UiState* s) {
+    if (!s || !s->vadj) return;
+    double upper = gtk_adjustment_get_upper(s->vadj);
+    double page  = gtk_adjustment_get_page_size(s->vadj);
+    s->internalScroll = true;
+    gtk_adjustment_set_value(s->vadj, upper - page);
+    s->internalScroll = false;
+}
+
+// Park the insert cursor at the start of the buffer so GtkTextView does not
+// auto-scroll to follow the cursor on allocation/reflow.
+static void park_cursor(UiState* s) {
+    if (!s || !s->buffer) return;
+    GtkTextIter start;
+    gtk_text_buffer_get_start_iter(s->buffer, &start);
+    gtk_text_buffer_place_cursor(s->buffer, &start);
+}
+
 static void scroll_to_end(UiState* s) {
-    if (!s || !s->buffer || !s->textView) return;
-    GtkTextIter end;
-    gtk_text_buffer_get_end_iter(s->buffer, &end);
-    GtkTextMark* mark = gtk_text_buffer_create_mark(s->buffer, nullptr, &end, FALSE);
-    gtk_text_view_scroll_to_mark(GTK_TEXT_VIEW(s->textView), mark, 0.0, TRUE, 0.0, 1.0);
-    gtk_text_buffer_delete_mark(s->buffer, mark);
+    if (!s) return;
+    park_cursor(s);
+    if (!s->stickToBottom) return;
+    snap_to_bottom(s);
+}
+
+// Emitted when the USER scrolls (or we scroll ourselves — guarded).
+// Update stickToBottom to match whether the viewport currently rests at bottom.
+static void on_vadj_value_changed(GtkAdjustment* adj, gpointer data) {
+    auto* s = static_cast<UiState*>(data);
+    if (s->internalScroll) return;
+    s->stickToBottom = adj_at_bottom(adj);
+}
+
+// Emitted when the adjustment's bounds change (content growth OR resize).
+// Re-pin to bottom only if the user was already there.
+static void on_vadj_changed(GtkAdjustment* adj, gpointer data) {
+    auto* s = static_cast<UiState*>(data);
+    if (!s->stickToBottom) return;
+    double upper = gtk_adjustment_get_upper(adj);
+    double page  = gtk_adjustment_get_page_size(adj);
+    s->internalScroll = true;
+    gtk_adjustment_set_value(adj, upper - page);
+    s->internalScroll = false;
 }
 
 static void append_block(UiState* s, const char* role, const char* text, GtkTextTag* bodyTag) {
@@ -969,6 +1019,12 @@ static void activate(GtkApplication* app, gpointer) {
     setup_tags(state);
 
     gtk_scrolled_window_set_child(GTK_SCROLLED_WINDOW(sw), tv);
+
+    state->scrolledWindow = sw;
+    state->vadj = gtk_scrolled_window_get_vadjustment(GTK_SCROLLED_WINDOW(sw));
+    g_signal_connect(state->vadj, "value-changed", G_CALLBACK(on_vadj_value_changed), state);
+    g_signal_connect(state->vadj, "changed", G_CALLBACK(on_vadj_changed), state);
+
     auto* controls = build_controls(state);
 
     state->status = gtk_label_new("");
