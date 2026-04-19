@@ -31,15 +31,16 @@ message(STATUS "Version: ${VERSION_STRING}")
 
 include(FetchContent)
 
-# --- cmark ---
-FetchContent_Declare(cmark
-    GIT_REPOSITORY https://github.com/commonmark/cmark.git
-    GIT_TAG 0.31.2
+# --- cmark-gfm (drop-in superset: adds tables, strikethrough, task lists) ---
+FetchContent_Declare(cmark-gfm
+    GIT_REPOSITORY https://github.com/github/cmark-gfm.git
+    GIT_TAG 0.29.0.gfm.13
     GIT_SHALLOW ON
 )
-set(CMARK_TESTS OFF CACHE BOOL "" FORCE)
-set(CMARK_SHARED OFF CACHE BOOL "" FORCE)
-FetchContent_MakeAvailable(cmark)
+set(CMARK_GFM_TESTS OFF CACHE BOOL "" FORCE)
+set(CMARK_GFM_STATIC ON CACHE BOOL "" FORCE)
+set(CMARK_GFM_SHARED OFF CACHE BOOL "" FORCE)
+FetchContent_MakeAvailable(cmark-gfm)
 
 # --- nlohmann/json ---
 FetchContent_Declare(json
@@ -173,15 +174,18 @@ if(LINUX)
 
     add_executable(grit-gtk4 ${GRIT_GTK4_SOURCES})
     target_include_directories(grit-gtk4 PRIVATE
-        ${cmark_BINARY_DIR}/src
-        ${cmark_SOURCE_DIR}/src
+        ${cmark-gfm_BINARY_DIR}/src
+        ${cmark-gfm_SOURCE_DIR}/src
+        ${cmark-gfm_SOURCE_DIR}/extensions
+        ${cmark-gfm_BINARY_DIR}/extensions
     )
     target_link_libraries(grit-gtk4 PRIVATE
         PkgConfig::GTK4
         PkgConfig::LIBCURL
         PkgConfig::LIBSECRET
         nlohmann_json::nlohmann_json
-        cmark
+        libcmark-gfm-extensions_static
+        libcmark-gfm_static
     )
     target_compile_definitions(grit-gtk4 PRIVATE GRIT_LINUX)
     if(NOT CMAKE_BUILD_TYPE STREQUAL "Release")
@@ -230,8 +234,8 @@ else()
 endif()
 
 target_include_directories(grit PRIVATE
-    ${cmark_BINARY_DIR}/src
-    ${cmark_SOURCE_DIR}/src
+    ${cmark-gfm_BINARY_DIR}/src
+    ${cmark-gfm_SOURCE_DIR}/src
     src
 )
 
@@ -249,7 +253,7 @@ target_link_libraries(grit PRIVATE
     OpenGL::GL
     SDL3::SDL3-static
     nlohmann_json::nlohmann_json
-    cmark
+    libcmark-gfm_static
 )
 
 if(LINUX)

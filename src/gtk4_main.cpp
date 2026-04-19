@@ -18,7 +18,9 @@
 #include "keychain.h"
 #include "tool_exec.h"
 #include <nlohmann/json.hpp>
-#include <cmark.h>
+#include <cmark-gfm.h>
+#include <cmark-gfm-core-extensions.h>
+#include <cmark-gfm-extension_api.h>
 #include <thread>
 
 #ifdef GRIT_ENABLE_MCP
@@ -87,6 +89,7 @@ struct UiState {
     GtkTextTag* tagH2 = nullptr;
     GtkTextTag* tagH3 = nullptr;
     GtkTextTag* tagH4 = nullptr;
+    GtkTextTag* tagStrike = nullptr;
 
     SessionManager session;
     net::CurlHttpClient http;
@@ -106,6 +109,11 @@ struct UiState {
     // the next `thinking=true` chunk should append to the already-opened
     // block instead of starting a new one.
     GtkTextTag* activeThinkingTag = nullptr;  // per-section invisible tag
+
+    // Marks the buffer offset where the current assistant stream's prose
+    // (non-thinking) starts. On stream completion the range from this
+    // mark to end is deleted and replaced with cmark-rendered markdown.
+    GtkTextMark* streamProseStart = nullptr;
 
     // Scroll anchoring — see scroll_to_end and on_vadj_* handlers.
     GtkWidget* scrolledWindow = nullptr;
@@ -251,11 +259,7 @@ static void open_thinking_section(UiState* s) {
     // can be toggled on its own. Anonymous tag (no name) to avoid
     // collisions across blocks.
     auto* tag = gtk_text_tag_new(nullptr);
-    g_object_set(tag, "invisible", TRUE,
-                      "foreground", "#7EC7FF",
-                      "style", PANGO_STYLE_ITALIC,
-                      "family", "monospace",
-                      nullptr);
+    g_object_set(tag, "invisible", TRUE, nullptr);
     gtk_text_tag_table_add(gtk_text_buffer_get_tag_table(s->buffer), tag);
     g_object_unref(tag);  // table holds the only strong ref we need
 
@@ -281,15 +285,67 @@ static void append_stream_chunk(UiState* s, const std::string& text, bool thinki
     GtkTextIter end;
     gtk_text_buffer_get_end_iter(s->buffer, &end);
     if (thinking) {
-        // Tag text with both the base tagThinking (for style when visible)
-        // and the per-section invisible tag (for toggleable visibility).
         gtk_text_buffer_insert_with_tags(s->buffer, &end, text.c_str(), -1,
                                          s->tagThinking, s->activeThinkingTag, nullptr);
     } else {
+        if (!s->streamProseStart) {
+            s->streamProseStart = gtk_text_buffer_create_mark(s->buffer, nullptr, &end, TRUE);
+        }
         gtk_text_buffer_insert_with_tags(s->buffer, &end, text.c_str(), -1,
                                          s->tagAssistant, nullptr);
     }
     scroll_to_end(s);
+}
+
+static void render_markdown(UiState* s, GtkTextIter* end, const std::string& text);
+
+// Fresh anonymous GtkTextTag per table carrying a PangoTabArray.
+// Tables are rendered as text so selection and scrolling stay uniform
+// with the rest of the transcript; tab stops give real pixel alignment.
+static GtkTextTag* gtk_buffer_get_or_create_anon_tag(GtkTextBuffer* buf,
+                                                     PangoTabArray* tabs,
+                                                     bool header) {
+    auto* tag = gtk_text_tag_new(nullptr);
+    g_object_set(tag,
+                 "tabs", tabs,
+                 "tabs-set", TRUE,
+                 "wrap-mode", GTK_WRAP_NONE,
+                 "wrap-mode-set", TRUE,
+                 "pixels-above-lines", 2,
+                 "pixels-below-lines", 2,
+                 nullptr);
+    if (header) {
+        g_object_set(tag,
+                     "weight", PANGO_WEIGHT_BOLD,
+                     "foreground", "#ECEFF4",
+                     nullptr);
+    } else {
+        g_object_set(tag, "foreground", "#D8DEE9", nullptr);
+    }
+    gtk_text_tag_table_add(gtk_text_buffer_get_tag_table(buf), tag);
+    g_object_unref(tag);
+    return tag;
+}
+
+
+// Replace the raw streamed prose with a cmark-rendered version so
+// bold/headings/code blocks/lists/etc. show up properly. Called when
+// the stream completes with the full assistant content.
+static void finalize_stream_markdown(UiState* s, const std::string& content) {
+    close_thinking_section(s);
+    if (!s->streamProseStart || content.empty()) {
+        s->streamProseStart = nullptr;
+        return;
+    }
+    GtkTextIter start, end;
+    gtk_text_buffer_get_iter_at_mark(s->buffer, &start, s->streamProseStart);
+    gtk_text_buffer_get_end_iter(s->buffer, &end);
+    gtk_text_buffer_delete(s->buffer, &start, &end);
+    gtk_text_buffer_delete_mark(s->buffer, s->streamProseStart);
+    s->streamProseStart = nullptr;
+
+    gtk_text_buffer_get_end_iter(s->buffer, &end);
+    render_markdown(s, &end, content);
 }
 
 static void append_stream_footer(UiState* s) {
@@ -309,7 +365,21 @@ static void clear_transcript(UiState* s) {
 // inline tags so TEXT/CODE/SOFTBREAK leaves pick up the right styling
 // from surrounding STRONG/EMPH/LINK/HEADING/BLOCK_QUOTE nodes.
 static void render_markdown(UiState* s, GtkTextIter* end, const std::string& text) {
-    cmark_node* doc = cmark_parse_document(text.c_str(), text.size(), CMARK_OPT_DEFAULT);
+    static bool extensionsRegistered = false;
+    if (!extensionsRegistered) {
+        cmark_gfm_core_extensions_ensure_registered();
+        extensionsRegistered = true;
+    }
+
+    cmark_parser* parser = cmark_parser_new(CMARK_OPT_DEFAULT);
+    for (const char* name : {"table", "strikethrough", "tasklist", "autolink"}) {
+        if (auto* ext = cmark_find_syntax_extension(name)) {
+            cmark_parser_attach_syntax_extension(parser, ext);
+        }
+    }
+    cmark_parser_feed(parser, text.c_str(), text.size());
+    cmark_node* doc = cmark_parser_finish(parser);
+    cmark_parser_free(parser);
     if (!doc) {
         gtk_text_buffer_insert_with_tags(s->buffer, end, text.c_str(), -1, s->tagAssistant, nullptr);
         return;
@@ -317,10 +387,24 @@ static void render_markdown(UiState* s, GtkTextIter* end, const std::string& tex
 
     struct ListFrame { bool ordered; int nextIndex; };
     std::vector<ListFrame> lists;
-    std::vector<GtkTextTag*> inlineStack;    // STRONG/EMPH/LINK
-    GtkTextTag* const blockTag = s->tagAssistant;  // base tag for paragraph-level text
+    std::vector<GtkTextTag*> inlineStack;    // STRONG/EMPH/LINK/STRIKE
+    GtkTextTag* const blockTag = s->tagAssistant;
     int quoteDepth = 0;
     int headingLevel = 0;
+
+    // Table collection. cmark-gfm hands us TABLE > TABLE_ROW > TABLE_CELL
+    // > (inline nodes). We buffer cell text while walking, then emit a
+    // real GtkGrid at a child anchor when the TABLE closes — matching
+    // main's LayoutTable output shape, just with GTK doing the layout.
+    struct TableCtx {
+        std::vector<std::vector<std::string>> rows;
+        std::vector<bool> rowIsHeader;
+        std::vector<char> alignments;   // 'l' / 'c' / 'r' / 0
+        std::vector<std::string>* curRow = nullptr;
+        std::string* curCell = nullptr;
+    };
+    TableCtx tableCtx;
+    bool inTable = false;
 
     auto active_tag = [&]() -> GtkTextTag* {
         if (!inlineStack.empty()) return inlineStack.back();
@@ -334,7 +418,68 @@ static void render_markdown(UiState* s, GtkTextIter* end, const std::string& tex
 
     auto insert = [&](const char* txt, int len = -1) {
         if (!txt || !*txt) return;
+        if (inTable && tableCtx.curCell) {
+            if (len < 0) tableCtx.curCell->append(txt);
+            else         tableCtx.curCell->append(txt, len);
+            return;
+        }
         gtk_text_buffer_insert_with_tags(s->buffer, end, txt, len, active_tag(), nullptr);
+    };
+
+    auto render_table = [&]() {
+        if (tableCtx.rows.empty()) return;
+
+        size_t ncols = 0;
+        for (auto& r : tableCtx.rows) ncols = std::max(ncols, r.size());
+
+        // Measure each column's pixel width using the text view's actual
+        // Pango context, so the tab stops line up with real rendered text.
+        PangoContext* pctx = gtk_widget_get_pango_context(s->textView);
+        auto measure = [&](const std::string& cell) -> int {
+            if (cell.empty()) return 0;
+            PangoLayout* lay = pango_layout_new(pctx);
+            pango_layout_set_text(lay, cell.c_str(), -1);
+            int w = 0, h = 0;
+            pango_layout_get_pixel_size(lay, &w, &h);
+            g_object_unref(lay);
+            return w;
+        };
+
+        std::vector<int> colW(ncols, 0);
+        for (auto& r : tableCtx.rows)
+            for (size_t c = 0; c < r.size(); ++c)
+                colW[c] = std::max(colW[c], measure(r[c]));
+
+        const int pad = 16;
+        auto* tabs = pango_tab_array_new((gint)ncols, TRUE);
+        int cursor = 0;
+        for (size_t c = 0; c < ncols; ++c) {
+            cursor += colW[c] + pad;
+            pango_tab_array_set_tab(tabs, (gint)c, PANGO_TAB_LEFT, cursor);
+        }
+
+        // Per-table tag: tab stops from measurements, no line wrap so
+        // columns stay aligned, subtle left indent to set the table apart.
+        auto* table = gtk_buffer_get_or_create_anon_tag(s->buffer, tabs, /*header=*/false);
+        auto* header = gtk_buffer_get_or_create_anon_tag(s->buffer, tabs, /*header=*/true);
+        pango_tab_array_free(tabs);
+
+        for (size_t r = 0; r < tableCtx.rows.size(); ++r) {
+            bool isHeader = (r < tableCtx.rowIsHeader.size()) ? tableCtx.rowIsHeader[r] : (r == 0);
+            std::string line;
+            for (size_t c = 0; c < tableCtx.rows[r].size(); ++c) {
+                if (c > 0) line += '\t';
+                line += tableCtx.rows[r][c];
+            }
+            line += '\n';
+            gtk_text_buffer_insert_with_tags(s->buffer, end, line.c_str(), -1,
+                                             isHeader ? header : table, nullptr);
+        }
+        gtk_text_buffer_insert(s->buffer, end, "\n", 1);
+
+        tableCtx.rows.clear();
+        tableCtx.rowIsHeader.clear();
+        tableCtx.alignments.clear();
     };
 
     cmark_iter* iter = cmark_iter_new(doc);
@@ -458,8 +603,49 @@ static void render_markdown(UiState* s, GtkTextIter* end, const std::string& tex
             // Skip raw HTML — too noisy in a text transcript.
             break;
 
-        default:
+        default: {
+            // GFM extension nodes aren't in the core enum — dispatch on
+            // the type string cmark-gfm provides.
+            const char* ts = cmark_node_get_type_string(node);
+            if (!ts) break;
+            if (std::strcmp(ts, "table") == 0) {
+                if (enter) {
+                    inTable = true;
+                    tableCtx.rows.clear();
+                    tableCtx.rowIsHeader.clear();
+                    tableCtx.alignments.clear();
+                    uint16_t ncols = cmark_gfm_extensions_get_table_columns(node);
+                    uint8_t* al = cmark_gfm_extensions_get_table_alignments(node);
+                    if (al) {
+                        tableCtx.alignments.assign(ncols, 0);
+                        for (uint16_t i = 0; i < ncols; ++i) tableCtx.alignments[i] = (char)al[i];
+                    }
+                } else {
+                    inTable = false;
+                    render_table();
+                }
+            } else if (std::strcmp(ts, "table_row") == 0) {
+                if (enter) {
+                    tableCtx.rows.emplace_back();
+                    tableCtx.rowIsHeader.push_back(
+                        cmark_gfm_extensions_get_table_row_is_header(node) != 0);
+                    tableCtx.curRow = &tableCtx.rows.back();
+                } else {
+                    tableCtx.curRow = nullptr;
+                }
+            } else if (std::strcmp(ts, "table_cell") == 0) {
+                if (enter && tableCtx.curRow) {
+                    tableCtx.curRow->emplace_back();
+                    tableCtx.curCell = &tableCtx.curRow->back();
+                } else {
+                    tableCtx.curCell = nullptr;
+                }
+            } else if (std::strcmp(ts, "strikethrough") == 0) {
+                if (enter) inlineStack.push_back(s->tagStrike);
+                else if (!inlineStack.empty()) inlineStack.pop_back();
+            }
             break;
+        }
         }
     }
 
@@ -1174,6 +1360,7 @@ static void do_send_to_provider(UiState* s) {
             post_main([s, gen, ok, content, error, toolCalls]() mutable {
                 if (!s->alive) return;
                 if (s->requestGen.load() != gen) return;
+                if (ok) finalize_stream_markdown(s, content);
                 append_stream_footer(s);
 
                 if (!ok) {
@@ -1256,8 +1443,8 @@ static void on_new_workspace_clicked(GtkButton*, gpointer user_data) {
 // while the input has focus (otherwise Enter means "activate focused
 // control" on buttons/rows).
 static gboolean on_input_key(GtkEventControllerKey*, guint keyval, guint, GdkModifierType state, gpointer data) {
-    if ((state & GDK_CONTROL_MASK) &&
-        (keyval == GDK_KEY_Return || keyval == GDK_KEY_KP_Enter)) {
+    if (keyval == GDK_KEY_Return || keyval == GDK_KEY_KP_Enter) {
+        if (state & GDK_SHIFT_MASK) return FALSE;  // newline
         on_send_clicked(nullptr, data);
         return TRUE;
     }
@@ -1313,7 +1500,7 @@ static GtkWidget* build_controls(UiState* s) {
     auto* inputOverlay = gtk_overlay_new();
     gtk_overlay_set_child(GTK_OVERLAY(inputOverlay), s->input);
 
-    s->inputPlaceholder = gtk_label_new("Message... (Enter = newline, Ctrl+Enter = send)");
+    s->inputPlaceholder = gtk_label_new("Message... (Enter = send, Shift+Enter = newline)");
     gtk_widget_add_css_class(s->inputPlaceholder, "dim-label");
     gtk_widget_set_halign(s->inputPlaceholder, GTK_ALIGN_START);
     gtk_widget_set_valign(s->inputPlaceholder, GTK_ALIGN_START);
@@ -1374,33 +1561,28 @@ static void setup_tags(UiState* s) {
     s->tagUser = gtk_text_buffer_create_tag(
         s->buffer, "user",
         "foreground", "#D6E4FF",
-        "family", "monospace",
         nullptr);
 
     s->tagAssistant = gtk_text_buffer_create_tag(
         s->buffer, "assistant",
         "foreground", "#E7E7E7",
-        "family", "monospace",
         nullptr);
 
     s->tagMeta = gtk_text_buffer_create_tag(
         s->buffer, "meta",
         "foreground", "#9AA0A6",
         "weight", 700,
-        "family", "sans",
         nullptr);
 
     s->tagError = gtk_text_buffer_create_tag(
         s->buffer, "error",
         "foreground", "#FFB3B3",
-        "family", "monospace",
         nullptr);
 
     s->tagThinking = gtk_text_buffer_create_tag(
         s->buffer, "thinking",
         "foreground", "#7EC7FF",
         "style", PANGO_STYLE_ITALIC,
-        "family", "monospace",
         nullptr);
 
     s->tagCode = gtk_text_buffer_create_tag(
@@ -1489,6 +1671,11 @@ static void setup_tags(UiState* s) {
         "foreground", "#ECEFF4",
         "weight", 700,
         "scale", 1.05,
+        nullptr);
+
+    s->tagStrike = gtk_text_buffer_create_tag(
+        s->buffer, "strike",
+        "strikethrough", TRUE,
         nullptr);
 }
 
@@ -1755,7 +1942,6 @@ static void activate(GtkApplication* app, gpointer user_data) {
     gtk_text_view_set_bottom_margin(GTK_TEXT_VIEW(tv), 12);
     gtk_text_view_set_editable(GTK_TEXT_VIEW(tv), FALSE);
     gtk_text_view_set_cursor_visible(GTK_TEXT_VIEW(tv), FALSE);
-    gtk_text_view_set_monospace(GTK_TEXT_VIEW(tv), TRUE);
 
     auto* buf = gtk_text_view_get_buffer(GTK_TEXT_VIEW(tv));
 
