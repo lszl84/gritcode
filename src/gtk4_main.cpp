@@ -3,6 +3,7 @@
 
 #include <gtk/gtk.h>
 #include <algorithm>
+#include <cstring>
 #include <filesystem>
 #include <functional>
 #include <string>
@@ -33,6 +34,7 @@ static void post_main(std::function<void()> fn) {
 }
 
 struct UiState {
+    GtkWidget* window = nullptr;
     GtkTextBuffer* buffer = nullptr;
     GtkWidget* textView = nullptr;
     GtkWidget* input = nullptr;
@@ -331,6 +333,20 @@ static void reload_workspaces(UiState* s) {
     s->mutatingWorkspace = false;
 }
 
+static std::string short_cwd(const std::string& cwd) {
+    const char* home = getenv("HOME");
+    if (home && cwd.rfind(home, 0) == 0) {
+        return "~" + cwd.substr(strlen(home));
+    }
+    return cwd;
+}
+
+static void update_window_title(UiState* s) {
+    if (!s->window) return;
+    std::string title = "Grit — " + short_cwd(current_cwd());
+    gtk_window_set_title(GTK_WINDOW(s->window), title.c_str());
+}
+
 static void load_session_for_cwd(UiState* s, const std::string& cwd) {
     s->session.SetCwd(cwd);
     s->session.LoadForCwd(cwd);
@@ -346,6 +362,7 @@ static void load_session_for_cwd(UiState* s, const std::string& cwd) {
     st += std::to_string(s->session.History().size());
     set_status(s, st);
     set_details(s, "Provider: " + s->session.Provider() + "\nModel: " + s->session.Model());
+    update_window_title(s);
 }
 
 static void configure_http(UiState* s) {
@@ -982,14 +999,66 @@ static void apply_compact_titlebar_css() {
     g_object_unref(provider);
 }
 
-static void activate(GtkApplication* app, gpointer) {
+// Window-level shortcut callbacks. These fire regardless of focus — the
+// per-input handler in on_input_key handles the same shortcuts when the
+// entry has focus and swallows the event first.
+static gboolean shortcut_clear(GtkWidget*, GVariant*, gpointer data) {
+    clear_transcript(static_cast<UiState*>(data));
+    return TRUE;
+}
+
+static gboolean shortcut_open_chooser(GtkWidget*, GVariant*, gpointer data) {
+    open_workspace_chooser(static_cast<UiState*>(data));
+    return TRUE;
+}
+
+static gboolean shortcut_new_session(GtkWidget*, GVariant*, gpointer data) {
+    on_new_workspace_clicked(nullptr, data);
+    return TRUE;
+}
+
+static gboolean shortcut_focus_input(GtkWidget*, GVariant*, gpointer data) {
+    auto* s = static_cast<UiState*>(data);
+    if (s->input) gtk_widget_grab_focus(s->input);
+    return TRUE;
+}
+
+static gboolean shortcut_cancel(GtkWidget*, GVariant*, gpointer data) {
+    auto* s = static_cast<UiState*>(data);
+    if (s->streaming) {
+        on_cancel_clicked(nullptr, data);
+        return TRUE;
+    }
+    return FALSE;
+}
+
+static void install_window_shortcuts(UiState* s) {
+    auto* controller = gtk_shortcut_controller_new();
+    gtk_shortcut_controller_set_scope(GTK_SHORTCUT_CONTROLLER(controller),
+                                      GTK_SHORTCUT_SCOPE_GLOBAL);
+
+    auto add = [&](const char* trigger, GtkShortcutFunc fn) {
+        auto* sc = gtk_shortcut_new(
+            gtk_shortcut_trigger_parse_string(trigger),
+            gtk_callback_action_new(fn, s, nullptr));
+        gtk_shortcut_controller_add_shortcut(GTK_SHORTCUT_CONTROLLER(controller), sc);
+    };
+
+    add("<Control>k", shortcut_clear);
+    add("<Control>o", shortcut_open_chooser);
+    add("<Control>n", shortcut_new_session);
+    add("<Control>l", shortcut_focus_input);
+    add("Escape",     shortcut_cancel);
+
+    gtk_widget_add_controller(s->window, controller);
+}
+
+static void activate(GtkApplication* app, gpointer user_data) {
     auto* win = gtk_application_window_new(app);
     gtk_window_set_default_size(GTK_WINDOW(win), 1100, 760);
-    gtk_window_set_title(GTK_WINDOW(win), "Gritcode (GTK4 WIP)");
 
     auto* hb = gtk_header_bar_new();
     gtk_header_bar_set_show_title_buttons(GTK_HEADER_BAR(hb), TRUE);
-    gtk_header_bar_set_title_widget(GTK_HEADER_BAR(hb), gtk_label_new("Gritcode (GTK4 WIP)"));
     gtk_window_set_titlebar(GTK_WINDOW(win), hb);
     apply_compact_titlebar_css();
 
@@ -1013,6 +1082,7 @@ static void activate(GtkApplication* app, gpointer) {
     auto* buf = gtk_text_view_get_buffer(GTK_TEXT_VIEW(tv));
 
     auto* state = new UiState();
+    state->window = win;
     state->buffer = buf;
     state->textView = tv;
 
@@ -1063,14 +1133,39 @@ static void activate(GtkApplication* app, gpointer) {
     configure_http(state);
     fetch_models(state);
 
+    install_window_shortcuts(state);
+
     g_object_set_data_full(G_OBJECT(win), "ui-state", state, ui_state_destroy);
     gtk_window_present(GTK_WINDOW(win));
+
+    bool* openChooser = static_cast<bool*>(user_data);
+    if (openChooser && *openChooser) {
+        g_idle_add_once(
+            +[](gpointer d) { open_workspace_chooser(static_cast<UiState*>(d)); },
+            state);
+    }
 }
 
 int main(int argc, char** argv) {
+    // Strip --session-chooser before handing argv to GApplication, which
+    // would otherwise reject the unknown option.
+    bool openChooser = false;
+    int outN = 0;
+    std::vector<char*> outArgv;
+    outArgv.reserve((size_t)argc + 1);
+    for (int i = 0; i < argc; ++i) {
+        if (std::strcmp(argv[i], "--session-chooser") == 0) {
+            openChooser = true;
+            continue;
+        }
+        outArgv.push_back(argv[i]);
+        ++outN;
+    }
+    outArgv.push_back(nullptr);
+
     auto* app = gtk_application_new("ai.gritcode.gtk4wip", G_APPLICATION_DEFAULT_FLAGS);
-    g_signal_connect(app, "activate", G_CALLBACK(activate), nullptr);
-    int rc = g_application_run(G_APPLICATION(app), argc, argv);
+    g_signal_connect(app, "activate", G_CALLBACK(activate), &openChooser);
+    int rc = g_application_run(G_APPLICATION(app), outN, outArgv.data());
     g_object_unref(app);
     return rc;
 }
