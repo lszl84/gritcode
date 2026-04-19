@@ -48,6 +48,9 @@ struct UiState {
     GtkWidget* cancelBtn = nullptr;
     GtkWidget* statusExpander = nullptr;
     GtkWidget* details = nullptr;
+    GtkWidget* spinner = nullptr;
+    GtkWidget* statusRow = nullptr;
+    GtkWidget* inputPlaceholder = nullptr;
 
     GtkStringList* providerList = nullptr;
     GtkStringList* modelList = nullptr;
@@ -85,6 +88,13 @@ static std::string current_cwd() {
 
 static void set_status(UiState* s, const std::string& t) {
     gtk_label_set_text(GTK_LABEL(s->status), t.c_str());
+}
+
+static void set_busy(UiState* s, bool busy) {
+    if (!s->spinner) return;
+    gtk_widget_set_visible(s->spinner, busy);
+    if (busy) gtk_spinner_start(GTK_SPINNER(s->spinner));
+    else      gtk_spinner_stop(GTK_SPINNER(s->spinner));
 }
 
 static void set_details(UiState* s, const std::string& t) {
@@ -400,9 +410,11 @@ static void replace_models(UiState* s, const std::vector<net::ModelInfo>& models
 
 static void fetch_models(UiState* s) {
     set_status(s, "Loading models...");
+    set_busy(s, true);
     s->http.FetchModels([s](std::vector<net::ModelInfo> models, int status) {
         post_main([s, models = std::move(models), status]() mutable {
             if (!s->alive) return;
+            if (!s->streaming) set_busy(s, false);
             replace_models(s, models);
             if (status == 200) set_status(s, "Models loaded");
             else if (status == 401) set_status(s, "Invalid API key (401)");
@@ -707,6 +719,7 @@ static void set_streaming(UiState* s, bool streaming) {
     s->streaming = streaming;
     gtk_widget_set_visible(s->cancelBtn, streaming);
     set_controls_enabled(s, !streaming);
+    set_busy(s, streaming);
 }
 
 static void on_cancel_clicked(GtkButton*, gpointer user_data) {
@@ -716,12 +729,30 @@ static void on_cancel_clicked(GtkButton*, gpointer user_data) {
     set_status(s, "Cancelling...");
 }
 
+static std::string input_get_text(UiState* s) {
+    auto* buf = gtk_text_view_get_buffer(GTK_TEXT_VIEW(s->input));
+    GtkTextIter a, e;
+    gtk_text_buffer_get_bounds(buf, &a, &e);
+    char* raw = gtk_text_buffer_get_text(buf, &a, &e, FALSE);
+    std::string out = raw ? raw : "";
+    g_free(raw);
+    return out;
+}
+
+static void input_clear(UiState* s) {
+    auto* buf = gtk_text_view_get_buffer(GTK_TEXT_VIEW(s->input));
+    gtk_text_buffer_set_text(buf, "", -1);
+}
+
 static void on_send_clicked(GtkButton*, gpointer user_data) {
     auto* s = static_cast<UiState*>(user_data);
     if (s->streaming) return;
 
-    const char* text = gtk_editable_get_text(GTK_EDITABLE(s->input));
-    if (!text || !*text) {
+    std::string text = input_get_text(s);
+    // Trim trailing whitespace for the empty-check so Enter+Ctrl+Enter
+    // with only newlines doesn't slip through.
+    size_t end = text.find_last_not_of(" \t\n\r");
+    if (end == std::string::npos) {
         append_block(s, "Error", "Cannot send empty message.", s->tagError);
         return;
     }
@@ -741,7 +772,7 @@ static void on_send_clicked(GtkButton*, gpointer user_data) {
     s->session.MarkDirty();
     s->session.Save();
 
-    gtk_editable_set_text(GTK_EDITABLE(s->input), "");
+    input_clear(s);
 
     configure_http(s);
     auto protocol = protocol_for_model(model);
@@ -799,10 +830,6 @@ static void on_send_clicked(GtkButton*, gpointer user_data) {
     );
 }
 
-static void on_input_activate(GtkEditable*, gpointer user_data) {
-    on_send_clicked(nullptr, user_data);
-}
-
 static void on_new_workspace_clicked(GtkButton*, gpointer user_data) {
     auto* s = static_cast<UiState*>(user_data);
     s->http.Abort();
@@ -813,18 +840,14 @@ static void on_new_workspace_clicked(GtkButton*, gpointer user_data) {
     reload_workspaces(s);
 }
 
+// Input-scoped shortcuts. Window-level shortcuts handle Ctrl+K/O/N/L and
+// Escape globally, but Ctrl+Enter lives here because it only makes sense
+// while the input has focus (otherwise Enter means "activate focused
+// control" on buttons/rows).
 static gboolean on_input_key(GtkEventControllerKey*, guint keyval, guint, GdkModifierType state, gpointer data) {
-    auto* s = static_cast<UiState*>(data);
-    if ((state & GDK_CONTROL_MASK) && keyval == GDK_KEY_Return) {
+    if ((state & GDK_CONTROL_MASK) &&
+        (keyval == GDK_KEY_Return || keyval == GDK_KEY_KP_Enter)) {
         on_send_clicked(nullptr, data);
-        return TRUE;
-    }
-    if ((state & GDK_CONTROL_MASK) && keyval == GDK_KEY_k) {
-        clear_transcript(s);
-        return TRUE;
-    }
-    if ((state & GDK_CONTROL_MASK) && keyval == GDK_KEY_o) {
-        open_workspace_chooser(s);
         return TRUE;
     }
     return FALSE;
@@ -857,9 +880,48 @@ static GtkWidget* build_controls(UiState* s) {
     s->provider = build_dropdown(providers, &s->providerList);
     s->model = build_dropdown(models, &s->modelList);
 
-    s->input = gtk_entry_new();
-    gtk_widget_set_hexpand(s->input, TRUE);
-    gtk_entry_set_placeholder_text(GTK_ENTRY(s->input), "Message...");
+    // Multi-line input: TextView in a scrolled window that grows up to
+    // maxContentHeight then scrolls. Enter inserts a newline; Ctrl+Enter
+    // sends. Placeholder is a dim overlay label that hides once the
+    // buffer has any text.
+    auto* inputScroll = gtk_scrolled_window_new();
+    gtk_scrolled_window_set_policy(GTK_SCROLLED_WINDOW(inputScroll),
+                                   GTK_POLICY_NEVER, GTK_POLICY_AUTOMATIC);
+    gtk_scrolled_window_set_min_content_height(GTK_SCROLLED_WINDOW(inputScroll), 34);
+    gtk_scrolled_window_set_max_content_height(GTK_SCROLLED_WINDOW(inputScroll), 200);
+    gtk_scrolled_window_set_propagate_natural_height(GTK_SCROLLED_WINDOW(inputScroll), TRUE);
+    gtk_widget_set_hexpand(inputScroll, TRUE);
+
+    s->input = gtk_text_view_new();
+    gtk_text_view_set_wrap_mode(GTK_TEXT_VIEW(s->input), GTK_WRAP_WORD_CHAR);
+    gtk_text_view_set_top_margin(GTK_TEXT_VIEW(s->input), 6);
+    gtk_text_view_set_bottom_margin(GTK_TEXT_VIEW(s->input), 6);
+    gtk_text_view_set_left_margin(GTK_TEXT_VIEW(s->input), 6);
+    gtk_text_view_set_right_margin(GTK_TEXT_VIEW(s->input), 6);
+
+    auto* inputOverlay = gtk_overlay_new();
+    gtk_overlay_set_child(GTK_OVERLAY(inputOverlay), s->input);
+
+    s->inputPlaceholder = gtk_label_new("Message... (Enter = newline, Ctrl+Enter = send)");
+    gtk_widget_add_css_class(s->inputPlaceholder, "dim-label");
+    gtk_widget_set_halign(s->inputPlaceholder, GTK_ALIGN_START);
+    gtk_widget_set_valign(s->inputPlaceholder, GTK_ALIGN_START);
+    gtk_widget_set_margin_start(s->inputPlaceholder, 10);
+    gtk_widget_set_margin_top(s->inputPlaceholder, 8);
+    gtk_widget_set_can_target(s->inputPlaceholder, FALSE);
+    gtk_overlay_add_overlay(GTK_OVERLAY(inputOverlay), s->inputPlaceholder);
+
+    gtk_scrolled_window_set_child(GTK_SCROLLED_WINDOW(inputScroll), inputOverlay);
+
+    auto* inputBuf = gtk_text_view_get_buffer(GTK_TEXT_VIEW(s->input));
+    auto placeholder_cb = +[](GtkTextBuffer* b, gpointer ud) {
+        auto* st = static_cast<UiState*>(ud);
+        GtkTextIter a, e;
+        gtk_text_buffer_get_bounds(b, &a, &e);
+        bool empty = gtk_text_iter_equal(&a, &e);
+        if (st->inputPlaceholder) gtk_widget_set_visible(st->inputPlaceholder, empty);
+    };
+    g_signal_connect(inputBuf, "changed", G_CALLBACK(placeholder_cb), s);
 
     s->sendBtn = gtk_button_new_with_label("Send");
     s->cancelBtn = gtk_button_new_with_label("Cancel");
@@ -881,7 +943,6 @@ static GtkWidget* build_controls(UiState* s) {
     g_signal_connect(s->apiKeyBtn, "clicked", G_CALLBACK(+[](GtkButton*, gpointer user_data) {
         set_api_key(static_cast<UiState*>(user_data));
     }), s);
-    g_signal_connect(s->input, "activate", G_CALLBACK(on_input_activate), s);
     g_signal_connect(s->workspace, "notify::selected", G_CALLBACK(on_workspace_changed), s);
     g_signal_connect(s->provider, "notify::selected", G_CALLBACK(on_provider_or_model_changed), s);
     g_signal_connect(s->model, "notify::selected", G_CALLBACK(on_provider_or_model_changed), s);
@@ -893,7 +954,7 @@ static GtkWidget* build_controls(UiState* s) {
     gtk_box_append(GTK_BOX(row), s->model);
     gtk_box_append(GTK_BOX(row), s->apiKeyBtn);
     gtk_box_append(GTK_BOX(row), s->cancelBtn);
-    gtk_box_append(GTK_BOX(row), s->input);
+    gtk_box_append(GTK_BOX(row), inputScroll);
     gtk_box_append(GTK_BOX(row), s->sendBtn);
     return row;
 }
@@ -1097,11 +1158,20 @@ static void activate(GtkApplication* app, gpointer user_data) {
 
     auto* controls = build_controls(state);
 
+    state->statusRow = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 6);
+    gtk_widget_set_margin_start(state->statusRow, 10);
+    gtk_widget_set_margin_end(state->statusRow, 10);
+    gtk_widget_set_margin_bottom(state->statusRow, 4);
+
+    state->spinner = gtk_spinner_new();
+    gtk_widget_set_visible(state->spinner, FALSE);
+
     state->status = gtk_label_new("");
-    gtk_widget_set_margin_start(state->status, 10);
-    gtk_widget_set_margin_end(state->status, 10);
-    gtk_widget_set_margin_bottom(state->status, 4);
     gtk_label_set_xalign(GTK_LABEL(state->status), 0.0f);
+    gtk_widget_set_hexpand(state->status, TRUE);
+
+    gtk_box_append(GTK_BOX(state->statusRow), state->spinner);
+    gtk_box_append(GTK_BOX(state->statusRow), state->status);
 
     state->statusExpander = gtk_expander_new("Details");
     gtk_widget_set_margin_start(state->statusExpander, 10);
@@ -1115,7 +1185,7 @@ static void activate(GtkApplication* app, gpointer user_data) {
 
     gtk_box_append(GTK_BOX(root), sw);
     gtk_box_append(GTK_BOX(root), controls);
-    gtk_box_append(GTK_BOX(root), state->status);
+    gtk_box_append(GTK_BOX(root), state->statusRow);
     gtk_box_append(GTK_BOX(root), state->statusExpander);
 
     // Initial workspace/session load
