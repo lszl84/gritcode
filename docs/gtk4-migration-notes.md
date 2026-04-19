@@ -16,10 +16,11 @@ Current status:
 - Workspace chooser dialog is implemented (session list + open on activation).
 - New session action and key shortcuts (`Ctrl+Enter`, `Ctrl+O`, `Ctrl+K`) are wired.
 - Expandable status/details panel is implemented for request/debug visibility.
+- Markdown pass now includes headings, bullets, inline code, and fenced blocks.
+- Tool result messages now render as styled code blocks.
 
 Next major milestones:
 1. Port chooser mode details and interactions closer to GL behavior.
-2. Port richer markdown semantics (lists, inline code, headings) closer to current renderer.
-3. Port full tool-call execution/result block UX parity.
-4. Parity pass for keybindings, scrolling feel, and status/detail fields.
-5. Keep original `grit` executable intact until parity is validated.
+2. Port full tool-call execution/result UX parity (including action affordances).
+3. Parity pass for keybindings, scrolling feel, and status/detail fields.
+4. Keep original `grit` executable intact until parity is validated.
