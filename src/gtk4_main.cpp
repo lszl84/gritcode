@@ -902,6 +902,36 @@ static void ui_state_destroy(gpointer data) {
     delete s;
 }
 
+static void apply_compact_titlebar_css() {
+    static bool applied = false;
+    if (applied) return;
+    applied = true;
+
+    const char* css =
+        "headerbar {"
+        "  min-height: 30px;"
+        "  padding-top: 0px;"
+        "  padding-bottom: 0px;"
+        "}"
+        "headerbar button.titlebutton {"
+        "  min-height: 22px;"
+        "  min-width: 22px;"
+        "  padding: 0px;"
+        "  margin: 0px;"
+        "}";
+
+    auto* provider = gtk_css_provider_new();
+    gtk_css_provider_load_from_string(provider, css);
+    auto* display = gdk_display_get_default();
+    if (display) {
+        gtk_style_context_add_provider_for_display(
+            display,
+            GTK_STYLE_PROVIDER(provider),
+            GTK_STYLE_PROVIDER_PRIORITY_APPLICATION);
+    }
+    g_object_unref(provider);
+}
+
 static void activate(GtkApplication* app, gpointer) {
     auto* win = gtk_application_window_new(app);
     gtk_window_set_default_size(GTK_WINDOW(win), 1100, 760);
@@ -909,7 +939,9 @@ static void activate(GtkApplication* app, gpointer) {
 
     auto* hb = gtk_header_bar_new();
     gtk_header_bar_set_show_title_buttons(GTK_HEADER_BAR(hb), TRUE);
+    gtk_header_bar_set_title_widget(GTK_HEADER_BAR(hb), gtk_label_new("Gritcode (GTK4 WIP)"));
     gtk_window_set_titlebar(GTK_WINDOW(win), hb);
+    apply_compact_titlebar_css();
 
     auto* root = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);
     gtk_window_set_child(GTK_WINDOW(win), root);
