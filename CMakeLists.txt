@@ -258,3 +258,55 @@ if(LINUX)
     install(FILES grit.desktop DESTINATION share/applications)
     install(FILES grit.svg DESTINATION share/icons/hicolor/scalable/apps)
 endif()
+
+# --- Native Wayland/X11 backend (smooth resize, no GLFW) ---
+# Build alongside grit as a separate target.
+# Wayland + X11 backends adapted from opengl-smooth.
+if(LINUX)
+    find_program(WAYLAND_SCANNER wayland-scanner)
+    pkg_get_variable(WAYLAND_PROTOCOLS_DIR wayland-protocols pkgdatadir)
+
+    set(PROTO_GEN_DIR ${CMAKE_CURRENT_BINARY_DIR}/proto)
+    file(MAKE_DIRECTORY ${PROTO_GEN_DIR})
+
+    set(PROTOCOLS
+        unstable/xdg-decoration/xdg-decoration-unstable-v1.xml
+        stable/xdg-shell/xdg-shell.xml
+    )
+
+    foreach(PROTO ${PROTOCOLS})
+        get_filename_component(BASE ${PROTO} NAME_WE)
+        set(XML ${WAYLAND_PROTOCOLS_DIR}/${PROTO})
+        set(HEADER ${PROTO_GEN_DIR}/${BASE}-client-protocol.h)
+        set(SOURCE ${PROTO_GEN_DIR}/${BASE}-protocol.c)
+        add_custom_command(OUTPUT ${HEADER}
+            COMMAND ${WAYLAND_SCANNER} client-header ${XML} ${HEADER}
+            DEPENDS ${XML} VERBATIM)
+        add_custom_command(OUTPUT ${SOURCE}
+            COMMAND ${WAYLAND_SCANNER} private-code ${XML} ${SOURCE}
+            DEPENDS ${XML} VERBATIM)
+        list(APPEND PROTO_GENERATED ${HEADER} ${SOURCE})
+    endforeach()
+
+    find_package(PkgConfig REQUIRED)
+    pkg_check_modules(EGL REQUIRED IMPORTED_TARGET egl)
+    pkg_check_modules(WAYLAND_CLIENT REQUIRED IMPORTED_TARGET wayland-client)
+    pkg_check_modules(WAYLAND_EGL REQUIRED IMPORTED_TARGET wayland-egl)
+    pkg_check_modules(WAYLAND_CURSOR REQUIRED IMPORTED_TARGET wayland-cursor)
+
+    add_executable(grit-smooth
+        src/smooth_main.cpp
+        ${PROTO_GENERATED}
+    )
+
+    target_include_directories(grit-smooth PRIVATE ${PROTO_GEN_DIR})
+    target_compile_definitions(grit-smooth PRIVATE HAVE_WAYLAND=1)
+    target_link_libraries(grit-smooth PRIVATE
+        PkgConfig::EGL
+        PkgConfig::WAYLAND_CLIENT
+        PkgConfig::WAYLAND_EGL
+        PkgConfig::WAYLAND_CURSOR
+    )
+    target_compile_options(grit-smooth PRIVATE -Wall -Wextra -Wno-unused-parameter)
+    target_link_libraries(grit-smooth PRIVATE OpenGL::GL)
+endif()
