@@ -163,11 +163,16 @@ if(LINUX)
         src/curl_http.cpp
         src/keychain.cpp
     )
+    target_include_directories(grit-gtk4 PRIVATE
+        ${cmark_BINARY_DIR}/src
+        ${cmark_SOURCE_DIR}/src
+    )
     target_link_libraries(grit-gtk4 PRIVATE
         PkgConfig::GTK4
         PkgConfig::LIBCURL
         PkgConfig::LIBSECRET
         nlohmann_json::nlohmann_json
+        cmark
     )
     target_compile_definitions(grit-gtk4 PRIVATE GRIT_LINUX)
     target_compile_options(grit-gtk4 PRIVATE -Wall -Wextra -Wpedantic)

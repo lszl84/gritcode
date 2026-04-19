@@ -14,6 +14,7 @@
 #include "curl_http.h"
 #include "keychain.h"
 #include <nlohmann/json.hpp>
+#include <cmark.h>
 
 namespace fs = std::filesystem;
 using json = nlohmann::json;
@@ -63,8 +64,16 @@ struct UiState {
     GtkTextTag* tagThinking = nullptr;
     GtkTextTag* tagCode = nullptr;
     GtkTextTag* tagInlineCode = nullptr;
-    GtkTextTag* tagHeading = nullptr;
+    GtkTextTag* tagHeading = nullptr;    // legacy single-level fallback
     GtkTextTag* tagBullet = nullptr;
+    GtkTextTag* tagStrong = nullptr;
+    GtkTextTag* tagEmph = nullptr;
+    GtkTextTag* tagLink = nullptr;
+    GtkTextTag* tagQuote = nullptr;
+    GtkTextTag* tagH1 = nullptr;
+    GtkTextTag* tagH2 = nullptr;
+    GtkTextTag* tagH3 = nullptr;
+    GtkTextTag* tagH4 = nullptr;
 
     SessionManager session;
     net::CurlHttpClient http;
@@ -213,29 +222,167 @@ static void clear_transcript(UiState* s) {
     gtk_text_buffer_set_text(s->buffer, "", -1);
 }
 
-static void insert_inline_markdown(UiState* s, GtkTextIter* it, const std::string& line, GtkTextTag* normalTag) {
-    size_t i = 0;
-    while (i < line.size()) {
-        size_t tick = line.find('`', i);
-        if (tick == std::string::npos) {
-            std::string tail = line.substr(i);
-            if (!tail.empty()) gtk_text_buffer_insert_with_tags(s->buffer, it, tail.c_str(), -1, normalTag, nullptr);
-            break;
-        }
-        if (tick > i) {
-            std::string plain = line.substr(i, tick - i);
-            gtk_text_buffer_insert_with_tags(s->buffer, it, plain.c_str(), -1, normalTag, nullptr);
-        }
-        size_t end = line.find('`', tick + 1);
-        if (end == std::string::npos) {
-            std::string rest = line.substr(tick);
-            gtk_text_buffer_insert_with_tags(s->buffer, it, rest.c_str(), -1, normalTag, nullptr);
-            break;
-        }
-        std::string code = line.substr(tick + 1, end - tick - 1);
-        gtk_text_buffer_insert_with_tags(s->buffer, it, code.c_str(), -1, s->tagInlineCode, nullptr);
-        i = end + 1;
+// Render a markdown document into the text buffer at the end iterator.
+// Walks the cmark tree with an iterator and maintains a stack of active
+// inline tags so TEXT/CODE/SOFTBREAK leaves pick up the right styling
+// from surrounding STRONG/EMPH/LINK/HEADING/BLOCK_QUOTE nodes.
+static void render_markdown(UiState* s, GtkTextIter* end, const std::string& text) {
+    cmark_node* doc = cmark_parse_document(text.c_str(), text.size(), CMARK_OPT_DEFAULT);
+    if (!doc) {
+        gtk_text_buffer_insert_with_tags(s->buffer, end, text.c_str(), -1, s->tagAssistant, nullptr);
+        return;
     }
+
+    struct ListFrame { bool ordered; int nextIndex; };
+    std::vector<ListFrame> lists;
+    std::vector<GtkTextTag*> inlineStack;    // STRONG/EMPH/LINK
+    GtkTextTag* const blockTag = s->tagAssistant;  // base tag for paragraph-level text
+    int quoteDepth = 0;
+    int headingLevel = 0;
+
+    auto active_tag = [&]() -> GtkTextTag* {
+        if (!inlineStack.empty()) return inlineStack.back();
+        if (headingLevel == 1) return s->tagH1;
+        if (headingLevel == 2) return s->tagH2;
+        if (headingLevel == 3) return s->tagH3;
+        if (headingLevel >= 4) return s->tagH4;
+        if (quoteDepth > 0) return s->tagQuote;
+        return blockTag;
+    };
+
+    auto insert = [&](const char* txt, int len = -1) {
+        if (!txt || !*txt) return;
+        gtk_text_buffer_insert_with_tags(s->buffer, end, txt, len, active_tag(), nullptr);
+    };
+
+    cmark_iter* iter = cmark_iter_new(doc);
+    cmark_event_type ev;
+    while ((ev = cmark_iter_next(iter)) != CMARK_EVENT_DONE) {
+        cmark_node* node = cmark_iter_get_node(iter);
+        cmark_node_type t = cmark_node_get_type(node);
+        bool enter = (ev == CMARK_EVENT_ENTER);
+
+        switch (t) {
+        case CMARK_NODE_DOCUMENT: break;
+
+        case CMARK_NODE_PARAGRAPH:
+            if (!enter) gtk_text_buffer_insert(s->buffer, end, "\n\n", 2);
+            break;
+
+        case CMARK_NODE_HEADING:
+            if (enter) headingLevel = cmark_node_get_heading_level(node);
+            else {
+                gtk_text_buffer_insert(s->buffer, end, "\n\n", 2);
+                headingLevel = 0;
+            }
+            break;
+
+        case CMARK_NODE_BLOCK_QUOTE:
+            if (enter) ++quoteDepth;
+            else       --quoteDepth;
+            break;
+
+        case CMARK_NODE_LIST:
+            if (enter) {
+                bool ordered = (cmark_node_get_list_type(node) == CMARK_ORDERED_LIST);
+                int start = ordered ? cmark_node_get_list_start(node) : 0;
+                lists.push_back({ordered, start ? start : 1});
+            } else {
+                if (!lists.empty()) lists.pop_back();
+            }
+            break;
+
+        case CMARK_NODE_ITEM:
+            if (enter && !lists.empty()) {
+                auto& lf = lists.back();
+                std::string indent((lists.size() - 1) * 2, ' ');
+                if (lf.ordered) {
+                    std::string marker = indent + std::to_string(lf.nextIndex++) + ". ";
+                    gtk_text_buffer_insert_with_tags(s->buffer, end, marker.c_str(), -1, s->tagBullet, nullptr);
+                } else {
+                    std::string marker = indent + "• ";
+                    gtk_text_buffer_insert_with_tags(s->buffer, end, marker.c_str(), -1, s->tagBullet, nullptr);
+                }
+            }
+            break;
+
+        case CMARK_NODE_CODE_BLOCK:
+            if (enter) {
+                const char* lit = cmark_node_get_literal(node);
+                if (lit) {
+                    std::string body = lit;
+                    while (!body.empty() && body.back() == '\n') body.pop_back();
+                    gtk_text_buffer_insert_with_tags(s->buffer, end, body.c_str(), -1, s->tagCode, nullptr);
+                }
+                gtk_text_buffer_insert(s->buffer, end, "\n\n", 2);
+            }
+            break;
+
+        case CMARK_NODE_THEMATIC_BREAK:
+            if (enter) gtk_text_buffer_insert_with_tags(s->buffer, end, "──────────\n\n", -1, s->tagMeta, nullptr);
+            break;
+
+        case CMARK_NODE_TEXT: {
+            const char* lit = cmark_node_get_literal(node);
+            if (lit) insert(lit);
+            break;
+        }
+
+        case CMARK_NODE_SOFTBREAK:
+        case CMARK_NODE_LINEBREAK:
+            if (enter) insert("\n");
+            break;
+
+        case CMARK_NODE_CODE: {
+            if (!enter) break;
+            const char* lit = cmark_node_get_literal(node);
+            if (lit) gtk_text_buffer_insert_with_tags(s->buffer, end, lit, -1, s->tagInlineCode, nullptr);
+            break;
+        }
+
+        case CMARK_NODE_EMPH:
+            if (enter) inlineStack.push_back(s->tagEmph);
+            else if (!inlineStack.empty()) inlineStack.pop_back();
+            break;
+
+        case CMARK_NODE_STRONG:
+            if (enter) inlineStack.push_back(s->tagStrong);
+            else if (!inlineStack.empty()) inlineStack.pop_back();
+            break;
+
+        case CMARK_NODE_LINK:
+            if (enter) inlineStack.push_back(s->tagLink);
+            else if (!inlineStack.empty()) {
+                inlineStack.pop_back();
+                // Show the URL inline after the link text if it differs,
+                // so the user can see where a link points.
+                const char* url = cmark_node_get_url(node);
+                if (url && *url) {
+                    std::string suffix = " (";
+                    suffix += url;
+                    suffix += ")";
+                    gtk_text_buffer_insert_with_tags(s->buffer, end, suffix.c_str(), -1, s->tagMeta, nullptr);
+                }
+            }
+            break;
+
+        case CMARK_NODE_IMAGE:
+            if (enter) inlineStack.push_back(s->tagEmph);
+            else if (!inlineStack.empty()) inlineStack.pop_back();
+            break;
+
+        case CMARK_NODE_HTML_BLOCK:
+        case CMARK_NODE_HTML_INLINE:
+            // Skip raw HTML — too noisy in a text transcript.
+            break;
+
+        default:
+            break;
+        }
+    }
+
+    cmark_iter_free(iter);
+    cmark_node_free(doc);
 }
 
 static void append_assistant_markdown(UiState* s, const std::string& text) {
@@ -243,35 +390,9 @@ static void append_assistant_markdown(UiState* s, const std::string& text) {
     gtk_text_buffer_get_end_iter(s->buffer, &end);
     gtk_text_buffer_insert_with_tags(s->buffer, &end, "Assistant\n", -1, s->tagMeta, nullptr);
 
-    bool inCode = false;
-    size_t pos = 0;
-    while (pos < text.size()) {
-        size_t nl = text.find('\n', pos);
-        std::string line = (nl == std::string::npos) ? text.substr(pos) : text.substr(pos, nl - pos);
+    render_markdown(s, &end, text);
 
-        if (line.rfind("```", 0) == 0) {
-            inCode = !inCode;
-            gtk_text_buffer_insert(s->buffer, &end, "\n", 1);
-        } else if (inCode) {
-            gtk_text_buffer_insert_with_tags(s->buffer, &end, line.c_str(), -1, s->tagCode, nullptr);
-            gtk_text_buffer_insert(s->buffer, &end, "\n", 1);
-        } else if (line.rfind("### ", 0) == 0 || line.rfind("## ", 0) == 0 || line.rfind("# ", 0) == 0) {
-            size_t off = (line[1] == '#') ? ((line[2] == '#') ? 4 : 3) : 2;
-            std::string heading = line.substr(off);
-            gtk_text_buffer_insert_with_tags(s->buffer, &end, heading.c_str(), -1, s->tagHeading, nullptr);
-            gtk_text_buffer_insert(s->buffer, &end, "\n", 1);
-        } else if (line.rfind("- ", 0) == 0 || line.rfind("* ", 0) == 0) {
-            gtk_text_buffer_insert_with_tags(s->buffer, &end, "• ", -1, s->tagBullet, nullptr);
-            insert_inline_markdown(s, &end, line.substr(2), s->tagAssistant);
-            gtk_text_buffer_insert(s->buffer, &end, "\n", 1);
-        } else {
-            insert_inline_markdown(s, &end, line, s->tagAssistant);
-            gtk_text_buffer_insert(s->buffer, &end, "\n", 1);
-        }
-
-        if (nl == std::string::npos) break;
-        pos = nl + 1;
-    }
+    gtk_text_buffer_get_end_iter(s->buffer, &end);
     gtk_text_buffer_insert(s->buffer, &end, "\n", 1);
     scroll_to_end(s);
 }
@@ -1019,6 +1140,65 @@ static void setup_tags(UiState* s) {
         s->buffer, "bullet",
         "foreground", "#81A1C1",
         "weight", 700,
+        nullptr);
+
+    s->tagStrong = gtk_text_buffer_create_tag(
+        s->buffer, "strong",
+        "weight", 700,
+        nullptr);
+
+    s->tagEmph = gtk_text_buffer_create_tag(
+        s->buffer, "emph",
+        "style", PANGO_STYLE_ITALIC,
+        nullptr);
+
+    s->tagLink = gtk_text_buffer_create_tag(
+        s->buffer, "link",
+        "foreground", "#88C0D0",
+        "underline", PANGO_UNDERLINE_SINGLE,
+        nullptr);
+
+    s->tagQuote = gtk_text_buffer_create_tag(
+        s->buffer, "quote",
+        "foreground", "#9AA0A6",
+        "style", PANGO_STYLE_ITALIC,
+        "left-margin", 24,
+        "pixels-above-lines", 2,
+        "pixels-below-lines", 2,
+        nullptr);
+
+    s->tagH1 = gtk_text_buffer_create_tag(
+        s->buffer, "h1",
+        "foreground", "#ECEFF4",
+        "weight", 700,
+        "scale", 1.45,
+        "pixels-above-lines", 8,
+        "pixels-below-lines", 4,
+        nullptr);
+
+    s->tagH2 = gtk_text_buffer_create_tag(
+        s->buffer, "h2",
+        "foreground", "#ECEFF4",
+        "weight", 700,
+        "scale", 1.28,
+        "pixels-above-lines", 6,
+        "pixels-below-lines", 3,
+        nullptr);
+
+    s->tagH3 = gtk_text_buffer_create_tag(
+        s->buffer, "h3",
+        "foreground", "#ECEFF4",
+        "weight", 700,
+        "scale", 1.14,
+        "pixels-above-lines", 4,
+        "pixels-below-lines", 2,
+        nullptr);
+
+    s->tagH4 = gtk_text_buffer_create_tag(
+        s->buffer, "h4",
+        "foreground", "#ECEFF4",
+        "weight", 700,
+        "scale", 1.05,
         nullptr);
 }
 
