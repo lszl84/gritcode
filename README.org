@@ -61,6 +61,26 @@ cmake --install build
 grit
 #+end_src
 
+*** Linux (Fedora)
+
+#+begin_src bash
+sudo dnf install freetype-devel harfbuzz-devel fontconfig-devel \
+  libcurl-devel libsecret-devel cmake ninja-build \
+  wayland-devel wayland-protocols libxkbcommon-devel libX11-devel
+
+git clone https://github.com/lszl84/gritcode.git
+cd gritcode
+cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX=~/.local
+cmake --build build
+cmake --install build
+
+grit
+#+end_src
+
+GLFW 3.4 is built from source (with Wayland + X11 support) to avoid the
+system =libglfw3= which is X11-only on many distros and forces XWayland on
+GNOME-based desktops.
+
 *** macOS
 
 #+begin_src bash
