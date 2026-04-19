@@ -157,12 +157,20 @@ set(GRIT_SOURCES
 )
 
 if(LINUX)
-    add_executable(grit-gtk4
+    set(GRIT_GTK4_SOURCES
         src/gtk4_main.cpp
         src/session.cpp
         src/curl_http.cpp
         src/keychain.cpp
     )
+    # Same agent-automation rule as the main grit target: Debug builds
+    # ship the MCP server so scripts/mcp_client.py can drive the UI,
+    # Release builds compile it out entirely.
+    if(NOT CMAKE_BUILD_TYPE STREQUAL "Release")
+        list(APPEND GRIT_GTK4_SOURCES src/mcp_server.cpp)
+    endif()
+
+    add_executable(grit-gtk4 ${GRIT_GTK4_SOURCES})
     target_include_directories(grit-gtk4 PRIVATE
         ${cmark_BINARY_DIR}/src
         ${cmark_SOURCE_DIR}/src
@@ -175,6 +183,9 @@ if(LINUX)
         cmark
     )
     target_compile_definitions(grit-gtk4 PRIVATE GRIT_LINUX)
+    if(NOT CMAKE_BUILD_TYPE STREQUAL "Release")
+        target_compile_definitions(grit-gtk4 PRIVATE GRIT_ENABLE_MCP)
+    endif()
     target_compile_options(grit-gtk4 PRIVATE -Wall -Wextra -Wpedantic)
 endif()
 

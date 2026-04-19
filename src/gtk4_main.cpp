@@ -3,9 +3,11 @@
 
 #include <gtk/gtk.h>
 #include <algorithm>
+#include <condition_variable>
 #include <cstring>
 #include <filesystem>
 #include <functional>
+#include <mutex>
 #include <string>
 #include <vector>
 #include <unistd.h>
@@ -15,6 +17,10 @@
 #include "keychain.h"
 #include <nlohmann/json.hpp>
 #include <cmark.h>
+
+#ifdef GRIT_ENABLE_MCP
+#include "mcp_server.h"
+#endif
 
 namespace fs = std::filesystem;
 using json = nlohmann::json;
@@ -52,6 +58,10 @@ struct UiState {
     GtkWidget* spinner = nullptr;
     GtkWidget* statusRow = nullptr;
     GtkWidget* inputPlaceholder = nullptr;
+
+#ifdef GRIT_ENABLE_MCP
+    MCPServer mcp;
+#endif
 
     GtkStringList* providerList = nullptr;
     GtkStringList* modelList = nullptr;
@@ -1206,6 +1216,9 @@ static void ui_state_destroy(gpointer data) {
     auto* s = static_cast<UiState*>(data);
     if (!s) return;
     s->alive = false;
+#ifdef GRIT_ENABLE_MCP
+    s->mcp.Stop();
+#endif
     s->http.Abort();
     delete s;
 }
@@ -1272,6 +1285,150 @@ static gboolean shortcut_cancel(GtkWidget*, GVariant*, gpointer data) {
     }
     return FALSE;
 }
+
+#ifdef GRIT_ENABLE_MCP
+// Helper: run `fn` on the GTK main loop and block until it finishes.
+// Used for MCP callbacks that need to return a value synchronously —
+// the read must happen on the UI thread where session_/UI state is mutated.
+template <typename R>
+static R run_on_main_sync(std::function<R()> fn) {
+    struct Box {
+        std::function<R()> fn;
+        R result;
+        std::mutex m;
+        std::condition_variable cv;
+        bool done = false;
+    };
+    auto* box = new Box{std::move(fn), R{}, {}, {}, false};
+    g_idle_add_once([](gpointer d) {
+        auto* b = static_cast<Box*>(d);
+        b->result = b->fn();
+        std::lock_guard<std::mutex> lk(b->m);
+        b->done = true;
+        b->cv.notify_all();
+    }, box);
+    std::unique_lock<std::mutex> lk(box->m);
+    box->cv.wait(lk, [&]{ return box->done; });
+    R out = std::move(box->result);
+    lk.unlock();
+    delete box;
+    return out;
+}
+
+static void start_mcp(UiState* s) {
+    MCPCallbacks cb;
+
+    cb.sendMessage = [s](const std::string& msg) {
+        post_main([s, msg]() {
+            if (!s->alive) return;
+            auto* buf = gtk_text_view_get_buffer(GTK_TEXT_VIEW(s->input));
+            gtk_text_buffer_set_text(buf, msg.c_str(), -1);
+            on_send_clicked(nullptr, s);
+        });
+    };
+
+    cb.getStatus = [s]() -> json {
+        return run_on_main_sync<json>([s]() -> json {
+            const char* provider = dropdown_selected(s->provider, s->providerList);
+            const char* model    = dropdown_selected(s->model, s->modelList);
+            return {
+                {"connected", true},
+                {"requestInProgress", s->streaming},
+                {"provider", provider ? provider : ""},
+                {"model", model ? model : ""},
+                {"messageCount", (int)s->session.History().size()},
+                {"sendButtonEnabled", !s->streaming}
+            };
+        });
+    };
+
+    cb.getConversation = [s]() -> json {
+        return run_on_main_sync<json>([s]() -> json {
+            json msgs = json::array();
+            for (auto& m : s->session.History()) {
+                json entry = {{"role", m.role}, {"content", m.content}};
+                if (!m.toolCalls.empty()) {
+                    json tcs = json::array();
+                    for (auto& tc : m.toolCalls) {
+                        tcs.push_back({{"name", tc.value("name", "")},
+                                       {"arguments", tc.value("arguments", "")}});
+                    }
+                    entry["tool_calls"] = tcs;
+                }
+                if (!m.toolCallId.empty()) entry["tool_call_id"] = m.toolCallId;
+                msgs.push_back(entry);
+            }
+            return msgs;
+        });
+    };
+
+    cb.getLastAssistant = [s]() -> json {
+        return run_on_main_sync<json>([s]() -> json {
+            const auto& h = s->session.History();
+            for (int i = (int)h.size() - 1; i >= 0; --i) {
+                if (h[i].role == "assistant" && !h[i].content.empty()) {
+                    return json{{"text", h[i].content}, {"index", i}};
+                }
+            }
+            return json{{"text", ""}, {"index", -1}};
+        });
+    };
+
+    cb.selectAllText = [s]() -> std::string {
+        return run_on_main_sync<std::string>([s]() -> std::string {
+            GtkTextIter a, e;
+            gtk_text_buffer_get_bounds(s->buffer, &a, &e);
+            gtk_text_buffer_select_range(s->buffer, &a, &e);
+            char* raw = gtk_text_buffer_get_text(s->buffer, &a, &e, FALSE);
+            std::string out = raw ? raw : "";
+            g_free(raw);
+
+            auto* clip = gtk_widget_get_clipboard(s->textView);
+            if (clip) gdk_clipboard_set_text(clip, out.c_str());
+            return out;
+        });
+    };
+
+    cb.setWorkspace = [s](const std::string& cwd) {
+        post_main([s, cwd]() {
+            if (!s->alive) return;
+            std::error_code ec;
+            if (!std::filesystem::exists(cwd, ec) || !std::filesystem::is_directory(cwd, ec)) return;
+            if (chdir(cwd.c_str()) != 0) return;
+            load_session_for_cwd(s, cwd);
+            reload_workspaces(s);
+        });
+    };
+
+    cb.setProvider = [s](const std::string& provider, const std::string& model) {
+        post_main([s, provider, model]() {
+            if (!s->alive) return;
+            int pi = list_index_of(s->providerList, provider);
+            if (pi >= 0) gtk_drop_down_set_selected(GTK_DROP_DOWN(s->provider), (guint)pi);
+            if (!model.empty()) {
+                int mi = list_index_of(s->modelList, model);
+                if (mi >= 0) gtk_drop_down_set_selected(GTK_DROP_DOWN(s->model), (guint)mi);
+                s->session.SetModel(model);
+            }
+            if (!provider.empty()) s->session.SetProvider(provider);
+            s->session.MarkDirty();
+            s->session.Save();
+            configure_http(s);
+        });
+    };
+
+    cb.cancelRequest = [s]() {
+        post_main([s]() {
+            if (!s->alive) return;
+            if (s->streaming) on_cancel_clicked(nullptr, s);
+        });
+    };
+
+    s->mcp.Start(std::move(cb));
+}
+#else
+static void start_mcp(UiState*) {}
+#endif
 
 static void install_window_shortcuts(UiState* s) {
     auto* controller = gtk_shortcut_controller_new();
@@ -1384,6 +1541,8 @@ static void activate(GtkApplication* app, gpointer user_data) {
     fetch_models(state);
 
     install_window_shortcuts(state);
+
+    start_mcp(state);
 
     g_object_set_data_full(G_OBJECT(win), "ui-state", state, ui_state_destroy);
     gtk_window_present(GTK_WINDOW(win));
