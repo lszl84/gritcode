@@ -214,10 +214,27 @@ static void append_assistant_markdown(UiState* s, const std::string& text) {
     scroll_to_end(s);
 }
 
+static void append_tool_result(UiState* s, const ChatMessage& m) {
+    std::string header = m.toolCallId.empty() ? "Tool Result" : ("Tool Result [" + m.toolCallId + "]");
+    append_block(s, header.c_str(), "", s->tagThinking);
+
+    GtkTextIter end;
+    gtk_text_buffer_get_end_iter(s->buffer, &end);
+    std::string body = m.content;
+    const size_t MAX = 16000;
+    if (body.size() > MAX) {
+        body.resize(MAX);
+        body += "\n\n[truncated]";
+    }
+    gtk_text_buffer_insert_with_tags(s->buffer, &end, body.c_str(), -1, s->tagCode, nullptr);
+    gtk_text_buffer_insert(s->buffer, &end, "\n\n", 2);
+    scroll_to_end(s);
+}
+
 static void append_from_message(UiState* s, const ChatMessage& m) {
     if (m.role == "user") append_block(s, "You", m.content.c_str(), s->tagUser);
     else if (m.role == "assistant") append_assistant_markdown(s, m.content);
-    else if (m.role == "tool") append_block(s, "Tool", m.content.c_str(), s->tagThinking);
+    else if (m.role == "tool") append_tool_result(s, m);
     else append_block(s, m.role.c_str(), m.content.c_str(), s->tagAssistant);
 }
 
