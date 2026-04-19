@@ -3,6 +3,7 @@
 
 #include <gtk/gtk.h>
 #include <algorithm>
+#include <atomic>
 #include <condition_variable>
 #include <cstring>
 #include <filesystem>
@@ -15,8 +16,10 @@
 #include "session.h"
 #include "curl_http.h"
 #include "keychain.h"
+#include "tool_exec.h"
 #include <nlohmann/json.hpp>
 #include <cmark.h>
+#include <thread>
 
 #ifdef GRIT_ENABLE_MCP
 #include "mcp_server.h"
@@ -91,6 +94,13 @@ struct UiState {
     bool mutatingWorkspace = false;
     bool streaming = false;
     bool alive = true;
+
+    // Tool loop. toolRound caps iterations so a confused model can't hang
+    // us forever. requestGen is bumped on cancel so stale finalizers from
+    // an in-flight request can detect they've been replaced and drop
+    // their work instead of appending to a new conversation.
+    int toolRound = 0;
+    std::atomic<uint64_t> requestGen{0};
 
     // Scroll anchoring — see scroll_to_end and on_vadj_* handlers.
     GtkWidget* scrolledWindow = nullptr;
@@ -645,24 +655,79 @@ static net::CurlHttpClient::Protocol protocol_for_model(const std::string& model
     return net::CurlHttpClient::Protocol::OpenAI;
 }
 
+static std::string system_prompt() {
+    char cwdBuf[4096];
+    std::string cwd = getcwd(cwdBuf, sizeof(cwdBuf)) ? cwdBuf : ".";
+    return
+        "You are an AI coding assistant. You help the user with software engineering tasks "
+        "by reading, writing, and editing files, and running shell commands.\n\n"
+        "Working directory: " + cwd + "\n\n"
+        "## Tools\n"
+        "You have these tools: bash, read_file, write_file, edit_file, list_directory, web_fetch, web_search.\n"
+        "- Use write_file to create new files or overwrite existing ones.\n"
+        "- Use edit_file to make targeted changes — provide enough context in old_string to be unique.\n"
+        "- Use read_file to read files before editing them.\n"
+        "- Use bash to run commands, tests, install packages, etc.\n\n"
+        "## Behavior\n"
+        "- When given a task, work through it step by step using your tools.\n"
+        "- Do not just describe what you would do — actually do it by calling tools.\n"
+        "- After each tool result, assess whether the task is complete and continue if not.\n"
+        "- When making changes, verify they work (e.g., run tests or the build).\n"
+        "- Keep responses concise. Lead with actions, not explanations.\n";
+}
+
+// Compute a prune cutoff: tool-result messages at index <= cutoff get
+// replaced with a placeholder on the wire. Protects roughly the most
+// recent PROTECT_CHARS of tool output so the context doesn't blow up
+// across a long session with many large tool results.
+static int prune_before_idx(const std::vector<ChatMessage>& hist) {
+    const size_t PROTECT_CHARS = 120000;
+    size_t acc = 0;
+    for (int i = (int)hist.size() - 1; i >= 0; --i) {
+        if (hist[i].role == "tool") {
+            acc += hist[i].content.size();
+            if (acc > PROTECT_CHARS) return i;
+        }
+    }
+    return -1;
+}
+
 static std::string build_openai_request(UiState* s, const std::string& model) {
     json j;
     j["model"] = model;
     j["stream"] = true;
     j["max_tokens"] = 32000;
 
-    json msgs = json::array();
-    std::string sys =
-        "You are an AI coding assistant. Keep responses concise and practical. "
-        "When code changes are required, provide exact steps and patches.";
-    msgs.push_back({{"role", "system"}, {"content", sys}});
+    const auto& hist = s->session.History();
+    int cutoff = prune_before_idx(hist);
 
-    for (const auto& m : s->session.History()) {
-        if (m.role == "user" || m.role == "assistant") {
-            msgs.push_back({{"role", m.role}, {"content", m.content}});
+    json msgs = json::array();
+    msgs.push_back({{"role", "system"}, {"content", system_prompt()}});
+
+    for (int i = 0; i < (int)hist.size(); ++i) {
+        const auto& m = hist[i];
+        json msg;
+        msg["role"] = m.role;
+        if (m.role == "tool") {
+            msg["tool_call_id"] = m.toolCallId;
+            msg["content"] = (i <= cutoff) ? std::string("[Old tool result content cleared]") : m.content;
+        } else if (m.role == "assistant" && !m.toolCalls.empty()) {
+            msg["content"] = m.content.empty() ? json(nullptr) : json(m.content);
+            json tcs = json::array();
+            for (auto& tc : m.toolCalls) {
+                tcs.push_back({{"id", tc.value("id", "")}, {"type", "function"},
+                               {"function", {{"name", tc.value("name", "")},
+                                             {"arguments", tc.value("arguments", "")}}}});
+            }
+            msg["tool_calls"] = std::move(tcs);
+        } else {
+            msg["content"] = m.content;
         }
+        msgs.push_back(std::move(msg));
     }
     j["messages"] = std::move(msgs);
+    j["tools"] = json::parse(toolexec::ToolDefsJson());
+    j["tool_choice"] = "auto";
     return j.dump();
 }
 
@@ -671,17 +736,84 @@ static std::string build_anthropic_request(UiState* s, const std::string& model)
     j["model"] = model;
     j["stream"] = true;
     j["max_tokens"] = 32000;
-    j["system"] =
-        "You are an AI coding assistant. Keep responses concise and practical. "
-        "When code changes are required, provide exact steps and patches.";
+    j["system"] = system_prompt();
+
+    const auto& hist = s->session.History();
+    int cutoff = prune_before_idx(hist);
 
     json msgs = json::array();
-    for (const auto& m : s->session.History()) {
-        if (m.role == "user" || m.role == "assistant") {
-            msgs.push_back({{"role", m.role}, {"content", m.content}});
+    auto pushOrMerge = [&](json msg) {
+        if (!msgs.empty() && msgs.back()["role"] == msg["role"] && msg["role"] == "user") {
+            auto& last = msgs.back();
+            auto toArray = [](json& c) {
+                if (c.is_string()) {
+                    json arr = json::array();
+                    arr.push_back({{"type","text"},{"text",c.get<std::string>()}});
+                    c = std::move(arr);
+                }
+            };
+            toArray(last["content"]);
+            toArray(msg["content"]);
+            for (auto& blk : msg["content"]) last["content"].push_back(blk);
+        } else {
+            msgs.push_back(std::move(msg));
         }
+    };
+
+    for (int i = 0; i < (int)hist.size(); ++i) {
+        const auto& m = hist[i];
+        json msg;
+        if (m.role == "user") {
+            msg["role"] = "user";
+            msg["content"] = m.content;
+        } else if (m.role == "assistant") {
+            msg["role"] = "assistant";
+            if (m.toolCalls.empty()) {
+                if (m.content.empty()) continue;
+                msg["content"] = m.content;
+            } else {
+                json blocks = json::array();
+                if (!m.content.empty()) blocks.push_back({{"type","text"},{"text",m.content}});
+                for (auto& tc : m.toolCalls) {
+                    json tu;
+                    tu["type"] = "tool_use";
+                    tu["id"]   = tc.value("id", "");
+                    tu["name"] = tc.value("name", "");
+                    try { tu["input"] = json::parse(tc.value("arguments", std::string("{}"))); }
+                    catch (...) { tu["input"] = json::object(); }
+                    blocks.push_back(std::move(tu));
+                }
+                msg["content"] = std::move(blocks);
+            }
+        } else if (m.role == "tool") {
+            msg["role"] = "user";
+            json tr;
+            tr["type"] = "tool_result";
+            tr["tool_use_id"] = m.toolCallId;
+            tr["content"] = (i <= cutoff) ? std::string("[Old tool result content cleared]") : m.content;
+            json blocks = json::array();
+            blocks.push_back(std::move(tr));
+            msg["content"] = std::move(blocks);
+        } else {
+            continue;
+        }
+        pushOrMerge(std::move(msg));
     }
     j["messages"] = std::move(msgs);
+
+    // Convert OpenAI-shape tool defs to Anthropic's form to keep one source of truth.
+    json openaiTools = json::parse(toolexec::ToolDefsJson());
+    json anthTools = json::array();
+    for (auto& t : openaiTools) {
+        if (!t.contains("function")) continue;
+        json at;
+        at["name"] = t["function"].value("name", "");
+        at["description"] = t["function"].value("description", "");
+        at["input_schema"] = t["function"].value("parameters", json::object());
+        anthTools.push_back(std::move(at));
+    }
+    j["tools"] = std::move(anthTools);
+    j["tool_choice"] = {{"type","auto"}};
     return j.dump();
 }
 
@@ -853,11 +985,41 @@ static void set_streaming(UiState* s, bool streaming) {
     set_busy(s, streaming);
 }
 
-static void on_cancel_clicked(GtkButton*, gpointer user_data) {
-    auto* s = static_cast<UiState*>(user_data);
+// Bump the generation counter, abort the HTTP stream, kill any running
+// bash tool, and patch up the history so the next user send is wire-valid.
+// Mirrors app.cpp's CancelInFlight.
+static void cancel_in_flight(UiState* s) {
     if (!s->streaming) return;
+    s->requestGen.fetch_add(1);
     s->http.Abort();
+    toolexec::KillRunningTool();
+
+    auto& hist = s->session.History();
+    if (!hist.empty()) {
+        auto& last = hist.back();
+        if (last.role == "assistant" && !last.toolCalls.empty()) {
+            // Add synthetic tool_result[cancelled] for each pending tool_use
+            // so the conversation passed on next send has matching pairs.
+            for (auto& tc : last.toolCalls) {
+                ChatMessage tr;
+                tr.role = "tool";
+                tr.content = "[cancelled by user]";
+                tr.toolCallId = tc.value("id", "");
+                hist.push_back(std::move(tr));
+            }
+            hist.push_back({"assistant", "[cancelled]", {}, {}});
+        } else if (last.role == "user") {
+            hist.push_back({"assistant", "[cancelled]", {}, {}});
+        }
+    }
+    s->session.MarkDirty();
+    s->session.Save();
+
     set_status(s, "Cancelling...");
+}
+
+static void on_cancel_clicked(GtkButton*, gpointer user_data) {
+    cancel_in_flight(static_cast<UiState*>(user_data));
 }
 
 static std::string input_get_text(UiState* s) {
@@ -875,13 +1037,129 @@ static void input_clear(UiState* s) {
     gtk_text_buffer_set_text(buf, "", -1);
 }
 
+static void do_send_to_provider(UiState* s);
+
+static void run_tool_calls_async(UiState* s, const std::vector<json>& toolCalls) {
+    uint64_t gen = s->requestGen.load();
+    std::thread([s, toolCalls, gen]() {
+        std::vector<ChatMessage> results;
+        results.reserve(toolCalls.size());
+        for (const auto& tc : toolCalls) {
+            if (s->requestGen.load() != gen) return;  // cancelled
+            std::string name = tc.value("name", "");
+            std::string args = tc.value("arguments", "{}");
+            std::string id   = tc.value("id", "");
+            std::string out  = toolexec::StripAnsi(toolexec::ExecuteTool(name, args));
+            ChatMessage tr;
+            tr.role = "tool";
+            tr.content = out;
+            tr.toolCallId = id;
+            results.push_back(std::move(tr));
+        }
+        post_main([s, gen, results = std::move(results)]() mutable {
+            if (!s->alive) return;
+            if (s->requestGen.load() != gen) return;
+
+            for (auto& r : results) {
+                append_block(s, ("Tool Result [" + r.toolCallId + "]").c_str(),
+                             r.content.c_str(), s->tagCode);
+                s->session.History().push_back(std::move(r));
+            }
+            s->session.MarkDirty();
+            s->session.Save();
+
+            do_send_to_provider(s);
+        });
+    }).detach();
+}
+
+static void do_send_to_provider(UiState* s) {
+    const char* provider = dropdown_selected(s->provider, s->providerList);
+    const char* modelC   = dropdown_selected(s->model, s->modelList);
+    std::string model = modelC ? modelC : "kimi-k2.5";
+
+    if (provider) s->session.SetProvider(provider);
+    s->session.SetModel(model);
+    s->session.MarkDirty();
+    s->session.Save();
+
+    configure_http(s);
+    auto protocol = protocol_for_model(model);
+    std::string req = (protocol == net::CurlHttpClient::Protocol::Anthropic)
+        ? build_anthropic_request(s, model)
+        : build_openai_request(s, model);
+
+    set_details(s, req.substr(0, std::min<size_t>(req.size(), 4000)));
+
+    append_assistant_header(s);
+    set_status(s, s->toolRound > 0 ? ("Streaming (tool round " + std::to_string(s->toolRound) + ")...")
+                                   : std::string("Streaming..."));
+
+    uint64_t gen = s->requestGen.load();
+
+    s->http.SendStreaming(
+        protocol,
+        req,
+        [s, gen](const std::string& chunk, bool thinking) {
+            post_main([s, gen, chunk, thinking]() {
+                if (!s->alive) return;
+                if (s->requestGen.load() != gen) return;
+                append_stream_chunk(s, chunk, thinking);
+            });
+        },
+        [s, gen](bool ok, const std::string& content, const std::string& error,
+                 const std::vector<json>& toolCalls, const std::string&, int, int) {
+            post_main([s, gen, ok, content, error, toolCalls]() mutable {
+                if (!s->alive) return;
+                if (s->requestGen.load() != gen) return;
+                append_stream_footer(s);
+
+                if (!ok) {
+                    if (error == "Cancelled") {
+                        set_status(s, "Cancelled");
+                        set_details(s, "Request cancelled by user.");
+                    } else {
+                        append_block(s, "Error", error.c_str(), s->tagError);
+                        set_status(s, "Error");
+                        set_details(s, error);
+                    }
+                    set_streaming(s, false);
+                    reload_workspaces(s);
+                    return;
+                }
+
+                // Record assistant turn, including tool_calls if any.
+                ChatMessage a;
+                a.role = "assistant";
+                a.content = content;
+                if (!toolCalls.empty()) a.toolCalls = toolCalls;
+                s->session.History().push_back(a);
+                if (!toolCalls.empty()) append_tool_calls(s, toolCalls);
+                s->session.MarkDirty();
+                s->session.Save();
+
+                // If the turn produced tool calls and we haven't hit the
+                // safety cap, execute them and loop back into the model.
+                if (!toolCalls.empty() && s->toolRound < 40) {
+                    ++s->toolRound;
+                    run_tool_calls_async(s, toolCalls);
+                    return;
+                }
+
+                set_status(s, "Done");
+                set_details(s, "Response chars: " + std::to_string(content.size()));
+                set_streaming(s, false);
+                reload_workspaces(s);
+            });
+        }
+    );
+}
+
 static void on_send_clicked(GtkButton*, gpointer user_data) {
     auto* s = static_cast<UiState*>(user_data);
     if (s->streaming) return;
 
     std::string text = input_get_text(s);
-    // Trim trailing whitespace for the empty-check so Enter+Ctrl+Enter
-    // with only newlines doesn't slip through.
     size_t end = text.find_last_not_of(" \t\n\r");
     if (end == std::string::npos) {
         append_block(s, "Error", "Cannot send empty message.", s->tagError);
@@ -893,72 +1171,12 @@ static void on_send_clicked(GtkButton*, gpointer user_data) {
     u.content = text;
     s->session.History().push_back(u);
     append_from_message(s, u);
-
-    const char* provider = dropdown_selected(s->provider, s->providerList);
-    const char* modelC = dropdown_selected(s->model, s->modelList);
-    std::string model = modelC ? modelC : "kimi-k2.5";
-
-    if (provider) s->session.SetProvider(provider);
-    s->session.SetModel(model);
-    s->session.MarkDirty();
-    s->session.Save();
-
     input_clear(s);
 
-    configure_http(s);
-    auto protocol = protocol_for_model(model);
-    std::string req = (protocol == net::CurlHttpClient::Protocol::Anthropic)
-        ? build_anthropic_request(s, model)
-        : build_openai_request(s, model);
-
-    set_details(s, req.substr(0, std::min<size_t>(req.size(), 4000)));
-
+    s->toolRound = 0;
+    s->requestGen.fetch_add(1);
     set_streaming(s, true);
-    append_assistant_header(s);
-    set_status(s, "Streaming...");
-
-    s->http.SendStreaming(
-        protocol,
-        req,
-        [s](const std::string& chunk, bool thinking) {
-            post_main([s, chunk, thinking]() {
-                if (!s->alive) return;
-                append_stream_chunk(s, chunk, thinking);
-            });
-        },
-        [s](bool ok, const std::string& content, const std::string& error,
-            const std::vector<json>& toolCalls, const std::string&, int, int) {
-            post_main([s, ok, content, error, toolCalls]() mutable {
-                if (!s->alive) return;
-                append_stream_footer(s);
-
-                if (ok) {
-                    ChatMessage a;
-                    a.role = "assistant";
-                    a.content = content;
-                    if (!toolCalls.empty()) a.toolCalls = toolCalls;
-                    s->session.History().push_back(a);
-                    if (!toolCalls.empty()) append_tool_calls(s, toolCalls);
-                    s->session.MarkDirty();
-                    s->session.Save();
-                    set_status(s, "Done");
-                    set_details(s, "Response chars: " + std::to_string(content.size()));
-                } else {
-                    if (error == "Cancelled") {
-                        set_status(s, "Cancelled");
-                        set_details(s, "Request cancelled by user.");
-                    } else {
-                        append_block(s, "Error", error.c_str(), s->tagError);
-                        set_status(s, "Error");
-                        set_details(s, error);
-                    }
-                }
-
-                set_streaming(s, false);
-                reload_workspaces(s);
-            });
-        }
-    );
+    do_send_to_provider(s);
 }
 
 static void on_new_workspace_clicked(GtkButton*, gpointer user_data) {

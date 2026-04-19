@@ -162,6 +162,7 @@ if(LINUX)
         src/session.cpp
         src/curl_http.cpp
         src/keychain.cpp
+        src/tool_exec.cpp
     )
     # Same agent-automation rule as the main grit target: Debug builds
     # ship the MCP server so scripts/mcp_client.py can drive the UI,
