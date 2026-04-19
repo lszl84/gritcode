@@ -41,6 +41,7 @@ struct UiState {
     GtkWidget* workspace = nullptr; // GtkDropDown
     GtkWidget* status = nullptr;
     GtkWidget* apiKeyBtn = nullptr;
+    GtkWidget* chooserBtn = nullptr;
     GtkWidget* sendBtn = nullptr;
     GtkWidget* cancelBtn = nullptr;
 
@@ -420,6 +421,120 @@ static void append_tool_calls(UiState* s, const std::vector<json>& toolCalls) {
     }
 }
 
+struct ChooserCtx {
+    UiState* state;
+    GtkWidget* list;
+};
+
+static void chooser_activate_row(GtkWindow* win) {
+    auto* ctx = static_cast<ChooserCtx*>(g_object_get_data(G_OBJECT(win), "chooser-ctx"));
+    if (!ctx) return;
+    auto* s = ctx->state;
+    auto* list = GTK_LIST_BOX(ctx->list);
+    auto* row = gtk_list_box_get_selected_row(list);
+    if (!row) { gtk_window_destroy(win); return; }
+
+    const char* cwd = static_cast<const char*>(g_object_get_data(G_OBJECT(row), "cwd"));
+    if (!cwd) { gtk_window_destroy(win); return; }
+
+    std::error_code ec;
+    if (fs::exists(cwd, ec) && fs::is_directory(cwd, ec)) {
+        if (chdir(cwd) == 0) {
+            load_session_for_cwd(s, cwd);
+            reload_workspaces(s);
+            set_status(s, std::string("Workspace: ") + cwd);
+        } else {
+            append_block(s, "Error", "Failed to switch to selected workspace.", s->tagError);
+        }
+    } else {
+        append_block(s, "Error", "Selected workspace does not exist.", s->tagError);
+    }
+    gtk_window_destroy(win);
+}
+
+static void on_chooser_open_clicked(GtkButton*, gpointer user_data) {
+    chooser_activate_row(GTK_WINDOW(user_data));
+}
+
+static void on_chooser_row_activated(GtkListBox*, GtkListBoxRow*, gpointer user_data) {
+    chooser_activate_row(GTK_WINDOW(user_data));
+}
+
+static void open_workspace_chooser(UiState* s) {
+    auto* parent = GTK_WINDOW(gtk_widget_get_root(s->workspace));
+    auto* win = gtk_window_new();
+    gtk_window_set_title(GTK_WINDOW(win), "Select workspace");
+    gtk_window_set_modal(GTK_WINDOW(win), TRUE);
+    gtk_window_set_transient_for(GTK_WINDOW(win), parent);
+    gtk_window_set_default_size(GTK_WINDOW(win), 760, 520);
+
+    auto* root = gtk_box_new(GTK_ORIENTATION_VERTICAL, 8);
+    gtk_widget_set_margin_top(root, 10);
+    gtk_widget_set_margin_bottom(root, 10);
+    gtk_widget_set_margin_start(root, 10);
+    gtk_widget_set_margin_end(root, 10);
+
+    auto* sw = gtk_scrolled_window_new();
+    gtk_widget_set_vexpand(sw, TRUE);
+    auto* list = gtk_list_box_new();
+    gtk_list_box_set_selection_mode(GTK_LIST_BOX(list), GTK_SELECTION_SINGLE);
+
+    std::vector<SessionInfo> all = SessionManager::ListSessions();
+    std::sort(all.begin(), all.end(), [](const SessionInfo& a, const SessionInfo& b) {
+        return a.lastUsed > b.lastUsed;
+    });
+
+    std::string cwd = current_cwd();
+    auto add_row = [&](const std::string& path, const std::string& info) {
+        auto* row = gtk_list_box_row_new();
+        auto* box = gtk_box_new(GTK_ORIENTATION_VERTICAL, 2);
+        auto* l1 = gtk_label_new(path.c_str());
+        auto* l2 = gtk_label_new(info.c_str());
+        gtk_label_set_xalign(GTK_LABEL(l1), 0.0f);
+        gtk_label_set_xalign(GTK_LABEL(l2), 0.0f);
+        gtk_widget_add_css_class(l2, "dim-label");
+        gtk_box_append(GTK_BOX(box), l1);
+        gtk_box_append(GTK_BOX(box), l2);
+        gtk_list_box_row_set_child(GTK_LIST_BOX_ROW(row), box);
+        g_object_set_data_full(G_OBJECT(row), "cwd", g_strdup(path.c_str()), g_free);
+        gtk_list_box_append(GTK_LIST_BOX(list), row);
+    };
+
+    add_row(cwd, "Current workspace");
+    for (const auto& si : all) {
+        if (si.cwd == cwd) continue;
+        std::string meta = si.provider + " / " + si.model + "  ·  " + std::to_string(si.messageCount) + " messages";
+        add_row(si.cwd, meta);
+    }
+
+    gtk_scrolled_window_set_child(GTK_SCROLLED_WINDOW(sw), list);
+
+    auto* actions = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 8);
+    auto* cancel = gtk_button_new_with_label("Cancel");
+    auto* open = gtk_button_new_with_label("Open");
+    gtk_widget_set_halign(actions, GTK_ALIGN_END);
+    gtk_box_append(GTK_BOX(actions), cancel);
+    gtk_box_append(GTK_BOX(actions), open);
+
+    gtk_box_append(GTK_BOX(root), sw);
+    gtk_box_append(GTK_BOX(root), actions);
+    gtk_window_set_child(GTK_WINDOW(win), root);
+
+    g_signal_connect(cancel, "clicked", G_CALLBACK(+[](GtkButton*, gpointer w) {
+        gtk_window_destroy(GTK_WINDOW(w));
+    }), win);
+
+    auto* ctx = new ChooserCtx{s, list};
+    g_object_set_data_full(G_OBJECT(win), "chooser-ctx", ctx, +[](gpointer p) {
+        delete static_cast<ChooserCtx*>(p);
+    });
+
+    g_signal_connect(open, "clicked", G_CALLBACK(on_chooser_open_clicked), win);
+    g_signal_connect(list, "row-activated", G_CALLBACK(on_chooser_row_activated), win);
+
+    gtk_window_present(GTK_WINDOW(win));
+}
+
 static void on_workspace_changed(GtkDropDown*, GParamSpec*, gpointer user_data) {
     auto* s = static_cast<UiState*>(user_data);
     if (s->mutatingWorkspace || s->streaming) return;
@@ -454,6 +569,7 @@ static void set_controls_enabled(UiState* s, bool enabled) {
     gtk_widget_set_sensitive(s->provider, enabled);
     gtk_widget_set_sensitive(s->model, enabled);
     gtk_widget_set_sensitive(s->workspace, enabled);
+    gtk_widget_set_sensitive(s->chooserBtn, enabled);
     gtk_widget_set_sensitive(s->sendBtn, enabled);
 }
 
@@ -594,6 +710,7 @@ static GtkWidget* build_controls(UiState* s) {
     s->sendBtn = gtk_button_new_with_label("Send");
     s->cancelBtn = gtk_button_new_with_label("Cancel");
     gtk_widget_set_visible(s->cancelBtn, FALSE);
+    s->chooserBtn = gtk_button_new_with_label("Chooser");
     s->apiKeyBtn = gtk_button_new_with_label("API Key");
 
     auto* key = gtk_event_controller_key_new();
@@ -602,6 +719,9 @@ static GtkWidget* build_controls(UiState* s) {
     g_signal_connect(key, "key-pressed", G_CALLBACK(on_input_key), s);
     g_signal_connect(s->sendBtn, "clicked", G_CALLBACK(on_send_clicked), s);
     g_signal_connect(s->cancelBtn, "clicked", G_CALLBACK(on_cancel_clicked), s);
+    g_signal_connect(s->chooserBtn, "clicked", G_CALLBACK(+[](GtkButton*, gpointer user_data) {
+        open_workspace_chooser(static_cast<UiState*>(user_data));
+    }), s);
     g_signal_connect(s->apiKeyBtn, "clicked", G_CALLBACK(+[](GtkButton*, gpointer user_data) {
         set_api_key(static_cast<UiState*>(user_data));
     }), s);
@@ -611,6 +731,7 @@ static GtkWidget* build_controls(UiState* s) {
     g_signal_connect(s->model, "notify::selected", G_CALLBACK(on_provider_or_model_changed), s);
 
     gtk_box_append(GTK_BOX(row), s->workspace);
+    gtk_box_append(GTK_BOX(row), s->chooserBtn);
     gtk_box_append(GTK_BOX(row), s->provider);
     gtk_box_append(GTK_BOX(row), s->model);
     gtk_box_append(GTK_BOX(row), s->apiKeyBtn);
