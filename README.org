@@ -1,6 +1,90 @@
 #+TITLE: Gritcode
 #+SUBTITLE: Native coding engine
 
+* ⚠️ GTK4 port abandoned
+
+This branch (~gtk4-wip~) experimented with replacing the custom GPU-rendered
+UI with a GTK4 frontend. *The experiment is over — GTK4 work will not
+continue.* The ~main~ branch is the one under active development.
+
+Why: GTK4 renders via OpenGL, so "GPU-accelerated" is true on both sides, but
+the layers above GL dominate the cost. The hand-rolled pipeline on ~main~
+(HarfBuzz → own glyph cache → direct ~glDrawElements~) is ~2× cheaper per
+character than GTK4's pipeline (Pango → ~GtkTextLayout~ → GSK render-node
+tree → GSK GL renderer), and main only paints when something changes, while
+GTK4's frame clock keeps ticking even when idle.
+
+** Measured comparison (3 runs each, identical MCP workload)
+
+Workload: 3 prompts per run — trivial reply, markdown table + bullets,
+tool-heavy (write_file + read_file + bash × 2). Same ~zen/kimi-k2.5~ backend
+both sides. Same machine, Intel Arc Graphics. ~/proc/[pid]/stat~ and
+~/proc/[pid]/fdinfo/drm-engine-*~ sampled at 200 ms.
+
+| Metric                          |    main (GLFW/GL) | gtk4-wip (GTK4)    | Δ                         |
+|---------------------------------+-------------------+--------------------+---------------------------|
+| avg CPU while busy              |              1.9% | *12.6%*            | 6.6× more                 |
+| peak 1-second CPU               |              8.7% | *26.5%*            | 3.0× more                 |
+| CPU-ms per 1K rendered chars    |              0.71 | *1.38*             | 1.94× more                |
+| RSS peak                        |     *156.8 MiB*   | 143.1 MiB          | GTK 9% leaner             |
+| GPU render time / wall          |             0.49% | *4.53%*            | 9× more                   |
+| GPU render-ms per 1K chars      |              0.20 | *0.50*             | 2.5× more                 |
+| wall-clock per run              |               42s | 14s                | dominated by LLM, not UI  |
+
+** Idle baseline (window open, no MCP traffic, 5 seconds)
+
+| Metric              | main          | gtk4-wip          |
+|---------------------+---------------+-------------------|
+| CPU over 5s         | *0.00 s*      | 0.57 s (~11% core)|
+| GPU render over 5s  | *0.00 s*      | 0.134 s           |
+
+main hits the "0% idle CPU" claim. GTK4 cannot — its frame clock keeps
+breathing.
+
+** Why GTK4 costs more even though both use OpenGL
+
+1. *Pango re-lays out paragraphs on every insert.* A 3-character streaming
+   chunk triggers paragraph-level reshaping and line-breaking. main shapes
+   only the new run with HarfBuzz directly.
+2. *Widget invalidation propagates up the tree.* A buffer edit invalidates
+   ~GtkTextView~, its parents, and triggers a GSK render-node rebuild for
+   that subtree. main has an explicit dirty flag and skips paint entirely
+   when clean.
+3. *GSK emits GL commands per frame regardless.* The frame clock is tied to
+   the compositor — even idle, GTK keeps doing damage/composite work. main
+   draws only when its scroll view is dirty.
+4. *No redraw-only-when-dirty opt-out in GTK4.* The framework owns the loop.
+
+The GL submission stage is fast on both. What costs you is everything
+between your text buffer and that submission — layout engine, widget tree,
+CSS cascade, scene graph. None of that exists on the ~main~ branch.
+
+** What this branch contains
+
+Code left here for reference, not for shipping:
+
+- ~src/gtk4_main.cpp~ — single-file GTK4 frontend
+- ~src/tool_exec.{h,cpp}~ — tool-execution module extracted from ~app.cpp~
+  (kept because a future non-GTK refactor may reuse it)
+- ~CMakeLists.txt~ — ~grit-gtk4~ target, ~cmark-gfm~ dependency
+
+Features that were landed before abandoning:
+
+- Custom scroll anchoring (no autoscroll-on-resize when scrolled up)
+- Window shortcuts (Ctrl+K/O/N/L, Esc-to-cancel)
+- Multi-line input with Enter=send / Shift+Enter=newline
+- ~cmark-gfm~ markdown renderer with H1–H4, lists, blockquotes, inline
+  styles, strikethrough, tables (PangoTabArray column stops)
+- MCP server linked in Debug builds
+- Tool execution (bash/read/write/edit/ls/fetch/search) with multi-turn
+  loop and cancellation hygiene
+- Collapsible per-section thinking blocks
+- ~--session-chooser~ flag
+
+None of it is landing on ~main~.
+
+-----
+
 [[https://gritcode.ai][gritcode.ai]]
 
 GPU-rendered AI coding harness built in C++ with OpenGL, HarfBuzz, and FreeType.
