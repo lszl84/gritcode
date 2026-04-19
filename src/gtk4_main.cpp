@@ -44,6 +44,8 @@ struct UiState {
     GtkWidget* chooserBtn = nullptr;
     GtkWidget* sendBtn = nullptr;
     GtkWidget* cancelBtn = nullptr;
+    GtkWidget* statusExpander = nullptr;
+    GtkWidget* details = nullptr;
 
     GtkStringList* providerList = nullptr;
     GtkStringList* modelList = nullptr;
@@ -72,6 +74,11 @@ static std::string current_cwd() {
 
 static void set_status(UiState* s, const std::string& t) {
     gtk_label_set_text(GTK_LABEL(s->status), t.c_str());
+}
+
+static void set_details(UiState* s, const std::string& t) {
+    if (!s->details) return;
+    gtk_label_set_text(GTK_LABEL(s->details), t.c_str());
 }
 
 static const char* dropdown_selected(GtkWidget* dd, GtkStringList* list) {
@@ -239,6 +246,7 @@ static void load_session_for_cwd(UiState* s, const std::string& cwd) {
     st += "  | Messages: ";
     st += std::to_string(s->session.History().size());
     set_status(s, st);
+    set_details(s, "Provider: " + s->session.Provider() + "\nModel: " + s->session.Model());
 }
 
 static void configure_http(UiState* s) {
@@ -283,6 +291,12 @@ static void fetch_models(UiState* s) {
             if (status == 200) set_status(s, "Models loaded");
             else if (status == 401) set_status(s, "Invalid API key (401)");
             else set_status(s, "Model fetch failed");
+
+            std::string detail = "HTTP: " + std::to_string(status) + "\nModels: " + std::to_string(models.size());
+            if (!models.empty()) {
+                detail += "\nFirst: " + models.front().id;
+            }
+            set_details(s, detail);
         });
     });
 }
@@ -619,6 +633,8 @@ static void on_send_clicked(GtkButton*, gpointer user_data) {
         ? build_anthropic_request(s, model)
         : build_openai_request(s, model);
 
+    set_details(s, req.substr(0, std::min<size_t>(req.size(), 4000)));
+
     set_streaming(s, true);
     append_assistant_header(s);
     set_status(s, "Streaming...");
@@ -648,12 +664,15 @@ static void on_send_clicked(GtkButton*, gpointer user_data) {
                     s->session.MarkDirty();
                     s->session.Save();
                     set_status(s, "Done");
+                    set_details(s, "Response chars: " + std::to_string(content.size()));
                 } else {
                     if (error == "Cancelled") {
                         set_status(s, "Cancelled");
+                        set_details(s, "Request cancelled by user.");
                     } else {
                         append_block(s, "Error", error.c_str(), s->tagError);
                         set_status(s, "Error");
+                        set_details(s, error);
                     }
                 }
 
@@ -668,9 +687,28 @@ static void on_input_activate(GtkEditable*, gpointer user_data) {
     on_send_clicked(nullptr, user_data);
 }
 
+static void on_new_workspace_clicked(GtkButton*, gpointer user_data) {
+    auto* s = static_cast<UiState*>(user_data);
+    s->http.Abort();
+    s->session.NewSession();
+    clear_transcript(s);
+    append_block(s, "System", "New workspace session started.", s->tagAssistant);
+    set_status(s, "New session");
+    reload_workspaces(s);
+}
+
 static gboolean on_input_key(GtkEventControllerKey*, guint keyval, guint, GdkModifierType state, gpointer data) {
+    auto* s = static_cast<UiState*>(data);
     if ((state & GDK_CONTROL_MASK) && keyval == GDK_KEY_Return) {
         on_send_clicked(nullptr, data);
+        return TRUE;
+    }
+    if ((state & GDK_CONTROL_MASK) && keyval == GDK_KEY_k) {
+        clear_transcript(s);
+        return TRUE;
+    }
+    if ((state & GDK_CONTROL_MASK) && keyval == GDK_KEY_o) {
+        open_workspace_chooser(s);
         return TRUE;
     }
     return FALSE;
@@ -711,6 +749,7 @@ static GtkWidget* build_controls(UiState* s) {
     s->cancelBtn = gtk_button_new_with_label("Cancel");
     gtk_widget_set_visible(s->cancelBtn, FALSE);
     s->chooserBtn = gtk_button_new_with_label("Chooser");
+    auto* newWsBtn = gtk_button_new_with_label("New");
     s->apiKeyBtn = gtk_button_new_with_label("API Key");
 
     auto* key = gtk_event_controller_key_new();
@@ -722,6 +761,7 @@ static GtkWidget* build_controls(UiState* s) {
     g_signal_connect(s->chooserBtn, "clicked", G_CALLBACK(+[](GtkButton*, gpointer user_data) {
         open_workspace_chooser(static_cast<UiState*>(user_data));
     }), s);
+    g_signal_connect(newWsBtn, "clicked", G_CALLBACK(on_new_workspace_clicked), s);
     g_signal_connect(s->apiKeyBtn, "clicked", G_CALLBACK(+[](GtkButton*, gpointer user_data) {
         set_api_key(static_cast<UiState*>(user_data));
     }), s);
@@ -732,6 +772,7 @@ static GtkWidget* build_controls(UiState* s) {
 
     gtk_box_append(GTK_BOX(row), s->workspace);
     gtk_box_append(GTK_BOX(row), s->chooserBtn);
+    gtk_box_append(GTK_BOX(row), newWsBtn);
     gtk_box_append(GTK_BOX(row), s->provider);
     gtk_box_append(GTK_BOX(row), s->model);
     gtk_box_append(GTK_BOX(row), s->apiKeyBtn);
@@ -832,12 +873,23 @@ static void activate(GtkApplication* app, gpointer) {
     state->status = gtk_label_new("");
     gtk_widget_set_margin_start(state->status, 10);
     gtk_widget_set_margin_end(state->status, 10);
-    gtk_widget_set_margin_bottom(state->status, 8);
+    gtk_widget_set_margin_bottom(state->status, 4);
     gtk_label_set_xalign(GTK_LABEL(state->status), 0.0f);
+
+    state->statusExpander = gtk_expander_new("Details");
+    gtk_widget_set_margin_start(state->statusExpander, 10);
+    gtk_widget_set_margin_end(state->statusExpander, 10);
+    gtk_widget_set_margin_bottom(state->statusExpander, 8);
+
+    state->details = gtk_label_new("");
+    gtk_label_set_xalign(GTK_LABEL(state->details), 0.0f);
+    gtk_label_set_selectable(GTK_LABEL(state->details), TRUE);
+    gtk_expander_set_child(GTK_EXPANDER(state->statusExpander), state->details);
 
     gtk_box_append(GTK_BOX(root), sw);
     gtk_box_append(GTK_BOX(root), controls);
     gtk_box_append(GTK_BOX(root), state->status);
+    gtk_box_append(GTK_BOX(root), state->statusExpander);
 
     // Initial workspace/session load
     std::string cwd = current_cwd();
