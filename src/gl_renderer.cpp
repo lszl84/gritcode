@@ -142,20 +142,30 @@ void GLRenderer::Shutdown() {
     if (atlasTex_) glDeleteTextures(1, &atlasTex_);
 }
 
-void GLRenderer::BeginFrame(int viewportW, int viewportH, const FontManager& fm) {
+void GLRenderer::BeginFrame(int viewportX, int viewportY,
+                            int viewportW, int viewportH,
+                            int framebufferH, const FontManager& fm) {
+    vpX_ = viewportX;
+    vpY_ = viewportY;
     vpW_ = viewportW;
     vpH_ = viewportH;
+    fbH_ = framebufferH > 0 ? framebufferH : viewportH;
     fm_ = &fm;
     batch_.clear();
     batch_.reserve(16384);  // Pre-allocate for ~2700 quads (avoids realloc)
 
-    glViewport(0, 0, vpW_, vpH_);
+    glViewport(vpX_, vpY_, vpW_, vpH_);
+    // Scissor-clear the viewport rect so the shadow padding around it
+    // stays at whatever transparent color the window set pre-frame.
+    glEnable(GL_SCISSOR_TEST);
+    glScissor(vpX_, vpY_, vpW_, vpH_);
 #ifdef NDEBUG
     glClearColor(0.12f, 0.12f, 0.13f, 1.0f);
 #else
     glClearColor(0.14f, 0.10f, 0.10f, 1.0f);  // Reddish tint in debug
 #endif
     glClear(GL_COLOR_BUFFER_BIT);
+    glDisable(GL_SCISSOR_TEST);
 
     UpdateAtlasTexture();
 }
@@ -285,8 +295,12 @@ void GLRenderer::PushClip(float x, float y, float w, float h) {
     UpdateAtlasTexture();  // Sync atlas before flushing
     FlushBatch();
     glEnable(GL_SCISSOR_TEST);
-    // GL scissor is in bottom-left origin, our coords are top-left
-    glScissor((int)x, vpH_ - (int)(y + h), (int)w, (int)h);
+    // GL scissor is in framebuffer coords (bottom-left origin); our coords
+    // are viewport-top-left. Offset by (vpX_, vpY_) so CSD shadow padding
+    // is respected.
+    glScissor(vpX_ + (int)x,
+              vpY_ + vpH_ - (int)(y + h),
+              (int)w, (int)h);
 }
 
 void GLRenderer::PopClip() {

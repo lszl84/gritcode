@@ -15,12 +15,11 @@
 // along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 #pragma once
-#ifdef __APPLE__
-#define GLFW_INCLUDE_NONE
-#endif
-#include <GLFW/glfw3.h>
 #include <functional>
 #include <string>
+#include <cstdint>
+
+struct RectI { int x, y, w, h; };
 
 class GlfwWindow {
 public:
@@ -31,21 +30,40 @@ public:
     void Show();
     void SetTitle(const char* title);
     bool ShouldClose() const;
+    void RequestClose();
     void PollEvents();
     void WaitEvents();
     void WaitEventsTimeout(double timeout);
     void SwapBuffers();
 
-    int Width() const { return fbW_; }       // framebuffer pixels
-    int Height() const { return fbH_; }
-    int LogicalW() const { return winW_; }
-    int LogicalH() const { return winH_; }
-    // UI scale factor (for sizing fonts, widgets, padding). Derived from
-    // GLFW's content-scale query, which on Wayland/macOS is the compositor
-    // buffer scale and on X11 is the Xft.dpi / XSETTINGS / XRandR-derived
-    // DPI ratio. Previously this returned fbW/winW, which is always 1 on
-    // X11, so grit rendered at 96dpi regardless of the user's HiDPI setting.
-    float Scale() const { return contentScale_; }
+    int Width() const;
+    int Height() const;
+    float Scale() const;
+
+    // CSD framebuffer accounting. With shadow+rounded-corner CSD, the GL
+    // framebuffer is larger than the logical window (shadow padding on all
+    // sides) and the app renders into a content sub-rect that lives inside
+    // the shadow and below the titlebar. Width()/Height() describe that
+    // content rect; these four return the viewport math the renderer
+    // needs (bottom-left origin, framebuffer pixels). Non-CSD cases
+    // collapse to (0, 0) and framebuffer height == Height().
+    int ViewportX() const;
+    int ViewportY() const;
+    int FramebufferH() const;
+
+    // Bind the CSD FBO (if any) so the app renders into it; no-op when
+    // SSD is active. Must be called before GLRenderer::BeginFrame so the
+    // renderer's viewport/clear apply to the right target.
+    void BeginFrame();
+
+    void SetClipboard(const std::string& text);
+
+    void Minimize();
+    void ToggleMaximize();
+    bool IsMaximized() const;
+    void SetTitlebarConfigPx(int height, const RectI& closeBtn);
+
+    static void PostEmptyEvent();
 
     using ResizeCb = std::function<void(int, int, float)>;
     using MouseBtnCb = std::function<void(float, float, bool, bool)>;
@@ -61,25 +79,7 @@ public:
     void OnKeyEvent(KeyCb cb) { keyCb_ = cb; }
     void OnCharEvent(CharCb cb) { charCb_ = cb; }
 
-    void SetClipboard(const std::string& text);
-
-    GLFWwindow* Handle() { return window_; }
-
-private:
-    GLFWwindow* window_ = nullptr;
-    int winW_ = 0, winH_ = 0;    // logical
-    int fbW_ = 0, fbH_ = 0;      // framebuffer
-    // UI scale — derived from glfwGetWindowContentScale. What every widget
-    // sizing site wants. On Wayland/macOS equals the compositor buffer
-    // scale; on X11 equals Xft.dpi/96 (or whatever XSETTINGS reports).
-    float contentScale_ = 1.0f;
-    // Framebuffer-to-logical ratio, needed only to map GLFW's logical
-    // cursor coordinates onto the larger framebuffer on Wayland/macOS.
-    // On X11 this is always 1 (GLFW's "logical" coords are already pixels).
-    float bufferScale_ = 1.0f;
-    double mouseX_ = 0, mouseY_ = 0;
-    bool leftDown_ = false;
-    bool superHeld_ = false;  // Track Cmd/Super for suppressing char events
+    struct Impl;
 
     ResizeCb resizeCb_;
     MouseBtnCb mouseBtnCb_;
@@ -88,13 +88,6 @@ private:
     KeyCb keyCb_;
     CharCb charCb_;
 
-    void UpdateScale();
-
-    static void FramebufferSizeCb(GLFWwindow*, int, int);
-    static void WindowContentScaleCb(GLFWwindow*, float, float);
-    static void MouseButtonCb(GLFWwindow*, int, int, int);
-    static void CursorPosCb(GLFWwindow*, double, double);
-    static void ScrollCallbackCb(GLFWwindow*, double, double);
-    static void KeyCallbackCb(GLFWwindow*, int, int, int, int);
-    static void CharCallbackCb(GLFWwindow*, unsigned int);
+private:
+    Impl* impl_ = nullptr;
 };

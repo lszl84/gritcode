@@ -33,7 +33,13 @@ public:
     bool Init();
     void Shutdown();
 
-    void BeginFrame(int viewportW, int viewportH, const FontManager& fm);
+    // Viewport rect is in framebuffer pixels (bottom-left origin). For
+    // non-CSD/simple windows pass (0, 0, width, height). With CSD shadow
+    // padding the window shifts the app's drawing into the content region
+    // inside the shadow and below the titlebar.
+    void BeginFrame(int viewportX, int viewportY,
+                    int viewportW, int viewportH,
+                    int framebufferH, const FontManager& fm);
     void EndFrame();
 
     void DrawRect(float x, float y, float w, float h, const Color& c);
@@ -52,7 +58,9 @@ private:
     GLuint atlasTex_ = 0;
     GLint locProj_ = -1, locUseTex_ = -1;
 
+    int vpX_ = 0, vpY_ = 0;
     int vpW_ = 0, vpH_ = 0;
+    int fbH_ = 0;
     const FontManager* fm_ = nullptr;
     size_t lastAtlasGen_ = 0;
 

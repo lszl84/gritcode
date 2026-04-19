@@ -15,7 +15,7 @@
 // along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 #pragma once
-#include "window.h"
+#include "glfw_window.h"
 #include "scroll_view.h"
 #include "widgets.h"
 #include "curl_http.h"

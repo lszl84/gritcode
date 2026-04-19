@@ -66,6 +66,7 @@ if(LINUX)
     pkg_check_modules(WAYLAND_CURSOR IMPORTED_TARGET wayland-cursor)
     pkg_check_modules(X11 IMPORTED_TARGET x11)
     pkg_check_modules(XEXT IMPORTED_TARGET xext)
+    pkg_check_modules(XKBCOMMON REQUIRED IMPORTED_TARGET xkbcommon)
 
     find_program(WAYLAND_SCANNER wayland-scanner)
     pkg_get_variable(WAYLAND_PROTOCOLS_DIR wayland-protocols pkgdatadir)
@@ -91,7 +92,6 @@ if(LINUX)
         list(APPEND PROTO_GENERATED ${HEADER} ${SOURCE})
     endforeach()
 
-    list(APPEND GRIT_SOURCES ${PROTO_GENERATED})
 else()
     # macOS / Windows: build from source
     set(GLFW_BUILD_DOCS OFF CACHE BOOL "" FORCE)
@@ -166,6 +166,10 @@ set(GRIT_SOURCES
     src/clipboard.cpp
 )
 
+if(LINUX)
+    list(APPEND GRIT_SOURCES ${PROTO_GENERATED})
+endif()
+
 # MCP is the dev/agent automation channel — it lets scripts/mcp_client.py
 # drive a running grit for testing. Release builds don't need it (and end
 # users aren't expected to script their editor), so we compile it out of
@@ -231,6 +235,7 @@ if(LINUX)
         PkgConfig::WAYLAND_CURSOR
         PkgConfig::X11
         PkgConfig::XEXT
+        PkgConfig::XKBCOMMON
         OpenGL::GL
     )
 else()

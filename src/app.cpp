@@ -2685,7 +2685,11 @@ void App::Run() {
         struct timespec t0, t1;
         clock_gettime(CLOCK_MONOTONIC, &t0);
 
-        renderer_.BeginFrame(window_.Width(), window_.Height(), scrollView_.Fonts());
+        window_.BeginFrame();
+        renderer_.BeginFrame(window_.ViewportX(), window_.ViewportY(),
+                             window_.Width(), window_.Height(),
+                             window_.FramebufferH(),
+                             scrollView_.Fonts());
 
         if (chooserMode_) {
             PaintChooser();
