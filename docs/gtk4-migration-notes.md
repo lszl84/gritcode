@@ -13,9 +13,10 @@ Current status:
 - Model list fetches from backend `/models` and repopulates dropdown.
 - Streaming cancel button is implemented.
 - Basic fenced code-block styling and tool-call transcript rendering are implemented.
+- Workspace chooser dialog is implemented (session list + open on activation).
 
 Next major milestones:
-1. Port chooser mode UX from GL path to GTK4 list UI parity.
+1. Port chooser mode details and interactions closer to GL behavior.
 2. Port richer markdown semantics (lists, inline code, headings) closer to current renderer.
 3. Port full tool-call execution/result block UX parity.
 4. Parity pass for keybindings, scrolling feel, and status/detail fields.
