@@ -14,6 +14,8 @@ Current status:
 - Streaming cancel button is implemented.
 - Basic fenced code-block styling and tool-call transcript rendering are implemented.
 - Workspace chooser dialog is implemented (session list + open on activation).
+- New session action and key shortcuts (`Ctrl+Enter`, `Ctrl+O`, `Ctrl+K`) are wired.
+- Expandable status/details panel is implemented for request/debug visibility.
 
 Next major milestones:
 1. Port chooser mode details and interactions closer to GL behavior.
