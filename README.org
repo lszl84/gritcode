@@ -27,10 +27,12 @@ If you want to see it stabilize faster, [[https://github.com/sponsors/lszl84][sp
 
 ** Quick Start
 
-*** Linux (Arch)
+*** Linux (Ubuntu/Debian)
 
 #+begin_src bash
-sudo pacman -S glfw freetype2 harfbuzz fontconfig curl libsecret
+sudo apt install libfreetype-dev libharfbuzz-dev libfontconfig-dev \
+  libcurl4-openssl-dev libsecret-1-dev cmake ninja-build \
+  libwayland-dev wayland-protocols libxkbcommon-dev libx11-xcb-dev
 
 git clone https://github.com/lszl84/gritcode.git
 cd gritcode
@@ -41,10 +43,14 @@ cmake --install build
 grit
 #+end_src
 
-*** Linux (Ubuntu/Debian)
+GLFW 3.4 is built from source (with Wayland + X11 support) to avoid the
+system =libglfw3= which is X11-only and forces XWayland on GNOME/Zorin.
+
+*** Linux (Arch)
 
 #+begin_src bash
-sudo apt install libglfw3-dev libfreetype-dev libharfbuzz-dev libfontconfig-dev libcurl4-openssl-dev libsecret-1-dev cmake ninja-build
+sudo pacman -S freetype2 harfbuzz fontconfig curl libsecret cmake ninja \
+  wayland wayland-protocols libxkbcommon
 
 git clone https://github.com/lszl84/gritcode.git
 cd gritcode
@@ -89,7 +95,7 @@ On macOS, GLFW, FreeType, HarfBuzz, and curl are fetched and built from source a
 
 - Linux (Wayland or X11) or macOS
 - CMake 3.24+, Ninja, C++23 compiler
-- Linux: glfw3, freetype2, harfbuzz, fontconfig, libcurl, libsecret-1, OpenGL
+- Linux: freetype2, harfbuzz, fontconfig, libcurl, libsecret-1, OpenGL, wayland-protocols, libxkbcommon, libx11-xcb-dev (GLFW 3.4 built from source with Wayland support)
 - macOS: Xcode command line tools (dependencies fetched automatically)
 
 ** Contributing
