@@ -57,6 +57,9 @@ struct UiState {
     GtkTextTag* tagError = nullptr;
     GtkTextTag* tagThinking = nullptr;
     GtkTextTag* tagCode = nullptr;
+    GtkTextTag* tagInlineCode = nullptr;
+    GtkTextTag* tagHeading = nullptr;
+    GtkTextTag* tagBullet = nullptr;
 
     SessionManager session;
     net::CurlHttpClient http;
@@ -148,6 +151,31 @@ static void clear_transcript(UiState* s) {
     gtk_text_buffer_set_text(s->buffer, "", -1);
 }
 
+static void insert_inline_markdown(UiState* s, GtkTextIter* it, const std::string& line, GtkTextTag* normalTag) {
+    size_t i = 0;
+    while (i < line.size()) {
+        size_t tick = line.find('`', i);
+        if (tick == std::string::npos) {
+            std::string tail = line.substr(i);
+            if (!tail.empty()) gtk_text_buffer_insert_with_tags(s->buffer, it, tail.c_str(), -1, normalTag, nullptr);
+            break;
+        }
+        if (tick > i) {
+            std::string plain = line.substr(i, tick - i);
+            gtk_text_buffer_insert_with_tags(s->buffer, it, plain.c_str(), -1, normalTag, nullptr);
+        }
+        size_t end = line.find('`', tick + 1);
+        if (end == std::string::npos) {
+            std::string rest = line.substr(tick);
+            gtk_text_buffer_insert_with_tags(s->buffer, it, rest.c_str(), -1, normalTag, nullptr);
+            break;
+        }
+        std::string code = line.substr(tick + 1, end - tick - 1);
+        gtk_text_buffer_insert_with_tags(s->buffer, it, code.c_str(), -1, s->tagInlineCode, nullptr);
+        i = end + 1;
+    }
+}
+
 static void append_assistant_markdown(UiState* s, const std::string& text) {
     GtkTextIter end;
     gtk_text_buffer_get_end_iter(s->buffer, &end);
@@ -161,17 +189,21 @@ static void append_assistant_markdown(UiState* s, const std::string& text) {
 
         if (line.rfind("```", 0) == 0) {
             inCode = !inCode;
-            if (inCode) {
-                gtk_text_buffer_insert(s->buffer, &end, "\n", 1);
-            } else {
-                gtk_text_buffer_insert(s->buffer, &end, "\n", 1);
-            }
+            gtk_text_buffer_insert(s->buffer, &end, "\n", 1);
+        } else if (inCode) {
+            gtk_text_buffer_insert_with_tags(s->buffer, &end, line.c_str(), -1, s->tagCode, nullptr);
+            gtk_text_buffer_insert(s->buffer, &end, "\n", 1);
+        } else if (line.rfind("### ", 0) == 0 || line.rfind("## ", 0) == 0 || line.rfind("# ", 0) == 0) {
+            size_t off = (line[1] == '#') ? ((line[2] == '#') ? 4 : 3) : 2;
+            std::string heading = line.substr(off);
+            gtk_text_buffer_insert_with_tags(s->buffer, &end, heading.c_str(), -1, s->tagHeading, nullptr);
+            gtk_text_buffer_insert(s->buffer, &end, "\n", 1);
+        } else if (line.rfind("- ", 0) == 0 || line.rfind("* ", 0) == 0) {
+            gtk_text_buffer_insert_with_tags(s->buffer, &end, "• ", -1, s->tagBullet, nullptr);
+            insert_inline_markdown(s, &end, line.substr(2), s->tagAssistant);
+            gtk_text_buffer_insert(s->buffer, &end, "\n", 1);
         } else {
-            gtk_text_buffer_insert_with_tags(
-                s->buffer, &end,
-                line.c_str(), -1,
-                inCode ? s->tagCode : s->tagAssistant,
-                nullptr);
+            insert_inline_markdown(s, &end, line, s->tagAssistant);
             gtk_text_buffer_insert(s->buffer, &end, "\n", 1);
         }
 
@@ -822,6 +854,26 @@ static void setup_tags(UiState* s) {
         "family", "monospace",
         "pixels-above-lines", 2,
         "pixels-below-lines", 2,
+        nullptr);
+
+    s->tagInlineCode = gtk_text_buffer_create_tag(
+        s->buffer, "inline-code",
+        "foreground", "#EBCB8B",
+        "background", "#1E222A",
+        "family", "monospace",
+        nullptr);
+
+    s->tagHeading = gtk_text_buffer_create_tag(
+        s->buffer, "heading",
+        "foreground", "#ECEFF4",
+        "weight", 700,
+        "scale", 1.07,
+        nullptr);
+
+    s->tagBullet = gtk_text_buffer_create_tag(
+        s->buffer, "bullet",
+        "foreground", "#81A1C1",
+        "weight", 700,
         nullptr);
 }
 
