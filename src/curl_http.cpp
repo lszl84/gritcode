@@ -424,6 +424,11 @@ void CurlHttpClient::SendStreaming(
             return;
         }
 
+        // Curl error buffer for detailed diagnostics on failures like
+        // "HTTP/2 framing layer" errors.
+        char errBuf[CURL_ERROR_SIZE] = {0};
+        curl_easy_setopt(curl, CURLOPT_ERRORBUFFER, errBuf);
+
         // OpenAI-compat and Anthropic use different endpoint paths and
         // different auth headers even though they share the same base URL
         // and API key on the zen gateway.
@@ -492,7 +497,66 @@ void CurlHttpClient::SendStreaming(
         }
         curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers);
 
+        // First attempt: let curl negotiate (usually HTTP/2 via ALPN).
+        // On HTTP/2 framing errors, retry once with HTTP/1.1.
         CURLcode res = curl_easy_perform(curl);
+
+        if (res == CURLE_HTTP2_STREAM) {
+            fprintf(stderr, "[DEBUG] HTTP/2 framing error, retrying with HTTP/1.1\n");
+            // Clean up and re-create the handle for a fresh connection
+            curl_slist_free_all(headers);
+            curl_easy_cleanup(curl);
+
+            curl = curl_easy_init();
+            if (!curl) {
+                onComplete(false, "", "Failed to init curl on HTTP/1.1 retry", {}, "", 0, 0, "");
+                return;
+            }
+            char errBuf2[CURL_ERROR_SIZE] = {0};
+            curl_easy_setopt(curl, CURLOPT_ERRORBUFFER, errBuf2);
+            memcpy(errBuf, errBuf2, CURL_ERROR_SIZE);
+
+            curl_easy_setopt(curl, CURLOPT_URL, url.c_str());
+            curl_easy_setopt(curl, CURLOPT_POST, 1L);
+            curl_easy_setopt(curl, CURLOPT_POSTFIELDS, requestJson.c_str());
+            curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, isAnth ? WriteCallbackAnthropic : WriteCallback);
+            curl_easy_setopt(curl, CURLOPT_WRITEDATA, &ctx);
+            curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT, 15L);
+            curl_easy_setopt(curl, CURLOPT_NOPROGRESS, 0L);
+            curl_easy_setopt(curl, CURLOPT_XFERINFOFUNCTION,
+                +[](void* p, curl_off_t, curl_off_t, curl_off_t, curl_off_t) -> int {
+                    auto* ctx = static_cast<StreamCtx*>(p);
+                    if (ctx->aborted->load()) return 1;
+                    struct timespec ts;
+                    clock_gettime(CLOCK_MONOTONIC, &ts);
+                    double now = ts.tv_sec + ts.tv_nsec / 1e9;
+                    double last = ctx->lastContentTime.load();
+                    if (last > 0) {
+                        if (now - last > 300.0) return 1;
+                    } else {
+                        if (now - ctx->startTime > 600.0) return 1;
+                    }
+                    return 0;
+                });
+            curl_easy_setopt(curl, CURLOPT_XFERINFODATA, &ctx);
+
+            // Force HTTP/1.1
+            curl_easy_setopt(curl, CURLOPT_HTTP_VERSION, CURL_HTTP_VERSION_1_1);
+
+            // Rebuild headers
+            headers = curl_slist_append(nullptr, "Content-Type: application/json");
+            headers = curl_slist_append(headers, "Accept: text/event-stream");
+            if (isAnth) {
+                headers = curl_slist_append(headers, "anthropic-version: 2023-06-01");
+                headers = curl_slist_append(headers, ("x-api-key: " + apiKey_).c_str());
+            } else {
+                headers = curl_slist_append(headers, ("Authorization: Bearer " + apiKey_).c_str());
+            }
+            curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers);
+
+            res = curl_easy_perform(curl);
+            if (errBuf2[0] != '\0') memcpy(errBuf, errBuf2, CURL_ERROR_SIZE);
+        }
 
         long httpCode = 0;
         curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &httpCode);
@@ -518,6 +582,9 @@ void CurlHttpClient::SendStreaming(
 
         if (res != CURLE_OK || httpCode >= 400) {
             std::string err;
+            std::string curlDetail;
+            if (errBuf[0] != '\0') curlDetail = errBuf;
+
             if (res != CURLE_OK && res == CURLE_ABORTED_BY_CALLBACK && !aborted_.load()) {
                 // Progress callback aborted — distinguish the two timeout cases.
                 double last = ctx.lastContentTime.load();
@@ -527,7 +594,12 @@ void CurlHttpClient::SendStreaming(
                     err = "No response from server (600s timeout)";
             } else {
                 err = "HTTP " + std::to_string(httpCode);
-                if (res != CURLE_OK) err = curl_easy_strerror(res);
+                if (res != CURLE_OK) {
+                    err += " " + std::string(curl_easy_strerror(res));
+                    if (!curlDetail.empty()) {
+                        err += " (" + curlDetail + ")";
+                    }
+                }
             }
             // Include the response body so the user sees the server's error
             // message (rate limit details, auth errors, etc.)
@@ -547,6 +619,12 @@ void CurlHttpClient::SendStreaming(
                 } catch (...) {}
                 if (body.size() > 500) body.resize(500);
                 err += " — " + body;
+            } else if (!curlDetail.empty()) {
+                // No body but we have curl's internal error detail
+                rawBody = "Curl error detail:\n" + curlDetail +
+                          "\n\nHTTP code: " + std::to_string(httpCode) +
+                          "\nCurl result: " + std::to_string(res) +
+                          " (" + curl_easy_strerror(res) + ")";
             }
             onComplete(false, ctx.accContent, err, {}, ctx.finishReason, 0, 0, rawBody);
         } else {
