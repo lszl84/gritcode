@@ -70,6 +70,8 @@ public:
     void Update(float dt);
 
     size_t BlockCount() const { return blocks_.size(); }
+    std::vector<std::unique_ptr<TextBlock>>& Blocks() { return blocks_; }
+    void RequestRebuild() { needsFullRebuild_ = true; }
     FontManager& Fonts() { return fonts_; }
     Color BgColor() const { return bgColor_; }
 

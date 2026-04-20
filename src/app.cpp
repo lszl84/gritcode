@@ -1464,6 +1464,32 @@ void App::AppendSystem(const std::string& text) {
     MarkDirty();
 }
 
+void App::AppendSystemExpandable(const std::string& summary, const std::string& detail) {
+    if (detail.empty()) {
+        AppendSystem(summary);
+        return;
+    }
+    scrollView_.AppendStream(BlockType::THINKING, summary);
+    // Set the expand text on the newly created block
+    auto& last = scrollView_.Blocks().back();
+    // Try to pretty-print JSON detail
+    if (!detail.empty()) {
+        try {
+            auto j = json::parse(detail);
+            std::string dumped = j.dump(2);
+            if (dumped.size() > 10000) dumped.resize(10000);
+            last->expandText = dumped;
+        } catch (...) {
+            last->expandText = detail.size() > 10000 ? detail.substr(0, 10000) : detail;
+        }
+    }
+    // Force expandable + collapsed so user can click to expand
+    last->isExpandable = true;
+    last->isCollapsed = true;
+    scrollView_.RequestRebuild();
+    MarkDirty();
+}
+
 // ============================================================================
 // Sending messages
 // ============================================================================
@@ -2055,8 +2081,8 @@ void App::DoSendToProvider() {
         // onComplete (bg thread)
         [this](bool ok, const std::string& content, const std::string& error,
                const std::vector<json>& toolCalls, const std::string& finishReason,
-               int, int) {
-            events_.Push([this, ok, content, error, toolCalls, finishReason]() {
+               int, int, const std::string& rawBody) {
+            events_.Push([this, ok, content, error, toolCalls, finishReason, rawBody]() {
                 if (!ok) {
                     if (!session_.History().empty() && session_.History().back().role == "user")
                         session_.History().pop_back();
@@ -2065,10 +2091,12 @@ void App::DoSendToProvider() {
                         // (quota/rate-limit/billing blips on Zen) and a single
                         // failed request is not enough reason to nuke a secret
                         // the user may not have backed up anywhere else.
-                        AppendSystem("Unauthorized (HTTP 401). Key was not cleared — retry, or replace it manually via the key button if it's really invalid.");
+                        AppendSystemExpandable(
+                            "Unauthorized (HTTP 401). Key was not cleared — retry, or replace it manually via the key button if it's really invalid.",
+                            rawBody);
                         statusLabel_.text = "Unauthorized";
                     } else {
-                        AppendSystem("Error: " + error);
+                        AppendSystemExpandable("Error: " + error, rawBody);
                     }
                     requestInProgress_ = false;
                     sendButton_.enabled = true;

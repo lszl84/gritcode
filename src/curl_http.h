@@ -76,7 +76,8 @@ public:
                            const std::string& error,
                            const std::vector<json>& toolCalls,
                            const std::string& finishReason,
-                           int inTok, int outTok)> onComplete
+                           int inTok, int outTok,
+                           const std::string& rawBody)> onComplete
     );
 
     void Abort();

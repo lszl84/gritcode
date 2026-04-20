@@ -395,7 +395,7 @@ void CurlHttpClient::SendStreaming(
     std::function<void(const std::string&, bool)> onChunk,
     std::function<void(bool, const std::string&, const std::string&,
                        const std::vector<json>&, const std::string&,
-                       int, int)> onComplete) {
+                       int, int, const std::string&)> onComplete) {
 
     // Abort any in-flight request and detach its thread (don't block main thread)
     Abort();
@@ -405,7 +405,7 @@ void CurlHttpClient::SendStreaming(
     requestThread_ = std::thread([this, protocol, requestJson, onChunk, onComplete]() {
         CURL* curl = curl_easy_init();
         if (!curl) {
-            onComplete(false, "", "Failed to init curl", {}, "", 0, 0);
+            onComplete(false, "", "Failed to init curl", {}, "", 0, 0, "");
             return;
         }
 
@@ -448,9 +448,9 @@ void CurlHttpClient::SendStreaming(
                 double now = ts.tv_sec + ts.tv_nsec / 1e9;
                 double last = ctx->lastContentTime.load();
                 if (last > 0) {
-                    if (now - last > 120.0) return 1;  // stalled mid-stream
+                    if (now - last > 300.0) return 1;  // stalled mid-stream
                 } else {
-                    if (now - ctx->startTime > 240.0) return 1;  // no first byte
+                    if (now - ctx->startTime > 600.0) return 1;  // no first byte
                 }
                 return 0;
             });
@@ -483,7 +483,7 @@ void CurlHttpClient::SendStreaming(
         curl_easy_cleanup(curl);
 
         if (aborted_.load()) {
-            onComplete(false, ctx.accContent, "Cancelled", {}, "", 0, 0);
+            onComplete(false, ctx.accContent, "Cancelled", {}, "", 0, 0, "");
             return;
         }
 
@@ -500,12 +500,23 @@ void CurlHttpClient::SendStreaming(
         }
 
         if (res != CURLE_OK || httpCode >= 400) {
-            std::string err = "HTTP " + std::to_string(httpCode);
-            if (res != CURLE_OK) err = curl_easy_strerror(res);
+            std::string err;
+            if (res != CURLE_OK && res == CURLE_ABORTED_BY_CALLBACK && !aborted_.load()) {
+                // Progress callback aborted — distinguish the two timeout cases.
+                double last = ctx.lastContentTime.load();
+                if (last > 0)
+                    err = "Stream stalled (no data for 300s)";
+                else
+                    err = "No response from server (600s timeout)";
+            } else {
+                err = "HTTP " + std::to_string(httpCode);
+                if (res != CURLE_OK) err = curl_easy_strerror(res);
+            }
             // Include the response body so the user sees the server's error
             // message (rate limit details, auth errors, etc.)
             std::string body = ctx.sseBuffer;
             if (body.empty()) body = ctx.accContent;
+            std::string rawBody = body;  // keep full body for expandable details
             if (!body.empty()) {
                 // Try to extract a message from JSON error responses
                 try {
@@ -520,9 +531,9 @@ void CurlHttpClient::SendStreaming(
                 if (body.size() > 500) body.resize(500);
                 err += " — " + body;
             }
-            onComplete(false, ctx.accContent, err, {}, ctx.finishReason, 0, 0);
+            onComplete(false, ctx.accContent, err, {}, ctx.finishReason, 0, 0, rawBody);
         } else {
-            onComplete(true, ctx.accContent, "", toolCallsJson, ctx.finishReason, 0, 0);
+            onComplete(true, ctx.accContent, "", toolCallsJson, ctx.finishReason, 0, 0, "");
         }
     });
 }

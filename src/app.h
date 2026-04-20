@@ -158,6 +158,7 @@ private:
     void PopulateWorkspaceDropdown();
     void ShowApiKeyDialog();
     void AppendSystem(const std::string& text);
+    void AppendSystemExpandable(const std::string& summary, const std::string& detail);
 
     // Tool execution
     void ExecuteToolCalls(const std::vector<json>& toolCalls, const std::string& content);

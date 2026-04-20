@@ -82,6 +82,7 @@ struct TextBlock {
     int bottomSpacing = 0;
     bool isCollapsed = false;
     bool isExpandable = false;  // True if block wraps to more than 1 line
+    std::string expandText;     // Full detail text shown when expanded (e.g. raw JSON for errors)
 
     TextBlock() : type(BlockType::NORMAL) {}
     TextBlock(BlockType t, const std::string& txt, bool rtl = false)

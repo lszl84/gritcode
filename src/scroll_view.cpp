@@ -875,32 +875,55 @@ void ScrollView::RebuildSingleBlock(size_t i, float textAreaW, float clientW) {
     shapedCache_[i].clear();
 
     if (block.type == BlockType::THINKING) {
-        block.isExpandable = (wrappedCache_[i].size() > 1);
-        if (!block.isExpandable && !block.isLoading) block.isCollapsed = false;
+        // When expandText is set, the block is always expandable.
+        // Collapsed shows summary; expanded shows summary + detail.
+        if (!block.expandText.empty()) {
+            block.isExpandable = true;
+            if (block.isCollapsed) {
+                // Collapsed: just the summary line(s), truncated to 1 line
+                float firstH = wrappedCache_[i][0].height;
+                wrappedCache_[i].resize(1);
+                h = firstH;
+            } else {
+                // Expanded: re-lay out with summary + detail
+                std::string fullText = block.text + "\n\n" + block.expandText;
+                // Temporarily swap text for segment measurement
+                std::string origText = block.text;
+                block.text = fullText;
+                segValid_[i] = false;
+                MeasureSegments(i);
+                block.text = origText;
+                LayoutFromSegments(i, textAreaW, clientW, wrappedCache_[i], h);
+                shapedCache_[i].clear();
+            }
+        } else {
+            block.isExpandable = (wrappedCache_[i].size() > 1);
+            if (!block.isExpandable && !block.isLoading) block.isCollapsed = false;
 
-        if (block.isCollapsed && block.isExpandable) {
-            float firstH = wrappedCache_[i][0].height;
-            wrappedCache_[i].resize(1);
-            h = firstH;
+            if (block.isCollapsed && block.isExpandable) {
+                float firstH = wrappedCache_[i][0].height;
+                wrappedCache_[i].resize(1);
+                h = firstH;
 
-            if (block.isLoading) {
-                float ch = fonts_.LineHeight(FontStyle::ThinkingItalic);
-                float dotSpace = ch * 2.5f;
-                float maxTextW = textAreaW - dotSpace - 20;
-                auto& wl = wrappedCache_[i][0];
-                if (wl.width > maxTextW && !wl.text.empty()) {
-                    std::string truncated = wl.text;
-                    while (!truncated.empty() && fonts_.MeasureWidth(truncated, FontStyle::ThinkingItalic) > maxTextW) {
-                        size_t sp = truncated.rfind(' ');
-                        if (sp == std::string::npos) { truncated.clear(); break; }
-                        truncated = truncated.substr(0, sp);
+                if (block.isLoading) {
+                    float ch = fonts_.LineHeight(FontStyle::ThinkingItalic);
+                    float dotSpace = ch * 2.5f;
+                    float maxTextW = textAreaW - dotSpace - 20;
+                    auto& wl = wrappedCache_[i][0];
+                    if (wl.width > maxTextW && !wl.text.empty()) {
+                        std::string truncated = wl.text;
+                        while (!truncated.empty() && fonts_.MeasureWidth(truncated, FontStyle::ThinkingItalic) > maxTextW) {
+                            size_t sp = truncated.rfind(' ');
+                            if (sp == std::string::npos) { truncated.clear(); break; }
+                            truncated = truncated.substr(0, sp);
+                        }
+                        if (!truncated.empty() && truncated.size() < wl.text.size())
+                            truncated += "\xe2\x80\xa6";
+                        wl.text = truncated;
+                        wl.width = fonts_.MeasureWidth(truncated, FontStyle::ThinkingItalic);
+                        wl.shapedValid = false;
+                        shapedCache_[i].clear();
                     }
-                    if (!truncated.empty() && truncated.size() < wl.text.size())
-                        truncated += "\xe2\x80\xa6";
-                    wl.text = truncated;
-                    wl.width = fonts_.MeasureWidth(truncated, FontStyle::ThinkingItalic);
-                    wl.shapedValid = false;
-                    shapedCache_[i].clear();
                 }
             }
         }
