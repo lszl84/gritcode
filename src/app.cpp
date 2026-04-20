@@ -2161,45 +2161,6 @@ void App::DoSendToProvider() {
                     return;
                 }
 
-                // Some models (especially smaller ones) say things like "I'll now
-                // create the file:" and then stop with finish_reason "stop" without
-                // actually calling any tools. Detect this pattern and auto-continue
-                // with a nudge to actually use the tools.
-                if (toolCalls.empty() && !content.empty() && toolRound_ < 40) {
-                    bool looksLikeIntent = false;
-                    std::string lower;
-                    lower.reserve(content.size());
-                    for (char c : content) lower.push_back((char)std::tolower((unsigned char)c));
-                    // Check if the text ends with a colon or trailing phrase indicating
-                    // the model was about to act but stopped.
-                    std::string trimmed = lower;
-                    while (!trimmed.empty() && (trimmed.back() == ' ' || trimmed.back() == '\n' || trimmed.back() == '\r' || trimmed.back() == '\t'))
-                        trimmed.pop_back();
-                    // Ends with colon or "now" or similar intent markers
-                    for (const auto& s : {":", "now", "next", "follows", "here:", "below:", "proceeding"}) {
-                        std::string sv(s);
-                        if (trimmed.size() >= sv.size() &&
-                            trimmed.compare(trimmed.size() - sv.size(), sv.size(), sv) == 0) {
-                            looksLikeIntent = true;
-                            break;
-                        }
-                    }
-                    if (looksLikeIntent) {
-                        fprintf(stderr, "[DEBUG] Model stopped mid-intent, auto-continuing. Content: '%s'\n",
-                            content.substr(content.size() > 200 ? content.size() - 200 : 0).c_str());
-                        session_.History().push_back({"assistant", content, {}, {}});
-                        session_.History().push_back({"user", "[system: continue — use your tools to actually do what you described]", {}, {}});
-                        toolRound_++;
-                        if (!responseBuffer_.empty()) {
-                            RenderMarkdownToBlocks(true);
-                            responseBuffer_.clear();
-                        }
-                        DoSendToProvider();
-                        MarkDirty();
-                        return;
-                    }
-                }
-
                 // Finalize thinking
                 if (receivingThinking_) {
                     receivingThinking_ = false;

@@ -152,7 +152,11 @@ size_t CurlHttpClient::WriteCallback(char* data, size_t size, size_t nmemb, void
                             }
                         }
                     }
-                } catch (...) {}
+                } catch (const std::exception& e) {
+                    fprintf(stderr, "[DEBUG-SSE] JSON parse error: %s in: %s\n", e.what(), jsonData.substr(0, 200).c_str());
+                } catch (...) {
+                    fprintf(stderr, "[DEBUG-SSE] Unknown parse error in: %s\n", jsonData.substr(0, 200).c_str());
+                }
             }
         }
     }
@@ -267,7 +271,11 @@ size_t CurlHttpClient::WriteCallbackAnthropic(char* data, size_t size, size_t nm
                     return 0;
                 }
                 // message_start / message_stop / ping: nothing to do.
-            } catch (...) {}
+            } catch (const std::exception& e) {
+                fprintf(stderr, "[DEBUG-SSE-ANTH] JSON parse error: %s\n", e.what());
+            } catch (...) {
+                fprintf(stderr, "[DEBUG-SSE-ANTH] Unknown parse error\n");
+            }
         }
     }
     return bytes;
