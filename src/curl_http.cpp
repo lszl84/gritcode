@@ -445,6 +445,7 @@ void CurlHttpClient::SendStreaming(
         curl_easy_setopt(curl, CURLOPT_POSTFIELDS, requestJson.c_str());
         fprintf(stderr, "[DEBUG-REQUEST] protocol=%s url=%s bodySize=%zu\n",
             isAnth ? "anthropic" : "openai", url.c_str(), requestJson.size());
+        fprintf(stderr, "[DEBUG-REQUEST-BODY] %s\n", requestJson.substr(0, 3000).c_str());
         curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, isAnth ? WriteCallbackAnthropic : WriteCallback);
         curl_easy_setopt(curl, CURLOPT_WRITEDATA, &ctx);
 
@@ -610,6 +611,7 @@ void CurlHttpClient::SendStreaming(
                 // Try to extract a message from JSON error responses
                 try {
                     auto j = json::parse(body);
+                    fprintf(stderr, "[DEBUG-ERROR-BODY] %s\n", j.dump(2).substr(0, 2000).c_str());
                     if (j.contains("error") && j["error"].is_object() && j["error"].contains("message"))
                         body = j["error"]["message"].get<std::string>();
                     else if (j.contains("error") && j["error"].is_string())

@@ -24,6 +24,7 @@ struct ChatMessage {
     std::string content;
     std::vector<nlohmann::json> toolCalls;
     std::string toolCallId;
+    std::string reasoningContent;  // Thinking/reasoning text from models like Kimi K2.5
 };
 
 struct SessionInfo {

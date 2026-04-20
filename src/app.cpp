@@ -1563,6 +1563,18 @@ std::string App::BuildRequestJson() {
                                {"function", {{"name", tc["name"]}, {"arguments", tc["arguments"]}}}});
             }
             msg["tool_calls"] = tcs;
+            // Models like Kimi K2.5 require reasoning_content on assistant
+            // tool-call messages when thinking is enabled, even if empty.
+            if (!m.reasoningContent.empty()) {
+                msg["reasoning_content"] = m.reasoningContent;
+            } else {
+                msg["reasoning_content"] = json(nullptr);
+            }
+        } else if (m.role == "assistant") {
+            msg["content"] = m.content;
+            if (!m.reasoningContent.empty()) {
+                msg["reasoning_content"] = m.reasoningContent;
+            }
         } else {
             msg["content"] = m.content;
         }
@@ -2051,6 +2063,7 @@ void App::DoSendToProvider() {
         : BuildRequestJson();
 
     responseBuffer_.clear();
+    reasoningBuffer_.clear();
     receivingThinking_ = false;
     lastMarkdownLen_ = 0;
     lastMarkdownTime_ = GetMonotonicTime();
@@ -2063,6 +2076,7 @@ void App::DoSendToProvider() {
         [this](const std::string& chunk, bool isThinking) {
             events_.Push([this, chunk, isThinking]() {
                 if (isThinking) {
+                    reasoningBuffer_ += chunk;  // Accumulate for history replay
                     if (!receivingThinking_) {
                         receivingThinking_ = true;
                         scrollView_.AppendStream(BlockType::THINKING, chunk);
@@ -2226,8 +2240,14 @@ void App::RenderMarkdownToBlocks(bool isFinal) {
 void App::ExecuteToolCalls(const std::vector<json>& toolCalls, const std::string& content) {
     toolRound_++;
 
-    // Add assistant message with tool calls
-    session_.History().push_back({"assistant", content, toolCalls, {}});
+    // Add assistant message with tool calls (include reasoning if any)
+    ChatMessage assistantMsg;
+    assistantMsg.role = "assistant";
+    assistantMsg.content = content;
+    assistantMsg.toolCalls = toolCalls;
+    assistantMsg.reasoningContent = reasoningBuffer_;
+    session_.History().push_back(std::move(assistantMsg));
+    reasoningBuffer_.clear();  // Don't double-count in next round
 
     // Show tool info in thinking block
     std::string info;

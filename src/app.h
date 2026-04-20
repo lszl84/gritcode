@@ -127,6 +127,7 @@ private:
 
     // Streaming state
     std::string responseBuffer_;
+    std::string reasoningBuffer_;  // Accumulated thinking/reasoning from models like Kimi K2.5
     bool receivingThinking_ = false;
     size_t responseStartBlock_ = 0;
     size_t lastMarkdownLen_ = 0;
