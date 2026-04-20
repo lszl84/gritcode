@@ -93,7 +93,10 @@ size_t CurlHttpClient::WriteCallback(char* data, size_t size, size_t nmemb, void
 
                 try {
                     auto j = json::parse(jsonData);
-                    if (!j.contains("choices") || j["choices"].empty()) continue;
+                    if (!j.contains("choices") || j["choices"].empty()) {
+                        fprintf(stderr, "[DEBUG-SSE] No choices in: %s\n", jsonData.c_str());
+                        continue;
+                    }
                     const auto& choice = j["choices"][0];
 
                     // Mark that we received actual API data (not just keepalive)
@@ -104,9 +107,13 @@ size_t CurlHttpClient::WriteCallback(char* data, size_t size, size_t nmemb, void
                     // Track finish_reason
                     if (choice.contains("finish_reason") && choice["finish_reason"].is_string()) {
                         ctx->finishReason = choice["finish_reason"].get<std::string>();
+                        fprintf(stderr, "[DEBUG-SSE] finish_reason=%s\n", ctx->finishReason.c_str());
                     }
 
-                    if (!choice.contains("delta")) continue;
+                    if (!choice.contains("delta")) {
+                        fprintf(stderr, "[DEBUG-SSE] No delta in choice: %s\n", jsonData.substr(0, 200).c_str());
+                        continue;
+                    }
                     const auto& delta = choice["delta"];
 
                     // Content
@@ -423,6 +430,8 @@ void CurlHttpClient::SendStreaming(
         curl_easy_setopt(curl, CURLOPT_URL, url.c_str());
         curl_easy_setopt(curl, CURLOPT_POST, 1L);
         curl_easy_setopt(curl, CURLOPT_POSTFIELDS, requestJson.c_str());
+        fprintf(stderr, "[DEBUG-REQUEST] protocol=%s url=%s bodySize=%zu\n",
+            isAnth ? "anthropic" : "openai", url.c_str(), requestJson.size());
         curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, isAnth ? WriteCallbackAnthropic : WriteCallback);
         curl_easy_setopt(curl, CURLOPT_WRITEDATA, &ctx);
 
@@ -537,6 +546,12 @@ void CurlHttpClient::SendStreaming(
             // empty (empty response debugging).
             std::string rawBody = ctx.sseBuffer;
             if (rawBody.empty()) rawBody = ctx.accContent;
+            fprintf(stderr, "[DEBUG-COMPLETE] ok=true accContent=%zu rawBody=%zu finishReason='%s' toolCalls=%zu\n",
+                ctx.accContent.size(), rawBody.size(), ctx.finishReason.c_str(), toolCallsJson.size());
+            if (ctx.accContent.empty() && toolCallsJson.empty()) {
+                fprintf(stderr, "[DEBUG-COMPLETE] EMPTY RESPONSE! Raw SSE (first 2000 chars):\n%s\n",
+                    rawBody.substr(0, 2000).c_str());
+            }
             onComplete(true, ctx.accContent, "", toolCallsJson, ctx.finishReason, 0, 0, rawBody);
         }
     });

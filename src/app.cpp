@@ -1758,6 +1758,7 @@ void App::SendMessage() {
     messageInput_.Clear();
 
     session_.History().push_back({"user", msg, {}, {}});
+    session_.Save();
     requestInProgress_ = true;
     sendButton_.enabled = false;
     toolRound_ = 0;
@@ -2262,6 +2263,7 @@ void App::ExecuteToolCalls(const std::vector<json>& toolCalls, const std::string
             for (size_t i = 0; i < results.size(); i++) {
                 session_.History().push_back({"tool", results[i].output, {}, results[i].id});
             }
+            session_.Save();
 
             scrollView_.StopThinking(scrollView_.BlockCount() - 1);
             DoSendToProvider();  // Continue the loop
@@ -2314,6 +2316,7 @@ void App::CancelInFlight() {
             session_.History().push_back({"assistant", "[cancelled]", {}, {}});
         }
     }
+    session_.Save();
     scrollView_.StopAllAnimations();
     receivingThinking_ = false;
     responseBuffer_.clear();
