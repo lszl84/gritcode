@@ -34,7 +34,7 @@ sudo apt install libfreetype-dev libharfbuzz-dev libfontconfig-dev \
   libcurl4-openssl-dev libsecret-1-dev cmake ninja-build \
   libopengl-dev libegl-dev \
   libwayland-dev wayland-protocols libxkbcommon-dev \
-  libx11-xcb-dev libxext-dev libxrandr-dev
+  libx11-xcb-dev libxext-dev libxrandr-dev libxinerama-dev
 
 git clone https://github.com/lszl84/gritcode.git
 cd gritcode
@@ -52,7 +52,7 @@ system =libglfw3= which is X11-only and forces XWayland on GNOME/Zorin.
 
 #+begin_src bash
 sudo pacman -S freetype2 harfbuzz fontconfig curl libsecret cmake ninja \
-  mesa libxrandr libxkbcommon wayland wayland-protocols
+  mesa libxrandr libxinerama libxkbcommon wayland wayland-protocols
 
 git clone https://github.com/lszl84/gritcode.git
 cd gritcode
@@ -70,7 +70,7 @@ sudo dnf install freetype-devel harfbuzz-devel fontconfig-devel \
   libcurl-devel libsecret-devel cmake ninja-build \
   mesa-libGL-devel mesa-libEGL-devel \
   wayland-devel wayland-protocols libxkbcommon-devel \
-  libX11-devel libXext-devel libXrandr-devel
+  libX11-devel libXext-devel libXrandr-devel libXinerama-devel
 
 git clone https://github.com/lszl84/gritcode.git
 cd gritcode
