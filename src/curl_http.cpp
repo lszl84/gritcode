@@ -533,7 +533,11 @@ void CurlHttpClient::SendStreaming(
             }
             onComplete(false, ctx.accContent, err, {}, ctx.finishReason, 0, 0, rawBody);
         } else {
-            onComplete(true, ctx.accContent, "", toolCallsJson, ctx.finishReason, 0, 0, "");
+            // Pass raw SSE data even on success — needed when content ends up
+            // empty (empty response debugging).
+            std::string rawBody = ctx.sseBuffer;
+            if (rawBody.empty()) rawBody = ctx.accContent;
+            onComplete(true, ctx.accContent, "", toolCallsJson, ctx.finishReason, 0, 0, rawBody);
         }
     });
 }

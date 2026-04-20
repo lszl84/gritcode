@@ -2008,7 +2008,10 @@ void App::DoSendToProvider() {
                 if (!fullResponse.empty()) {
                     session_.History().push_back({"assistant", fullResponse, {}, {}});
                 } else if (responseBuffer_.empty()) {
-                    AppendSystem("Empty response from model");
+                    AppendSystemExpandable("Empty response from model",
+                        "The Claude subprocess returned no content.\n\n"
+                        "Provider: " + activeProvider_ + "\n"
+                        "Model: " + activeModel_);
                 }
                 requestInProgress_ = false;
                 sendButton_.enabled = true;
@@ -2153,7 +2156,13 @@ void App::DoSendToProvider() {
                 if (!content.empty()) {
                     session_.History().push_back({"assistant", content, {}, {}});
                 } else if (responseBuffer_.empty()) {
-                    AppendSystem("Empty response from model");
+                    std::string detail = rawBody;
+                    if (detail.empty())
+                        detail = "The server returned 200 OK but sent no content.\n\n"
+                                 "Provider: " + activeProvider_ + "\n"
+                                 "Model: " + activeModel_ + "\n"
+                                 "Finish reason: " + finishReason;
+                    AppendSystemExpandable("Empty response from model", detail);
                 }
                 requestInProgress_ = false;
                 sendButton_.enabled = true;
