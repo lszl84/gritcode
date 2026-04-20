@@ -1568,6 +1568,23 @@ std::string App::BuildRequestJson() {
         }
         msgs.push_back(msg);
     }
+
+    // OpenAI requires alternating user/assistant roles. Consecutive user
+    // messages can happen when the model returns empty and the user types
+    // "continue" multiple times. Merge them into single user messages.
+    {
+        json merged = json::array();
+        for (auto& m : msgs) {
+            if (!merged.empty() && merged.back()["role"] == "user" && m["role"] == "user") {
+                std::string& prev = merged.back()["content"].get_ref<std::string&>();
+                prev += "\n\n" + m["content"].get_ref<std::string&>();
+            } else {
+                merged.push_back(m);
+            }
+        }
+        msgs = std::move(merged);
+    }
+
     j["messages"] = msgs;
 
     // Tools
