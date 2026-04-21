@@ -20,7 +20,7 @@
 #include <cstdio>
 #include <map>
 
-#if defined(GRIT_LINUX)
+#if defined(GRIT_LINUX) || defined(GRIT_FREEBSD)
 #include <fontconfig/fontconfig.h>
 #elif defined(GRIT_MACOS)
 #include <CoreText/CoreText.h>
@@ -37,7 +37,7 @@ FontManager::~FontManager() {
     if (ft_) FT_Done_FreeType(ft_);
 }
 
-#if defined(GRIT_LINUX)
+#if defined(GRIT_LINUX) || defined(GRIT_FREEBSD)
 
 std::string FontManager::FindFont(const char* family, bool bold, bool italic) const {
     FcPattern* pat = FcPatternCreate();

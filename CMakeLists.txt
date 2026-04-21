@@ -52,10 +52,10 @@ FetchContent_MakeAvailable(json)
 # --- Platform dependencies ---
 find_package(OpenGL REQUIRED)
 
-if(LINUX)
-    # Build GLFW from source with Wayland + X11 support.
-    # System libglfw3 on Ubuntu/Zorin is X11-only, forcing XWayland on GNOME
-    # and causing the rounded-corner overflow bug.
+if(LINUX OR CMAKE_SYSTEM_NAME MATCHES "FreeBSD")
+    # Linux and FreeBSD: use system packages for most dependencies.
+    # Build GLFW from source because distro packages often lack Wayland
+    # support (causing XWayland fallback and rounded-corner overflow bugs).
     set(GLFW_BUILD_DOCS OFF CACHE BOOL "" FORCE)
     set(GLFW_BUILD_TESTS OFF CACHE BOOL "" FORCE)
     set(GLFW_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
@@ -198,7 +198,7 @@ target_link_libraries(grit PRIVATE
     cmark
 )
 
-if(LINUX)
+if(LINUX OR CMAKE_SYSTEM_NAME MATCHES "FreeBSD")
     target_link_libraries(grit PRIVATE
         glfw
         PkgConfig::FREETYPE
@@ -234,6 +234,8 @@ endif()
 
 if(LINUX)
     target_compile_definitions(grit PRIVATE GRIT_LINUX)
+elseif(CMAKE_SYSTEM_NAME MATCHES "FreeBSD")
+    target_compile_definitions(grit PRIVATE GRIT_FREEBSD)
 elseif(APPLE)
     target_compile_definitions(grit PRIVATE GRIT_MACOS)
 elseif(WIN32)
@@ -254,7 +256,7 @@ endif()
 
 # Install
 install(TARGETS grit DESTINATION bin)
-if(LINUX)
+if(LINUX OR CMAKE_SYSTEM_NAME MATCHES "FreeBSD")
     install(FILES grit.desktop DESTINATION share/applications)
     install(FILES grit.svg DESTINATION share/icons/hicolor/scalable/apps)
 endif()

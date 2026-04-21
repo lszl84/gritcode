@@ -88,6 +88,30 @@ GLFW 3.4 is built from source (with Wayland + X11 support) to avoid the
 system =libglfw3= which is X11-only on many distros and forces XWayland on
 GNOME-based desktops.
 
+*** FreeBSD / GhostBSD
+
+#+begin_src bash
+# GhostBSD: install system dev packages first
+sudo pkg install -g 'GhostBSD*-dev-*'
+
+# FreeBSD/GhostBSD: install build dependencies
+sudo pkg install cmake git pkgconf glfw freetype2 harfbuzz fontconfig \
+  curl libsecret cmark
+
+git clone https://github.com/lszl84/gritcode.git
+cd gritcode
+cmake -B build -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX=~/.local
+cmake --build build
+cmake --install build
+
+grit
+#+end_src
+
+On GhostBSD, the ~GhostBSD*-dev-*~ packages provide the compiler, system
+headers, and linker. Without them, nothing compiles — they are not installed
+by default. On plain FreeBSD, the dev packages are included with the base
+system.
+
 *** macOS
 
 #+begin_src bash
@@ -120,9 +144,10 @@ On macOS, GLFW, FreeType, HarfBuzz, and curl are fetched and built from source a
 
 ** Requirements
 
-- Linux (Wayland or X11) or macOS
-- CMake 3.24+, Ninja, C++23 compiler
+- Linux (Wayland or X11), macOS, or FreeBSD/GhostBSD
+- CMake 3.24+, Ninja (or Make), C++23 compiler
 - Linux: freetype2, harfbuzz, fontconfig, libcurl, libsecret-1, OpenGL/EGL (libopengl-dev + libegl-dev on Debian, mesa on Arch, mesa-libGL-devel + mesa-libEGL-devel on Fedora), wayland-protocols, libxkbcommon, libx11-xcb-dev, libxext-dev
+- FreeBSD/GhostBSD: glfw, freetype2, harfbuzz, fontconfig, curl, libsecret, cmark (all via =pkg install=)
 - macOS: Xcode command line tools (dependencies fetched automatically)
 
 ** Contributing

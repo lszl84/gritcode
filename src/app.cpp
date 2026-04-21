@@ -31,9 +31,9 @@
 #include "keysyms.h"
 #include "clipboard.h"
 
-// pipe2(O_CLOEXEC) is Linux-only; on macOS fall back to pipe + fcntl.
+// pipe2(O_CLOEXEC) is available on Linux and FreeBSD; on macOS fall back to pipe + fcntl.
 static int CloexecPipe(int pfd[2]) {
-#ifdef __linux__
+#if defined(__linux__) || defined(__FreeBSD__)
     return pipe2(pfd, O_CLOEXEC);
 #else
     if (pipe(pfd) < 0) return -1;

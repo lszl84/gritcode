@@ -88,7 +88,7 @@ bool ClearApiKey() {
 
 } // namespace keychain
 
-#elif defined(GRIT_LINUX)
+#elif defined(GRIT_LINUX) || defined(GRIT_FREEBSD)
 
 #include <libsecret/secret.h>
 
