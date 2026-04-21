@@ -2038,7 +2038,18 @@ void App::DoSendToProvider() {
                     responseBuffer_.clear();
                 }
                 if (!fullResponse.empty()) {
-                    session_.History().push_back({"assistant", fullResponse, {}, {}});
+                    ChatMessage m;
+                    m.role = "assistant";
+                    m.content = fullResponse;
+                    if (!reasoningBuffer_.empty())
+                        m.reasoningContent = reasoningBuffer_;
+                    session_.History().push_back(std::move(m));
+                } else if (!reasoningBuffer_.empty()) {
+                    ChatMessage m;
+                    m.role = "assistant";
+                    m.content = reasoningBuffer_;
+                    m.reasoningContent = reasoningBuffer_;
+                    session_.History().push_back(std::move(m));
                 } else if (responseBuffer_.empty()) {
                     AppendSystemExpandable("Empty response from model",
                         "The Claude subprocess returned no content.\n\n"
@@ -2166,12 +2177,20 @@ void App::DoSendToProvider() {
                 // with a prompt that asks the model to continue.
                 if (finishReason == "tool_calls" && toolCalls.empty() && toolRound_ < 40) {
                     DLOG("[DEBUG-COMPLETE] finish_reason=tool_calls but no tool calls parsed — auto-retrying");
-                    if (!content.empty())
-                        session_.History().push_back({"assistant", content, {}, {}});
-                    // If the model produced thinking but no visible content, still
-                    // save a placeholder so the history stays coherent.
-                    if (content.empty() && !reasoningBuffer_.empty())
-                        session_.History().push_back({"assistant", "[thinking only — tool calls lost in transit]", {}, {}});
+                    if (!content.empty()) {
+                        ChatMessage m;
+                        m.role = "assistant";
+                        m.content = content;
+                        if (!reasoningBuffer_.empty())
+                            m.reasoningContent = reasoningBuffer_;
+                        session_.History().push_back(std::move(m));
+                    } else if (!reasoningBuffer_.empty()) {
+                        ChatMessage m;
+                        m.role = "assistant";
+                        m.content = "[thinking only — tool calls lost in transit]";
+                        m.reasoningContent = reasoningBuffer_;
+                        session_.History().push_back(std::move(m));
+                    }
                     session_.History().push_back({"user", "[system: your previous response indicated you wanted to call a tool, but the tool call data was not received. Please try again — call the tool you intended to call.]", {}, {}});
                     toolRound_++;
 
@@ -2193,8 +2212,20 @@ void App::DoSendToProvider() {
                 // Model was cut off by token limit — it may have wanted to call tools.
                 // Add what we got to history and auto-continue so it can keep going.
                 if (finishReason == "length" && toolRound_ < 40) {
-                    if (!content.empty())
-                        session_.History().push_back({"assistant", content, {}, {}});
+                    if (!content.empty()) {
+                        ChatMessage m;
+                        m.role = "assistant";
+                        m.content = content;
+                        if (!reasoningBuffer_.empty())
+                            m.reasoningContent = reasoningBuffer_;
+                        session_.History().push_back(std::move(m));
+                    } else if (!reasoningBuffer_.empty()) {
+                        ChatMessage m;
+                        m.role = "assistant";
+                        m.content = reasoningBuffer_;
+                        m.reasoningContent = reasoningBuffer_;
+                        session_.History().push_back(std::move(m));
+                    }
                     // Ask it to continue
                     session_.History().push_back({"user", "[system: your previous response was truncated due to length. Continue where you left off.]", {}, {}});
                     toolRound_++;
@@ -2223,7 +2254,21 @@ void App::DoSendToProvider() {
                 }
 
                 if (!content.empty()) {
-                    session_.History().push_back({"assistant", content, {}, {}});
+                    ChatMessage m;
+                    m.role = "assistant";
+                    m.content = content;
+                    if (!reasoningBuffer_.empty())
+                        m.reasoningContent = reasoningBuffer_;
+                    session_.History().push_back(std::move(m));
+                } else if (!reasoningBuffer_.empty()) {
+                    // Model sent only reasoning/thinking, no regular content.
+                    // Save the reasoning as the message so the history stays
+                    // coherent and we don't show a false "Empty response".
+                    ChatMessage m;
+                    m.role = "assistant";
+                    m.content = reasoningBuffer_;
+                    m.reasoningContent = reasoningBuffer_;
+                    session_.History().push_back(std::move(m));
                 } else if (responseBuffer_.empty()) {
                     std::string detail = rawBody;
                     if (detail.empty())
