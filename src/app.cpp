@@ -15,6 +15,7 @@
 // along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 #include "app.h"
+#include "debug_log.h"
 #include <cstdio>
 #include <cstring>
 #include <fstream>
@@ -125,7 +126,7 @@ static void ResolveShellEnvAsync(EventQueue& events) {
         size_t start = output.rfind("__FCNENV_START__\n");
         size_t end = output.rfind("\n__FCNENV_END__");
         if (start == std::string::npos || end == std::string::npos || end <= start) {
-            fprintf(stderr, "shell-env: no markers in %zu bytes of output\n", output.size());
+            DLOG("shell-env: no markers in %zu bytes of output", output.size());
             return;
         }
         start += strlen("__FCNENV_START__\n");
@@ -140,7 +141,7 @@ static void ResolveShellEnvAsync(EventQueue& events) {
             pos = nl + 1;
         }
         if ((int)values.size() < NVARS) {
-            fprintf(stderr, "shell-env: expected %d vars, got %zu\n", NVARS, values.size());
+            DLOG("shell-env: expected %d vars, got %zu", NVARS, values.size());
             return;
         }
 
@@ -150,7 +151,7 @@ static void ResolveShellEnvAsync(EventQueue& events) {
         }
         events.Push([kvs]() {
             for (auto& kv : kvs) setenv(kv.first.c_str(), kv.second.c_str(), 1);
-            fprintf(stderr, "shell-env: applied %zu vars from login shell\n", kvs.size());
+            DLOG("shell-env: applied %zu vars from login shell", kvs.size());
         });
     }).detach();
 }
@@ -647,7 +648,7 @@ bool App::Init(bool sessionChooser) {
     });
 
     if (!renderer_.Init()) {
-        fprintf(stderr, "GL renderer init failed\n");
+        DLOG("GL renderer init failed");
         return false;
     }
 
@@ -2118,7 +2119,7 @@ void App::DoSendToProvider() {
                const std::vector<json>& toolCalls, const std::string& finishReason,
                int, int, const std::string& rawBody) {
             events_.Push([this, ok, content, error, toolCalls, finishReason, rawBody]() {
-                fprintf(stderr, "[DEBUG-COMPLETE] ok=%d contentLen=%zu error='%s' toolCalls=%zu finishReason='%s' rawBodyLen=%zu\n",
+                DLOG("[DEBUG-COMPLETE] ok=%d contentLen=%zu error='%s' toolCalls=%zu finishReason='%s' rawBodyLen=%zu",
                     ok, content.size(), error.c_str(), toolCalls.size(), finishReason.c_str(), rawBody.size());
                 if (!ok) {
                     if (!session_.History().empty() && session_.History().back().role == "user")
@@ -2152,6 +2153,39 @@ void App::DoSendToProvider() {
                         scrollView_.StopThinking(scrollView_.BlockCount() - 1);
                     }
                     ExecuteToolCalls(toolCalls, content);
+                    return;
+                }
+
+                // Some providers (notably Z.AI GLM via the Zen gateway) may
+                // return finish_reason="tool_calls" but the tool_call data
+                // gets lost in transit — the SSE delta.tool_calls chunks
+                // arrive but aren't parsed, or the upstream doesn't stream
+                // them at all in some edge cases. Instead of showing a
+                // confusing "Empty response from model" error, auto-retry
+                // with a prompt that asks the model to continue.
+                if (finishReason == "tool_calls" && toolCalls.empty() && toolRound_ < 40) {
+                    DLOG("[DEBUG-COMPLETE] finish_reason=tool_calls but no tool calls parsed — auto-retrying");
+                    if (!content.empty())
+                        session_.History().push_back({"assistant", content, {}, {}});
+                    // If the model produced thinking but no visible content, still
+                    // save a placeholder so the history stays coherent.
+                    if (content.empty() && !reasoningBuffer_.empty())
+                        session_.History().push_back({"assistant", "[thinking only — tool calls lost in transit]", {}, {}});
+                    session_.History().push_back({"user", "[system: your previous response indicated you wanted to call a tool, but the tool call data was not received. Please try again — call the tool you intended to call.]", {}, {}});
+                    toolRound_++;
+
+                    // Render what we have so far
+                    if (!responseBuffer_.empty()) {
+                        RenderMarkdownToBlocks(true);
+                        responseBuffer_.clear();
+                    }
+                    if (receivingThinking_) {
+                        receivingThinking_ = false;
+                        scrollView_.StopThinking(scrollView_.BlockCount() - 1);
+                    }
+
+                    DoSendToProvider();
+                    MarkDirty();
                     return;
                 }
 

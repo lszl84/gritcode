@@ -15,6 +15,7 @@
 // along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 #include "curl_http.h"
+#include "debug_log.h"
 #include <sstream>
 #include <cstring>
 #include <ctime>
@@ -44,6 +45,13 @@ struct StreamCtx {
     std::function<void(const std::string&, bool)> onChunk;
     CurlHttpClient* client;
     std::atomic<bool>* aborted;
+
+    // Full SSE transcript for debugging. The sseBuffer field is consumed
+    // during parsing, making it useless for post-mortem inspection; this
+    // field accumulates every raw SSE data line verbatim so onComplete can
+    // include it in error diagnostics.
+    std::string rawLog;
+    static constexpr size_t kRawLogCap = 8192;
 
     // Track last time we received actual content (not just keepalive)
     std::atomic<double> lastContentTime{0};
@@ -91,10 +99,18 @@ size_t CurlHttpClient::WriteCallback(char* data, size_t size, size_t nmemb, void
                 std::string jsonData = line.substr(6);
                 if (jsonData == "[DONE]") continue;
 
+                // Save raw SSE for post-mortem debugging
+                if (ctx->rawLog.size() < ctx->kRawLogCap) {
+                    if (!ctx->rawLog.empty()) ctx->rawLog += '\n';
+                    ctx->rawLog += line;
+                    if (ctx->rawLog.size() > ctx->kRawLogCap)
+                        ctx->rawLog.resize(ctx->kRawLogCap);
+                }
+
                 try {
                     auto j = json::parse(jsonData);
                     if (!j.contains("choices") || j["choices"].empty()) {
-                        fprintf(stderr, "[DEBUG-SSE] No choices in: %s\n", jsonData.c_str());
+                        DLOG("[DEBUG-SSE] No choices in: %s", jsonData.c_str());
                         continue;
                     }
                     const auto& choice = j["choices"][0];
@@ -107,11 +123,11 @@ size_t CurlHttpClient::WriteCallback(char* data, size_t size, size_t nmemb, void
                     // Track finish_reason
                     if (choice.contains("finish_reason") && choice["finish_reason"].is_string()) {
                         ctx->finishReason = choice["finish_reason"].get<std::string>();
-                        fprintf(stderr, "[DEBUG-SSE] finish_reason=%s\n", ctx->finishReason.c_str());
+                        DLOG("[DEBUG-SSE] finish_reason=%s", ctx->finishReason.c_str());
                     }
 
                     if (!choice.contains("delta")) {
-                        fprintf(stderr, "[DEBUG-SSE] No delta in choice: %s\n", jsonData.substr(0, 200).c_str());
+                        DLOG("[DEBUG-SSE] No delta in choice: %s", jsonData.substr(0, 200).c_str());
                         continue;
                     }
                     const auto& delta = choice["delta"];
@@ -137,6 +153,7 @@ size_t CurlHttpClient::WriteCallback(char* data, size_t size, size_t nmemb, void
 
                     // Tool calls
                     if (delta.contains("tool_calls") && delta["tool_calls"].is_array()) {
+                        DLOG("[DEBUG-SSE] tool_calls chunk: %s", delta["tool_calls"].dump().substr(0, 500).c_str());
                         for (const auto& tc : delta["tool_calls"]) {
                             int idx = tc.value("index", 0);
                             if (idx >= (int)ctx->pendingToolCalls.size())
@@ -153,9 +170,9 @@ size_t CurlHttpClient::WriteCallback(char* data, size_t size, size_t nmemb, void
                         }
                     }
                 } catch (const std::exception& e) {
-                    fprintf(stderr, "[DEBUG-SSE] JSON parse error: %s in: %s\n", e.what(), jsonData.substr(0, 200).c_str());
+                    DLOG("[DEBUG-SSE] JSON parse error: %s in: %s", e.what(), jsonData.substr(0, 200).c_str());
                 } catch (...) {
-                    fprintf(stderr, "[DEBUG-SSE] Unknown parse error in: %s\n", jsonData.substr(0, 200).c_str());
+                    DLOG("[DEBUG-SSE] Unknown parse error in: %s", jsonData.substr(0, 200).c_str());
                 }
             }
         }
@@ -272,9 +289,9 @@ size_t CurlHttpClient::WriteCallbackAnthropic(char* data, size_t size, size_t nm
                 }
                 // message_start / message_stop / ping: nothing to do.
             } catch (const std::exception& e) {
-                fprintf(stderr, "[DEBUG-SSE-ANTH] JSON parse error: %s\n", e.what());
+                DLOG("[DEBUG-SSE-ANTH] JSON parse error: %s", e.what());
             } catch (...) {
-                fprintf(stderr, "[DEBUG-SSE-ANTH] Unknown parse error\n");
+                DLOG("[DEBUG-SSE-ANTH] Unknown parse error");
             }
         }
     }
@@ -443,9 +460,9 @@ void CurlHttpClient::SendStreaming(
         curl_easy_setopt(curl, CURLOPT_URL, url.c_str());
         curl_easy_setopt(curl, CURLOPT_POST, 1L);
         curl_easy_setopt(curl, CURLOPT_POSTFIELDS, requestJson.c_str());
-        fprintf(stderr, "[DEBUG-REQUEST] protocol=%s url=%s bodySize=%zu\n",
+        DLOG("[DEBUG-REQUEST] protocol=%s url=%s bodySize=%zu",
             isAnth ? "anthropic" : "openai", url.c_str(), requestJson.size());
-        fprintf(stderr, "[DEBUG-REQUEST-BODY] %s\n", requestJson.substr(0, 3000).c_str());
+        DLOG("[DEBUG-REQUEST-BODY] %s", requestJson.substr(0, 3000).c_str());
         curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, isAnth ? WriteCallbackAnthropic : WriteCallback);
         curl_easy_setopt(curl, CURLOPT_WRITEDATA, &ctx);
 
@@ -503,7 +520,7 @@ void CurlHttpClient::SendStreaming(
         CURLcode res = curl_easy_perform(curl);
 
         if (res == CURLE_HTTP2_STREAM) {
-            fprintf(stderr, "[DEBUG] HTTP/2 framing error, retrying with HTTP/1.1\n");
+            DLOG("[DEBUG] HTTP/2 framing error, retrying with HTTP/1.1");
             // Clean up and re-create the handle for a fresh connection
             curl_slist_free_all(headers);
             curl_easy_cleanup(curl);
@@ -569,9 +586,96 @@ void CurlHttpClient::SendStreaming(
             return;
         }
 
+        // Drain any remaining SSE data in the buffer. If the connection closed
+        // before the final \n\n separator, the last event is still sitting in
+        // sseBuffer unprocessed — this causes tool_calls and finish_reason to
+        // be silently dropped, producing the "Empty response" false error.
+        if (!ctx.sseBuffer.empty()) {
+            DLOG("[DEBUG-SSE] Draining remaining sseBuffer (%zu bytes): %s",
+                ctx.sseBuffer.size(), ctx.sseBuffer.substr(0, 500).c_str());
+            ctx.sseBuffer += "\n\n";
+            size_t pos;
+            while ((pos = ctx.sseBuffer.find("\n\n")) != std::string::npos) {
+                std::string event = ctx.sseBuffer.substr(0, pos);
+                ctx.sseBuffer.erase(0, pos + 2);
+                std::istringstream stream(event);
+                std::string line;
+                while (std::getline(stream, line)) {
+                    if (!line.empty() && line.back() == '\r') line.pop_back();
+                    if (line.substr(0, 6) != "data: ") continue;
+                    std::string jsonData = line.substr(6);
+                    if (jsonData == "[DONE]") continue;
+                    try {
+                        auto j = json::parse(jsonData);
+
+                        if (isAnth) {
+                            // Anthropic SSE drain
+                            if (!j.contains("type") || !j["type"].is_string()) continue;
+                            std::string type = j["type"].get<std::string>();
+                            if (type == "content_block_stop") {
+                                int idx = j.value("index", -1);
+                                if (idx >= 0) {
+                                    auto it = ctx.anthBlocks.find(idx);
+                                    if (it != ctx.anthBlocks.end() && it->second.type == "tool_use") {
+                                        StreamCtx::PendingTC tc;
+                                        tc.id = it->second.id;
+                                        tc.name = it->second.name;
+                                        tc.args = it->second.args.empty() ? std::string("{}") : it->second.args;
+                                        ctx.pendingToolCalls.push_back(std::move(tc));
+                                    }
+                                }
+                            } else if (type == "message_delta") {
+                                if (j.contains("delta") && j["delta"].is_object() &&
+                                    j["delta"].contains("stop_reason") && j["delta"]["stop_reason"].is_string()) {
+                                    std::string sr = j["delta"]["stop_reason"].get<std::string>();
+                                    if (sr == "max_tokens") ctx.finishReason = "length";
+                                    else if (sr == "tool_use") ctx.finishReason = "tool_calls";
+                                    else ctx.finishReason = sr;
+                                }
+                            }
+                        } else {
+                            // OpenAI SSE drain
+                            if (!j.contains("choices") || j["choices"].empty()) continue;
+                            const auto& choice = j["choices"][0];
+                            if (choice.contains("finish_reason") && choice["finish_reason"].is_string()) {
+                                ctx.finishReason = choice["finish_reason"].get<std::string>();
+                                DLOG("[DEBUG-SSE-DRAIN] finish_reason=%s", ctx.finishReason.c_str());
+                            }
+                            if (!choice.contains("delta")) continue;
+                            const auto& delta = choice["delta"];
+                            if (delta.contains("content") && delta["content"].is_string())
+                                ctx.accContent += delta["content"].get<std::string>();
+                            if (delta.contains("tool_calls") && delta["tool_calls"].is_array()) {
+                                DLOG("[DEBUG-SSE-DRAIN] tool_calls: %s", delta["tool_calls"].dump().substr(0, 500).c_str());
+                                for (const auto& tc : delta["tool_calls"]) {
+                                    int idx = tc.value("index", 0);
+                                    if (idx >= (int)ctx.pendingToolCalls.size())
+                                        ctx.pendingToolCalls.resize(idx + 1);
+                                    if (tc.contains("id") && tc["id"].is_string())
+                                        ctx.pendingToolCalls[idx].id = tc["id"].get<std::string>();
+                                    if (tc.contains("function") && tc["function"].is_object()) {
+                                        const auto& fn = tc["function"];
+                                        if (fn.contains("name") && fn["name"].is_string())
+                                            ctx.pendingToolCalls[idx].name = fn["name"].get<std::string>();
+                                        if (fn.contains("arguments") && fn["arguments"].is_string())
+                                            ctx.pendingToolCalls[idx].args += fn["arguments"].get<std::string>();
+                                    }
+                                }
+                            }
+                        }
+                    } catch (const std::exception& e) {
+                        DLOG("[DEBUG-SSE-DRAIN] parse error: %s", e.what());
+                    }
+                }
+            }
+            ctx.sseBuffer.clear();
+        }
+
         // Convert pending tool calls to json
         std::vector<json> toolCallsJson;
         for (auto& tc : ctx.pendingToolCalls) {
+            DLOG("[DEBUG-COMPLETE] PendingTC: id='%s' name='%s' argsLen=%zu",
+                tc.id.c_str(), tc.name.c_str(), tc.args.size());
             if (!tc.name.empty()) {
                 toolCallsJson.push_back({
                     {"id", tc.id},
@@ -611,7 +715,7 @@ void CurlHttpClient::SendStreaming(
                 // Try to extract a message from JSON error responses
                 try {
                     auto j = json::parse(body);
-                    fprintf(stderr, "[DEBUG-ERROR-BODY] %s\n", j.dump(2).substr(0, 2000).c_str());
+                    DLOG("[DEBUG-ERROR-BODY] %s", j.dump(2).substr(0, 2000).c_str());
                     if (j.contains("error") && j["error"].is_object() && j["error"].contains("message"))
                         body = j["error"]["message"].get<std::string>();
                     else if (j.contains("error") && j["error"].is_string())
@@ -631,13 +735,16 @@ void CurlHttpClient::SendStreaming(
             onComplete(false, ctx.accContent, err, {}, ctx.finishReason, 0, 0, rawBody);
         } else {
             // Pass raw SSE data even on success — needed when content ends up
-            // empty (empty response debugging).
+            // empty (empty response debugging). The sseBuffer is consumed during
+            // parsing, so fall back to rawLog (the verbatim transcript) or
+            // accumulated content.
             std::string rawBody = ctx.sseBuffer;
+            if (rawBody.empty()) rawBody = ctx.rawLog;
             if (rawBody.empty()) rawBody = ctx.accContent;
-            fprintf(stderr, "[DEBUG-COMPLETE] ok=true accContent=%zu rawBody=%zu finishReason='%s' toolCalls=%zu\n",
+            DLOG("[DEBUG-COMPLETE] ok=true accContent=%zu rawBody=%zu finishReason='%s' toolCalls=%zu",
                 ctx.accContent.size(), rawBody.size(), ctx.finishReason.c_str(), toolCallsJson.size());
             if (ctx.accContent.empty() && toolCallsJson.empty()) {
-                fprintf(stderr, "[DEBUG-COMPLETE] EMPTY RESPONSE! Raw SSE (first 2000 chars):\n%s\n",
+                DLOG("[DEBUG-COMPLETE] EMPTY RESPONSE! Raw SSE (first 2000 chars):\n%s",
                     rawBody.substr(0, 2000).c_str());
             }
             onComplete(true, ctx.accContent, "", toolCallsJson, ctx.finishReason, 0, 0, rawBody);
