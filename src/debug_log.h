@@ -21,23 +21,36 @@
 #include <string>
 #include <mutex>
 #include <ctime>
+#include <unistd.h>
+#include <sys/stat.h>
 
 namespace debug {
 
-// Log file path — the AI agent can read this after a crash to diagnose issues.
-inline const char* LogPath() { return "/tmp/gritcode-debug.log"; }
+// Maximum log file size before truncation (30 MB)
+inline constexpr size_t kMaxLogSize = 30 * 1024 * 1024;
 
-// Maximum log file size before truncation (1 MB)
-inline constexpr size_t kMaxLogSize = 1 * 1024 * 1024;
+// Return the log path for this process. One file per process so
+// multiple running instances don't clobber each other's diagnostics.
+// Format: /tmp/gritcode-<pid>.log
+inline std::string LogPath() {
+    static std::string path;
+    static bool once = false;
+    if (!once) {
+        path = "/tmp/gritcode-" + std::to_string(getpid()) + ".log";
+        once = true;
+    }
+    return path;
+}
 
-// Printf-style logging to /tmp/gritcode-debug.log with timestamp.
+// Printf-style logging to /tmp/gritcode-<pid>.log with timestamp.
 // Thread-safe. Auto-truncates when the file exceeds kMaxLogSize.
 inline void Log(const char* fmt, ...) __attribute__((format(printf, 1, 2)));
 inline void Log(const char* fmt, ...) {
     static std::mutex mu;
     std::lock_guard<std::mutex> lock(mu);
 
-    FILE* f = fopen(LogPath(), "a");
+    std::string path = LogPath();
+    FILE* f = fopen(path.c_str(), "a");
     if (!f) return;
 
     // Check file size — if too large, truncate
@@ -45,7 +58,7 @@ inline void Log(const char* fmt, ...) {
     long sz = ftell(f);
     if (sz > (long)kMaxLogSize) {
         fclose(f);
-        f = fopen(LogPath(), "w");
+        f = fopen(path.c_str(), "w");
         if (!f) return;
     }
 
