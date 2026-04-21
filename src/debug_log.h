@@ -22,35 +22,45 @@
 #include <mutex>
 #include <ctime>
 #include <unistd.h>
-#include <sys/stat.h>
 
 namespace debug {
 
 // Maximum log file size before truncation (30 MB)
 inline constexpr size_t kMaxLogSize = 30 * 1024 * 1024;
 
-// Return the log path for this process. One file per process so
-// multiple running instances don't clobber each other's diagnostics.
-// Format: /tmp/gritcode-<pid>.log
-inline std::string LogPath() {
-    static std::string path;
-    static bool once = false;
-    if (!once) {
-        path = "/tmp/gritcode-" + std::to_string(getpid()) + ".log";
-        once = true;
-    }
-    return path;
+// Shared state — deliberately defined once in a single inline function
+// so all TUs share the same statics.
+inline std::mutex& LogMutex() {
+    static std::mutex mu;
+    return mu;
 }
 
-// Printf-style logging to /tmp/gritcode-<pid>.log with timestamp.
-// Thread-safe. Auto-truncates when the file exceeds kMaxLogSize.
+inline char* LogPathBuf() {
+    static char buf[256] = {};
+    static bool init = false;
+    if (!init) {
+        snprintf(buf, sizeof(buf), "/tmp/gritcode-%d.log", (int)getpid());
+        init = true;
+    }
+    return buf;
+}
+
+// Set the session ID — call once during App init. The log file path
+// becomes /tmp/gritcode-<sessionId>-<pid>.log so multiple instances
+// (even for different sessions) get their own log files.
+inline void SetSessionId(const std::string& id) {
+    std::lock_guard<std::mutex> lock(LogMutex());
+    snprintf(LogPathBuf(), 256, "/tmp/gritcode-%s-%d.log",
+             id.c_str(), (int)getpid());
+}
+
+// Printf-style logging with timestamp. Thread-safe. Auto-truncates.
 inline void Log(const char* fmt, ...) __attribute__((format(printf, 1, 2)));
 inline void Log(const char* fmt, ...) {
-    static std::mutex mu;
-    std::lock_guard<std::mutex> lock(mu);
+    std::lock_guard<std::mutex> lock(LogMutex());
 
-    std::string path = LogPath();
-    FILE* f = fopen(path.c_str(), "a");
+    const char* path = LogPathBuf();
+    FILE* f = fopen(path, "a");
     if (!f) return;
 
     // Check file size — if too large, truncate
@@ -58,7 +68,7 @@ inline void Log(const char* fmt, ...) {
     long sz = ftell(f);
     if (sz > (long)kMaxLogSize) {
         fclose(f);
-        f = fopen(path.c_str(), "w");
+        f = fopen(path, "w");
         if (!f) return;
     }
 

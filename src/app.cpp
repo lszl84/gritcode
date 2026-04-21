@@ -775,6 +775,7 @@ bool App::Init(bool sessionChooser) {
         std::string cwd = getcwd(cwdBuf, sizeof(cwdBuf)) ? cwdBuf : ".";
         session_.SetCwd(cwd);
         session_.LoadForCwd(cwd);
+        debug::SetSessionId(session_.SessionId());
         PopulateWorkspaceDropdown();
         RestoreSessionToView();
         StartConnect();
