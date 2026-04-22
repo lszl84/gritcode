@@ -1798,6 +1798,7 @@ void App::SendMessage() {
     waitingDotFrame_ = -1;
     MarkDirty();
 
+    retryCount_ = 0;  // user-initiated send resets retry counter
     DoSendToProvider();
 }
 
@@ -2145,6 +2146,48 @@ void App::DoSendToProvider() {
                             "Unauthorized (HTTP 401). Key was not cleared — retry, or replace it manually via the key button if it's really invalid.",
                             rawBody);
                         statusLabel_.text = "Unauthorized";
+                    } else if (error.find("429") != std::string::npos) {
+                        // Rate limit — auto-retry after the provider's suggested
+                        // cooldown. The Zen gateway returns retry_after_seconds
+                        // in the error JSON, but it's already been consumed by
+                        // the SSE parser so we extract it from rawBody.
+                        int waitSec = 10;  // default
+                        try {
+                            auto errJson = json::parse(rawBody);
+                            if (errJson.contains("error") && errJson["error"].is_object()) {
+                                auto& ej = errJson["error"];
+                                if (ej.contains("metadata") && ej["metadata"].is_object())
+                                    waitSec = ej["metadata"].value("retry_after_seconds", 10);
+                            }
+                        } catch (...) {}
+                        if (waitSec < 2) waitSec = 2;
+                        if (waitSec > 60) waitSec = 60;
+                        if (retryCount_ < 3) {
+                            retryCount_++;
+                            DLOG("[DEBUG-429] rate limited, retry %d in %ds", retryCount_.load(), waitSec);
+                            statusLabel_.text = "Rate limited, retrying in " + std::to_string(waitSec) + "s...";
+                            MarkDirty();
+                            // Schedule retry — can't sleep on the UI thread, so
+                            // use the event loop with a timed push.
+                            auto gen = requestGen_.load();
+                            int finalWait = waitSec;
+                            std::thread([this, gen, finalWait]() {
+                                std::this_thread::sleep_for(std::chrono::seconds(finalWait));
+                                // Only retry if the generation hasn't been bumped
+                                // (user didn't cancel or send a new message)
+                                if (requestGen_.load() == gen) {
+                                    events_.Push([this, gen]() {
+                                        if (requestGen_.load() == gen)
+                                            DoSendToProvider();
+                                    });
+                                }
+                            }).detach();
+                            return;
+                        }
+                        AppendSystemExpandable("Rate limited (HTTP 429). Provider asks to wait " +
+                            std::to_string(waitSec) + "s before retrying.", rawBody);
+                        statusLabel_.text = "Rate limited";
+                        retryCount_ = 0;
                     } else {
                         AppendSystemExpandable("Error: " + error, rawBody);
                     }

@@ -124,6 +124,7 @@ private:
     // doesn't clobber the UI state of a newer one.
     std::atomic<pid_t> claudePid_{-1};
     std::atomic<uint64_t> requestGen_{0};
+    std::atomic<int> retryCount_{0};
 
     // Streaming state
     std::string responseBuffer_;
