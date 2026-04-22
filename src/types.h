@@ -150,14 +150,31 @@ struct WrappedLine {
 
 // --- UTF-8 helpers ---
 
+// Validated UTF-8 stride: returns how many bytes to advance from position i.
+// If the byte at i is not a valid UTF-8 lead byte, or the continuation bytes
+// are missing/invalid, returns 1 (treat as isolated byte) so the caller never
+// reads past the end of the string.
+inline size_t utf8_stride(const std::string& s, size_t i) {
+    if (i >= s.size()) return 1;
+    unsigned char c = s[i];
+    if (c < 0x80) return 1;
+    size_t len = 0;
+    if ((c & 0xE0) == 0xC0) len = 2;
+    else if ((c & 0xF0) == 0xE0) len = 3;
+    else if ((c & 0xF8) == 0xF0) len = 4;
+    else return 1;  // invalid lead byte
+    if (i + len > s.size()) return 1;  // truncated
+    for (size_t k = 1; k < len; ++k) {
+        if ((static_cast<unsigned char>(s[i + k]) & 0xC0) != 0x80)
+            return 1;  // invalid continuation
+    }
+    return len;
+}
+
 inline int utf8_codepoint_count(const std::string& s) {
     int n = 0;
     for (size_t i = 0; i < s.size();) {
-        unsigned char c = s[i];
-        if (c < 0x80) i += 1;
-        else if (c < 0xE0) i += 2;
-        else if (c < 0xF0) i += 3;
-        else i += 4;
+        i += utf8_stride(s, i);
         n++;
     }
     return n;
@@ -166,11 +183,7 @@ inline int utf8_codepoint_count(const std::string& s) {
 inline size_t utf8_char_to_byte(const std::string& s, int charIdx) {
     size_t pos = 0;
     for (int i = 0; i < charIdx && pos < s.size(); i++) {
-        unsigned char c = s[pos];
-        if (c < 0x80) pos += 1;
-        else if (c < 0xE0) pos += 2;
-        else if (c < 0xF0) pos += 3;
-        else pos += 4;
+        pos += utf8_stride(s, pos);
     }
     return pos;
 }
@@ -179,11 +192,7 @@ inline int utf8_byte_to_char(const std::string& s, size_t byteOff) {
     int n = 0;
     size_t pos = 0;
     while (pos < byteOff && pos < s.size()) {
-        unsigned char c = s[pos];
-        if (c < 0x80) pos += 1;
-        else if (c < 0xE0) pos += 2;
-        else if (c < 0xF0) pos += 3;
-        else pos += 4;
+        pos += utf8_stride(s, pos);
         n++;
     }
     return n;
@@ -191,22 +200,23 @@ inline int utf8_byte_to_char(const std::string& s, size_t byteOff) {
 
 inline uint32_t utf8_decode_at(const std::string& s, size_t pos) {
     if (pos >= s.size()) return 0;
+    size_t len = utf8_stride(s, pos);
     unsigned char c = s[pos];
-    if (c < 0x80) return c;
-    if (c < 0xE0) return ((c & 0x1F) << 6) | (s[pos + 1] & 0x3F);
-    if (c < 0xF0) return ((c & 0x0F) << 12) | ((s[pos + 1] & 0x3F) << 6) | (s[pos + 2] & 0x3F);
-    return ((c & 0x07) << 18) | ((s[pos + 1] & 0x3F) << 12) | ((s[pos + 2] & 0x3F) << 6) | (s[pos + 3] & 0x3F);
+    if (len == 1) return c;  // ASCII or invalid-isolated-byte
+    if (len == 2) return ((c & 0x1F) << 6) | (static_cast<unsigned char>(s[pos + 1]) & 0x3F);
+    if (len == 3) return ((c & 0x0F) << 12) | ((static_cast<unsigned char>(s[pos + 1]) & 0x3F) << 6)
+                                   | (static_cast<unsigned char>(s[pos + 2]) & 0x3F);
+    return ((c & 0x07) << 18) | ((static_cast<unsigned char>(s[pos + 1]) & 0x3F) << 12)
+           | ((static_cast<unsigned char>(s[pos + 2]) & 0x3F) << 6)
+           | (static_cast<unsigned char>(s[pos + 3]) & 0x3F);
 }
 
 inline bool DetectRTL(const std::string& s) {
     size_t i = 0;
     while (i < s.size()) {
         uint32_t cp = utf8_decode_at(s, i);
-        unsigned char c = s[i];
-        if (c < 0x80) i += 1;
-        else if (c < 0xE0) i += 2;
-        else if (c < 0xF0) i += 3;
-        else i += 4;
+        size_t stride = utf8_stride(s, i);
+        i += stride;
 
         if ((cp >= 0x0590 && cp <= 0x05FF) || (cp >= 0x0600 && cp <= 0x06FF) ||
             (cp >= 0x0700 && cp <= 0x074F) || (cp >= 0x0750 && cp <= 0x077F) ||
