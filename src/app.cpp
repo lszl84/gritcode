@@ -1496,21 +1496,74 @@ void App::AppendSystemExpandable(const std::string& summary, const std::string& 
 // Sending messages
 // ============================================================================
 
+// Return the model's context window and max output tokens from the registry.
+// Defaults to 128K context, 32K output — safe for most models.
+App::ModelLimits App::GetModelLimits() {
+    ModelLimits lim;
+    // Default: safe 128K context, 32K output — works for most models
+    lim.contextWindow = 128000;
+    lim.maxOutput = 32000;
+
+    std::string registryKey = (activeProvider_ == "zen") ? "opencode" : activeProvider_;
+    if (registryLoaded_ && modelsRegistry_.contains(registryKey) &&
+        modelsRegistry_[registryKey].is_object()) {
+        const auto& p = modelsRegistry_[registryKey];
+        if (p.contains("models") && p["models"].is_object() &&
+            p["models"].contains(activeModel_) &&
+            p["models"][activeModel_].is_object()) {
+            const auto& m = p["models"][activeModel_];
+            if (m.contains("limit") && m["limit"].is_object()) {
+                const auto& l = m["limit"];
+                if (l.contains("context") && l["context"].is_number())
+                    lim.contextWindow = l["context"].get<int>();
+                if (l.contains("output") && l["output"].is_number())
+                    lim.maxOutput = l["output"].get<int>();
+                // Some models specify input limit separately
+                if (l.contains("input") && l["input"].is_number())
+                    lim.contextWindow = l["input"].get<int>();
+            }
+        }
+    }
+    return lim;
+}
+
 std::string App::BuildRequestJson() {
+    ModelLimits limits = GetModelLimits();
     json j;
     j["model"] = activeModel_;
     j["stream"] = true;
-    j["max_tokens"] = 32000;
+    j["max_tokens"] = limits.maxOutput;
 
-    // Prune old tool results to prevent context overflow.
-    // Same approach as opencode: walk backwards, protect ~40K tokens (~120K chars)
-    // of recent tool output, then replace older results with a placeholder.
+    // Context management: estimate how many tokens the full history would
+    // consume, and if it exceeds the model's context budget, compact it.
+    //
+    // Strategy (inspired by opencode but more generous):
+    //   1. Compute token budget = context_window - max_output - 4000 buffer
+    //   2. Add system prompt + tool defs overhead (~1500 tokens)
+    //   3. Walk backwards through history, keeping as many recent messages
+    //      as fit within the budget.
+    //   4. For messages that don't fit, replace their tool_result content
+    //      with "[Old tool result content cleared]" and their
+    //      reasoning_content with null, then check if they now fit.
+    //   5. If still over budget, drop the oldest messages entirely and
+    //      insert a compaction summary.
+    //
+    // This is more generous than opencode's PRUNE_PROTECT (which keeps
+    // ~10K tokens of tool output). We protect ~30K tokens of recent
+    // tool output and only clear older tool results.
+
+    int tokenBudget = limits.contextWindow - limits.maxOutput - 4000;
+    if (tokenBudget < 8000) tokenBudget = 8000;  // floor
+
     auto& hist = session_.History();
     int histSize = (int)hist.size();
 
-    const size_t PROTECT_CHARS = 120000;  // ~40K tokens worth of tool output to keep
+    // --- Phase 1: Prune old tool results (content-heavy, low info value) ---
+    // Walk backwards protecting ~30K tokens of tool output, then clear
+    // older results.
+    const size_t PROTECT_CHARS = 120000;  // ~30K tokens worth of tool output
     size_t toolCharsAccum = 0;
-    int pruneBeforeIdx = -1;  // tool results at indices <= this get cleared
+    int pruneBeforeIdx = -1;
     for (int i = histSize - 1; i >= 0; i--) {
         if (hist[i].role == "tool") {
             toolCharsAccum += hist[i].content.size();
@@ -1521,6 +1574,9 @@ std::string App::BuildRequestJson() {
         }
     }
 
+    // --- Phase 2: Estimate total message tokens and compact if needed ---
+    // First build all messages as-is (with pruned tool results), then
+    // check if we're over budget and drop oldest messages if so.
     json msgs = json::array();
 
     // System prompt — tells the model what it is and how to behave
@@ -1601,6 +1657,69 @@ std::string App::BuildRequestJson() {
 
     j["messages"] = msgs;
 
+    // --- Phase 3: Estimate total tokens and drop oldest if over budget ---
+    {
+        // Rough estimate: system prompt + tool defs + messages
+        std::string sysContent = msgs.empty() ? "" : msgs[0].value("content", "");
+        size_t totalChars = sysContent.size();
+        // Tool defs contribute significantly — estimate from JSON size
+        totalChars += ToolDefsJson().size();
+        // All message content characters
+        for (size_t i = 1; i < msgs.size(); i++) {
+            if (msgs[i].contains("content") && msgs[i]["content"].is_string())
+                totalChars += msgs[i]["content"].get_ref<const std::string&>().size();
+            if (msgs[i].contains("reasoning_content") && msgs[i]["reasoning_content"].is_string())
+                totalChars += msgs[i]["reasoning_content"].get_ref<const std::string&>().size();
+            if (msgs[i].contains("tool_calls") && msgs[i]["tool_calls"].is_array())
+                for (auto& tc : msgs[i]["tool_calls"])
+                    if (tc.contains("function") && tc["function"].is_object() &&
+                        tc["function"].contains("arguments") && tc["function"]["arguments"].is_string())
+                        totalChars += tc["function"]["arguments"].get_ref<const std::string&>().size();
+        }
+        size_t estimatedTokens = totalChars / 4;
+
+        DLOG("[CONTEXT] estimated %zu tokens, budget %d, messages %zu",
+             estimatedTokens, tokenBudget, msgs.size());
+
+        if ((int)estimatedTokens > tokenBudget) {
+            // Drop oldest messages (skip system prompt at index 0) until
+            // we fit. Keep the most recent turns intact.
+            int dropFrom = 1;  // never drop system prompt (index 0)
+            size_t keptChars = sysContent.size() + ToolDefsJson().size();
+            // Walk from the newest message backwards
+            for (int i = (int)msgs.size() - 1; i >= 1; i--) {
+                size_t msgChars = 0;
+                if (msgs[i].contains("content") && msgs[i]["content"].is_string())
+                    msgChars += msgs[i]["content"].get_ref<const std::string&>().size();
+                if (msgs[i].contains("reasoning_content") && msgs[i]["reasoning_content"].is_string())
+                    msgChars += msgs[i]["reasoning_content"].get_ref<const std::string&>().size();
+                if (msgs[i].contains("tool_calls") && msgs[i]["tool_calls"].is_array())
+                    for (auto& tc : msgs[i]["tool_calls"])
+                        if (tc.contains("function") && tc["function"].is_object() &&
+                            tc["function"].contains("arguments") && tc["function"]["arguments"].is_string())
+                            msgChars += tc["function"]["arguments"].get_ref<const std::string&>().size();
+                keptChars += msgChars;
+                if ((int)(keptChars / 4) < tokenBudget)
+                    dropFrom = i;
+            }
+            if (dropFrom > 1) {
+                DLOG("[CONTEXT] over budget — dropping messages 1..%d, keeping %d..%zu",
+                     dropFrom - 1, dropFrom, msgs.size() - 1);
+                // Insert a compaction notice so the model knows context was lost
+                json compactMsg = {
+                    {"role", "user"},
+                    {"content", "[system: earlier conversation context has been compacted to fit within the model's context window. The most relevant recent context is preserved above.]"}
+                };
+                json trimmed = json::array();
+                trimmed.push_back(msgs[0]);  // system prompt
+                trimmed.push_back(compactMsg);
+                for (size_t i = dropFrom; i < msgs.size(); i++)
+                    trimmed.push_back(msgs[i]);
+                msgs = std::move(trimmed);
+            }
+        }
+    }
+
     // Tools
     j["tools"] = json::parse(ToolDefsJson());
     j["tool_choice"] = "auto";
@@ -1636,12 +1755,13 @@ net::CurlHttpClient::Protocol App::ProtocolForActiveModel() {
 }
 
 std::string App::BuildAnthropicRequestJson() {
+    ModelLimits limits = GetModelLimits();
     json j;
     j["model"] = activeModel_;
     j["stream"] = true;
-    j["max_tokens"] = 32000;
+    j["max_tokens"] = limits.maxOutput;
 
-    // Same tool-result pruning rule as the OpenAI path: protect ~40K tokens
+    // Same tool-result pruning rule as the OpenAI path: protect ~30K tokens
     // of recent tool output, replace older results with a placeholder.
     auto& hist = session_.History();
     int histSize = (int)hist.size();

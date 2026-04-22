@@ -173,6 +173,13 @@ private:
     std::string BuildAnthropicRequestJson();
     net::CurlHttpClient::Protocol ProtocolForActiveModel();
 
+    // Model context limits from the models.dev registry
+    struct ModelLimits {
+        int contextWindow = 0;
+        int maxOutput = 0;
+    };
+    ModelLimits GetModelLimits();
+
     // Input handling
     void OnMouseDown(float x, float y, bool shift);
     void OnMouseUp(float x, float y);
