@@ -58,70 +58,13 @@ std::string SessionManager::NowISO() {
     return buf;
 }
 
-// Replace invalid UTF-8 sequences with the Unicode replacement character
-// (U+FFFD) so nlohmann::json::dump() never throws type_error.316.
-static std::string SanitizeUtf8(const std::string& s) {
-    std::string out;
-    out.reserve(s.size());
-    const unsigned char* p = reinterpret_cast<const unsigned char*>(s.data());
-    const unsigned char* end = p + s.size();
-
-    while (p < end) {
-        // ASCII fast path
-        if (*p < 0x80) {
-            out.push_back(static_cast<char>(*p));
-            ++p;
-            continue;
-        }
-
-        // Multi-byte sequence: determine expected length
-        size_t expected = 0;
-        unsigned char first = *p;
-        if ((first & 0xE0) == 0xC0) expected = 2;
-        else if ((first & 0xF0) == 0xE0) expected = 3;
-        else if ((first & 0xF8) == 0xF0) expected = 4;
-        else { out += "\xEF\xBF\xBD"; ++p; continue; }
-
-        if (p + expected > end) { out += "\xEF\xBF\xBD"; ++p; continue; }
-
-        // Validate continuation bytes
-        bool valid = true;
-        for (size_t i = 1; i < expected; ++i) {
-            if ((p[i] & 0xC0) != 0x80) { valid = false; break; }
-        }
-        if (!valid) { out += "\xEF\xBF\xBD"; ++p; continue; }
-
-        // Check for overlong encodings and invalid code points
-        uint32_t codepoint = 0;
-        if (expected == 2) {
-            codepoint = ((first & 0x1F) << 6) | (p[1] & 0x3F);
-            if (codepoint < 0x80) valid = false;
-        } else if (expected == 3) {
-            codepoint = ((first & 0x0F) << 12) | ((p[1] & 0x3F) << 6) | (p[2] & 0x3F);
-            if (codepoint < 0x800 || (codepoint >= 0xD800 && codepoint <= 0xDFFF))
-                valid = false;
-        } else {
-            codepoint = ((first & 0x07) << 18) | ((p[1] & 0x3F) << 12) |
-                        ((p[2] & 0x3F) << 6) | (p[3] & 0x3F);
-            if (codepoint < 0x10000 || codepoint > 0x10FFFF)
-                valid = false;
-        }
-
-        if (!valid) { out += "\xEF\xBF\xBD"; ++p; continue; }
-
-        out.append(reinterpret_cast<const char*>(p), expected);
-        p += expected;
-    }
-    return out;
-}
-
 static json MessageToJson(const ChatMessage& m) {
     json j;
     j["role"] = m.role;
-    j["content"] = SanitizeUtf8(m.content);
+    j["content"] = m.content;
     if (!m.toolCalls.empty()) j["tool_calls"] = m.toolCalls;
     if (!m.toolCallId.empty()) j["tool_call_id"] = m.toolCallId;
-    if (!m.reasoningContent.empty()) j["reasoningContent"] = SanitizeUtf8(m.reasoningContent);
+    if (!m.reasoningContent.empty()) j["reasoningContent"] = m.reasoningContent;
     return j;
 }
 
@@ -183,7 +126,10 @@ static bool AtomicWriteJson(const std::string& path, const json& j) {
     try {
         std::ofstream f(tmp);
         if (!f) return false;
-        f << j.dump(2);
+        // error_handler_t::replace silently swaps invalid UTF-8 bytes
+        // with the Unicode replacement character (U+FFFD) instead of
+        // throwing type_error.316 and crashing the app.
+        f << j.dump(2, ' ', false, json::error_handler_t::replace);
         if (!f.good()) { f.close(); fs::remove(tmp); return false; }
         f.close();
         fs::rename(tmp, path);
