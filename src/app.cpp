@@ -16,6 +16,7 @@
 
 #include "app.h"
 #include "debug_log.h"
+#include "version.h"
 #include <cstdio>
 #include <cstring>
 #include <fstream>
