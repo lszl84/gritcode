@@ -1500,9 +1500,9 @@ void App::AppendSystemExpandable(const std::string& summary, const std::string& 
 // Defaults to 128K context, 32K output — safe for most models.
 App::ModelLimits App::GetModelLimits() {
     ModelLimits lim;
-    // Default: safe 128K context, 32K output — works for most models
+    // Default: safe 128K context, 16K max output response
     lim.contextWindow = 128000;
-    lim.maxOutput = 32000;
+    lim.maxOutput = 16384;
 
     std::string registryKey = (activeProvider_ == "zen") ? "opencode" : activeProvider_;
     if (registryLoaded_ && modelsRegistry_.contains(registryKey) &&
@@ -1621,12 +1621,10 @@ std::string App::BuildRequestJson() {
                                {"function", {{"name", tc["name"]}, {"arguments", tc["arguments"]}}}});
             }
             msg["tool_calls"] = tcs;
-            // Models like Kimi K2.5 require reasoning_content on assistant
-            // tool-call messages when thinking is enabled, even if empty.
+            // Only send reasoning_content for models/providers that support it.
+            // The zen provider rejects null values in unknown fields with 400.
             if (!m.reasoningContent.empty()) {
                 msg["reasoning_content"] = m.reasoningContent;
-            } else {
-                msg["reasoning_content"] = json(nullptr);
             }
         } else if (m.role == "assistant") {
             msg["content"] = m.content;
@@ -2191,6 +2189,17 @@ void App::DoSendToProvider() {
     // Zen / OpenCode Go provider: HTTP streaming. The wire protocol depends
     // on the active model, not the provider — opencode-go serves both
     // OpenAI-compatible and Anthropic-style models under the same base URL.
+
+    // Ensure base URL matches the active provider (in case provider was
+    // switched without reconnecting, or session restored a different provider)
+    {
+        std::string baseUrl = (activeProvider_ == "opencode-go")
+            ? "https://opencode.ai/zen/go/v1"
+            : "https://opencode.ai/zen/v1";
+        if (activeProvider_ == "claude") baseUrl = "";  // Claude uses pipe, not HTTP
+        if (!baseUrl.empty()) httpClient_.SetBaseUrl(baseUrl);
+    }
+
     auto protocol = ProtocolForActiveModel();
     std::string requestJson = (protocol == net::CurlHttpClient::Protocol::Anthropic)
         ? BuildAnthropicRequestJson()

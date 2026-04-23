@@ -690,6 +690,10 @@ void CurlHttpClient::SendStreaming(
             std::string curlDetail;
             if (errBuf[0] != '\0') curlDetail = errBuf;
 
+            // Debug: capture what we received for the error
+            DLOG("[DEBUG-ERROR] httpCode=%ld sseBuffer=%zu accContent=%zu rawLog=%zu",
+                 httpCode, ctx.sseBuffer.size(), ctx.accContent.size(), ctx.rawLog.size());
+
             if (res != CURLE_OK && res == CURLE_ABORTED_BY_CALLBACK && !aborted_.load()) {
                 // Progress callback aborted — distinguish the two timeout cases.
                 double last = ctx.lastContentTime.load();
@@ -708,7 +712,11 @@ void CurlHttpClient::SendStreaming(
             }
             // Include the response body so the user sees the server's error
             // message (rate limit details, auth errors, etc.)
+            // For non-SSE error responses (e.g. HTTP 400 with a JSON body),
+            // the SSE parser won't have consumed it, so check sseBuffer first,
+            // then rawLog (accumulates all lines), then accContent.
             std::string body = ctx.sseBuffer;
+            if (body.empty()) body = ctx.rawLog;
             if (body.empty()) body = ctx.accContent;
             std::string rawBody = body;  // keep full body for expandable details
             if (!body.empty()) {
