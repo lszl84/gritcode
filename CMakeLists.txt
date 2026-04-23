@@ -170,6 +170,7 @@ set(GRIT_SOURCES
     src/keychain.cpp
     src/session.cpp
     src/clipboard.cpp
+    src/csd.cpp
 )
 
 if(LINUX OR CMAKE_SYSTEM_NAME MATCHES "FreeBSD")

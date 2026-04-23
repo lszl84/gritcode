@@ -39,6 +39,7 @@
 #include <cstdio>
 
 #include "window.h"
+#include "csd.h"
 
 // ============================================================================
 // Keycode translation (shared)
@@ -106,6 +107,9 @@ struct WlState {
 
     double px = 0, py = 0;
     bool left_down = false;
+
+    CsdCompositor* csd = nullptr;  // pointer to AppWindow::Impl's CSD
+    bool has_csd = false;
 
     // Callbacks
     AppWindow::ResizeCb resizeCb;
@@ -179,20 +183,46 @@ static void pointer_enter(void* data, wl_pointer*, uint32_t serial,
     auto* st = static_cast<WlState*>(data);
     st->px = wl_fixed_to_double(sx);
     st->py = wl_fixed_to_double(sy);
-    if (st->mouseMoveCb) st->mouseMoveCb(st->px, st->py, st->left_down);
+    if (st->has_csd && st->csd) {
+        st->csd->SetCloseHover(st->csd->InCloseButton((int)st->px, (int)st->py, st->width, st->scale));
+    }
+    double app_y = st->py - (st->has_csd ? CsdCompositor::TITLEBAR_H : 0);
+    if (app_y >= 0 && st->mouseMoveCb) st->mouseMoveCb(st->px, app_y, st->left_down);
 }
-static void pointer_leave(void*, wl_pointer*, uint32_t, wl_surface*) {}
+static void pointer_leave(void* data, wl_pointer*, uint32_t, wl_surface*) {
+    auto* st = static_cast<WlState*>(data);
+    if (st->has_csd && st->csd) {
+        st->csd->SetCloseHover(false);
+    }
+}
 static void pointer_motion(void* data, wl_pointer*, uint32_t, wl_fixed_t sx, wl_fixed_t sy) {
     auto* st = static_cast<WlState*>(data);
     st->px = wl_fixed_to_double(sx);
     st->py = wl_fixed_to_double(sy);
-    if (st->mouseMoveCb) st->mouseMoveCb(st->px, st->py, st->left_down);
+    if (st->has_csd && st->csd) {
+        bool in_close = st->csd->InCloseButton((int)st->px, (int)st->py, st->width, st->scale);
+        st->csd->SetCloseHover(in_close);
+    }
+    double app_y = st->py - (st->has_csd ? CsdCompositor::TITLEBAR_H : 0);
+    if (app_y >= 0 && st->mouseMoveCb) st->mouseMoveCb(st->px, app_y, st->left_down);
 }
 static void pointer_button(void* data, wl_pointer*, uint32_t, uint32_t, uint32_t button, uint32_t state) {
     auto* st = static_cast<WlState*>(data);
     if (button == 272) {  // BTN_LEFT
         st->left_down = (state == 1);
-        if (st->mouseBtnCb) st->mouseBtnCb(st->px, st->py, st->left_down, false);
+        if (st->has_csd && st->csd && state == 1) {
+            // Check close button click
+            if (st->csd->InCloseButton((int)st->px, (int)st->py, st->width, st->scale)) {
+                st->running = false;
+                return;
+            }
+            // Ignore clicks in titlebar (not on close button)
+            if (st->csd->InTitlebar((int)st->px, (int)st->py, st->scale)) {
+                return;
+            }
+        }
+        double app_y = st->py - (st->has_csd ? CsdCompositor::TITLEBAR_H : 0);
+        if (st->mouseBtnCb) st->mouseBtnCb(st->px, app_y, st->left_down, false);
     }
 }
 static void pointer_axis(void* data, wl_pointer*, uint32_t, uint32_t axis, wl_fixed_t value) {
@@ -494,10 +524,16 @@ struct AppWindow::Impl {
     X11State* x11 = nullptr;
 #endif
     bool use_wayland = false;
+    CsdCompositor* csd = nullptr;
+    bool has_csd = false;
 };
 
 AppWindow::AppWindow() : impl_(new Impl()) {}
 AppWindow::~AppWindow() {
+    if (impl_->csd) {
+        impl_->csd->Shutdown();
+        delete impl_->csd;
+    }
 #ifdef HAVE_WAYLAND
     if (impl_->wl) {
         auto* st = impl_->wl;
@@ -563,6 +599,17 @@ bool AppWindow::Init(int width, int height, const char* title) {
 
         if (!wl_init_egl(st)) {
             delete st; goto try_x11;
+        }
+
+        // Initialize CSD
+        impl_->csd = new CsdCompositor();
+        if (impl_->csd->Init()) {
+            impl_->has_csd = true;
+            st->csd = impl_->csd;
+            st->has_csd = true;
+        } else {
+            delete impl_->csd;
+            impl_->csd = nullptr;
         }
 
         impl_->wl = st;
@@ -694,16 +741,52 @@ void AppWindow::WaitEventsTimeout(double timeout) {
 #endif
 }
 
-void AppWindow::SwapBuffers() {
+AppWindow::ContentFrame AppWindow::BeginContentFrame() {
+    if (impl_->has_csd && impl_->wl) {
+        auto f = impl_->csd->BeginFrame(impl_->wl->width, impl_->wl->height, impl_->wl->scale);
+        return {f.width, f.height, impl_->wl->width, impl_->wl->height - CsdCompositor::TITLEBAR_H, CsdCompositor::TITLEBAR_H};
+    }
 #ifdef HAVE_WAYLAND
-    if (impl_->wl) wl_commit(impl_->wl);
+    if (impl_->wl) {
+        int w = impl_->wl->width * impl_->wl->scale;
+        int h = impl_->wl->height * impl_->wl->scale;
+        return {w, h, impl_->wl->width, impl_->wl->height, 0};
+    }
+#endif
+#ifdef HAVE_X11
+    if (impl_->x11) {
+        return {impl_->x11->fb_w, impl_->x11->fb_h, impl_->x11->width, impl_->x11->height, 0};
+    }
+#endif
+    return {0, 0, 0, 0, 0};
+}
+
+void AppWindow::EndContentFrame() {
+    if (impl_->has_csd && impl_->wl) {
+        impl_->csd->EndFrame(impl_->wl->width, impl_->wl->height, impl_->wl->scale);
+        eglSwapBuffers(impl_->wl->egl_display, impl_->wl->egl_surface);
+        return;
+    }
+#ifdef HAVE_WAYLAND
+    if (impl_->wl) {
+        wl_callback* cb = wl_surface_frame(impl_->wl->surface);
+        wl_callback_add_listener(cb, &frame_listener, impl_->wl);
+        impl_->wl->frame_pending = true;
+        eglSwapBuffers(impl_->wl->egl_display, impl_->wl->egl_surface);
+    }
 #endif
 #ifdef HAVE_X11
     if (impl_->x11) eglSwapBuffers(impl_->x11->egl_display, impl_->x11->egl_surface);
 #endif
 }
 
+void AppWindow::SwapBuffers() {
+    // Deprecated: use BeginContentFrame/EndContentFrame instead
+    EndContentFrame();
+}
+
 int AppWindow::Width() const {
+    // Content width (excluding titlebar)
 #ifdef HAVE_WAYLAND
     if (impl_->wl) return impl_->wl->width * impl_->wl->scale;
 #endif
@@ -713,11 +796,30 @@ int AppWindow::Width() const {
     return 0;
 }
 int AppWindow::Height() const {
+    // Content height (excluding titlebar)
 #ifdef HAVE_WAYLAND
-    if (impl_->wl) return impl_->wl->height * impl_->wl->scale;
+    if (impl_->wl) return (impl_->wl->height - (impl_->has_csd ? CsdCompositor::TITLEBAR_H : 0)) * impl_->wl->scale;
 #endif
 #ifdef HAVE_X11
     if (impl_->x11) return impl_->x11->fb_h;
+#endif
+    return 0;
+}
+int AppWindow::FullWidth() const {
+#ifdef HAVE_WAYLAND
+    if (impl_->wl) return impl_->wl->width;
+#endif
+#ifdef HAVE_X11
+    if (impl_->x11) return impl_->x11->width;
+#endif
+    return 0;
+}
+int AppWindow::FullHeight() const {
+#ifdef HAVE_WAYLAND
+    if (impl_->wl) return impl_->wl->height;
+#endif
+#ifdef HAVE_X11
+    if (impl_->x11) return impl_->x11->height;
 #endif
     return 0;
 }
@@ -732,7 +834,7 @@ int AppWindow::LogicalW() const {
 }
 int AppWindow::LogicalH() const {
 #ifdef HAVE_WAYLAND
-    if (impl_->wl) return impl_->wl->height;
+    if (impl_->wl) return impl_->wl->height - (impl_->has_csd ? CsdCompositor::TITLEBAR_H : 0);
 #endif
 #ifdef HAVE_X11
     if (impl_->x11) return impl_->x11->height;

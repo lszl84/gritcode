@@ -3117,7 +3117,8 @@ void App::Run() {
         struct timespec t0, t1;
         clock_gettime(CLOCK_MONOTONIC, &t0);
 
-        renderer_.BeginFrame(window_.Width(), window_.Height(), scrollView_.Fonts());
+        auto frame = window_.BeginContentFrame();
+        renderer_.BeginFrame(frame.width, frame.height, scrollView_.Fonts());
 
         if (chooserMode_) {
             PaintChooser();
@@ -3145,7 +3146,7 @@ void App::Run() {
         }
 
         renderer_.EndFrame();
-        window_.SwapBuffers();
+        window_.EndContentFrame();
 
         // Perf tracking
         clock_gettime(CLOCK_MONOTONIC, &t1);

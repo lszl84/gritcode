@@ -36,12 +36,27 @@ public:
     void PollEvents();
     void WaitEvents();
     void WaitEventsTimeout(double timeout);
-    void SwapBuffers();
 
-    int Width() const;       // framebuffer pixels
-    int Height() const;
-    int LogicalW() const;    // logical / UI coords
-    int LogicalH() const;
+    // CSD-enabled frame rendering. Call BeginContentFrame() before the app
+    // renders, then EndContentFrame() after. This binds the content FBO and
+    // later composites titlebar/shadow/rounded corners.
+    struct ContentFrame {
+        int width;   // content width in pixels (fb size)
+        int height;  // content height in pixels (fb size)
+        int logicalW;
+        int logicalH;
+        int offsetY; // titlebar height in logical coords
+    };
+    ContentFrame BeginContentFrame();
+    void EndContentFrame();
+    void SwapBuffers();  // deprecated, calls EndContentFrame
+
+    int Width() const;       // content width in pixels (excludes titlebar)
+    int Height() const;      // content height in pixels (excludes titlebar)
+    int FullWidth() const;   // full window logical width
+    int FullHeight() const;  // full window logical height (includes titlebar)
+    int LogicalW() const;    // logical content width
+    int LogicalH() const;    // logical content height
     float Scale() const;     // UI scale factor (HiDPI)
 
     using ResizeCb = std::function<void(int, int, float)>;
