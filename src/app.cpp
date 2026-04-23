@@ -1502,7 +1502,7 @@ App::ModelLimits App::GetModelLimits() {
     ModelLimits lim;
     // Default: safe 128K context, 16K max output response
     lim.contextWindow = 128000;
-    lim.maxOutput = 16384;
+    lim.maxOutput = 65536;
 
     std::string registryKey = (activeProvider_ == "zen") ? "opencode" : activeProvider_;
     if (registryLoaded_ && modelsRegistry_.contains(registryKey) &&
@@ -1727,16 +1727,16 @@ std::string App::BuildRequestJson() {
 
 net::CurlHttpClient::Protocol App::ProtocolForActiveModel() {
     // Look up the active (provider, model) pair in the models.dev registry
-    // and decide which wire protocol to use. Models may override the
-    // provider-level npm default. Default to OpenAI-compat when the registry
-    // hasn't loaded or the entry is missing, matching how grit behaved before
-    // Anthropic support existed.
+    // and decide which wire protocol to use. Maps "zen"/"opencode-go" to
+    // the "opencode" key in the registry where the actual model data lives.
     if (!registryLoaded_) return net::CurlHttpClient::Protocol::OpenAI;
-    if (!modelsRegistry_.contains(activeProvider_) ||
-        !modelsRegistry_[activeProvider_].is_object()) {
+    std::string registryKey = (activeProvider_ == "zen" || activeProvider_ == "opencode-go")
+        ? "opencode" : activeProvider_;
+    if (!modelsRegistry_.contains(registryKey) ||
+        !modelsRegistry_[registryKey].is_object()) {
         return net::CurlHttpClient::Protocol::OpenAI;
     }
-    const auto& p = modelsRegistry_[activeProvider_];
+    const auto& p = modelsRegistry_[registryKey];
     std::string npm = p.value("npm", "");
     if (p.contains("models") && p["models"].is_object() &&
         p["models"].contains(activeModel_) &&
