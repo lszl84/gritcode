@@ -1429,11 +1429,43 @@ void App::OnProviderChanged(int, const std::string& id) {
     } else {
         statusLabel_.text = "Claude (ACP)";
         connected_ = true;
-        modelDropdown_.items = {
-            {"claude-opus-4-6", "Claude Opus 4.6"},
-            {"claude-sonnet-4-6", "Claude Sonnet 4.6"},
-            {"claude-haiku-4-5", "Claude Haiku 4.5"},
-        };
+
+        // Populate Claude models from the registry (filtered to Anthropic
+        // protocol). This keeps the list in sync as Anthropic adds/remove
+        // models — no more hardcoding that drifts out of date.
+        std::string registryKey = "opencode";
+        if (registryLoaded_ && modelsRegistry_.contains(registryKey) &&
+            modelsRegistry_[registryKey].is_object()) {
+            const auto& p = modelsRegistry_[registryKey];
+            modelDropdown_.items.clear();
+            if (p.contains("models") && p["models"].is_object()) {
+                for (auto it = p["models"].begin(); it != p["models"].end(); ++it) {
+                    const std::string& mid = it.key();
+                    const auto& m = it.value();
+                    std::string npm = p.value("npm", "");
+                    if (m.contains("provider") && m["provider"].is_object() &&
+                        m["provider"].contains("npm") && m["provider"]["npm"].is_string()) {
+                        npm = m["provider"]["npm"].get<std::string>();
+                    }
+                    if (npm != "@ai-sdk/anthropic") continue;
+                    std::string name = m.value("name", mid);
+                    modelDropdown_.items.push_back({mid, name});
+                }
+            }
+            std::sort(modelDropdown_.items.begin(), modelDropdown_.items.end(),
+                      [](const DropdownItem& a, const DropdownItem& b) {
+                          return a.label < b.label;
+                      });
+        }
+
+        if (modelDropdown_.items.empty()) {
+            // Fallback if registry hasn't loaded yet
+            modelDropdown_.items = {
+                {"claude-opus-4-7", "Claude Opus 4.7"},
+                {"claude-sonnet-4-7", "Claude Sonnet 4.7"},
+                {"claude-haiku-4-5", "Claude Haiku 4.5"},
+            };
+        }
         int sel = 1;  // default sonnet
         if (!restoredModelPref_.empty()) {
             for (size_t i = 0; i < modelDropdown_.items.size(); i++) {
