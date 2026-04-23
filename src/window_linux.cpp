@@ -601,16 +601,9 @@ bool AppWindow::Init(int width, int height, const char* title) {
             delete st; goto try_x11;
         }
 
-        // Initialize CSD
-        impl_->csd = new CsdCompositor();
-        if (impl_->csd->Init()) {
-            impl_->has_csd = true;
-            st->csd = impl_->csd;
-            st->has_csd = true;
-        } else {
-            delete impl_->csd;
-            impl_->csd = nullptr;
-        }
+        // CSD disabled: Mesa driver crashes on our shaders (gallium bug).
+        // Re-enable after shader debugging.
+        (void)0;
 
         impl_->wl = st;
         impl_->use_wayland = true;

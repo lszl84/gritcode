@@ -49,7 +49,8 @@ static GLuint link_program(const char* vs_src, const char* fs_src) {
 // ---------------------------------------------------------------------------
 // Close button shader
 // ---------------------------------------------------------------------------
-static const char* kCloseVS = R"(#version 330 core
+static const char* kCloseVS = R"(#version 300 es
+precision highp float;
 layout(location = 0) in vec2 aPos;
 uniform vec4 uRect;
 uniform vec2 uScreen;
@@ -62,7 +63,9 @@ void main() {
 }
 )";
 
-static const char* kCloseFS = R"(#version 330 core
+static const char* kCloseFS = R"(#version 300 es
+
+precision highp float;
 in  vec2 vUV;
 out vec4 fragColor;
 uniform float uHover;
@@ -95,7 +98,8 @@ void main() {
 // ---------------------------------------------------------------------------
 // Compose shader (shadow + rounded corners)
 // ---------------------------------------------------------------------------
-static const char* kFullQuadVS = R"(#version 330 core
+static const char* kFullQuadVS = R"(#version 300 es
+precision highp float;
 layout(location = 0) in vec2 aPos;
 out vec2 vPx;
 out vec2 vUV;
@@ -109,7 +113,9 @@ void main() {
 }
 )";
 
-static const char* kComposeFS = R"(#version 330 core
+static const char* kComposeFS = R"(#version 300 es
+
+precision highp float;
 in  vec2 vPx;
 in  vec2 vUV;
 out vec4 fragColor;
