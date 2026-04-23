@@ -78,22 +78,28 @@ if(LINUX OR CMAKE_SYSTEM_NAME MATCHES "FreeBSD")
             set(PROTO_GEN_DIR ${CMAKE_CURRENT_BINARY_DIR}/proto)
             file(MAKE_DIRECTORY ${PROTO_GEN_DIR})
 
-            set(XDG_SHELL_XML ${WAYLAND_PROTOCOLS_DIR}/stable/xdg-shell/xdg-shell.xml)
-            set(XDG_SHELL_HEADER ${PROTO_GEN_DIR}/xdg-shell-client-protocol.h)
-            set(XDG_SHELL_SOURCE ${PROTO_GEN_DIR}/xdg-shell-protocol.c)
-            add_custom_command(OUTPUT ${XDG_SHELL_HEADER}
-                COMMAND ${WAYLAND_SCANNER} client-header ${XDG_SHELL_XML} ${XDG_SHELL_HEADER}
-                DEPENDS ${XDG_SHELL_XML} VERBATIM)
-            add_custom_command(OUTPUT ${XDG_SHELL_SOURCE}
-                COMMAND ${WAYLAND_SCANNER} private-code ${XDG_SHELL_XML} ${XDG_SHELL_SOURCE}
-                DEPENDS ${XDG_SHELL_XML} VERBATIM)
-            list(APPEND PROTO_GENERATED ${XDG_SHELL_HEADER} ${XDG_SHELL_SOURCE})
+            function(grit_wayland_proto xml_rel base)
+                set(xml ${WAYLAND_PROTOCOLS_DIR}/${xml_rel})
+                set(hdr ${PROTO_GEN_DIR}/${base}-client-protocol.h)
+                set(src ${PROTO_GEN_DIR}/${base}-protocol.c)
+                add_custom_command(OUTPUT ${hdr}
+                    COMMAND ${WAYLAND_SCANNER} client-header ${xml} ${hdr}
+                    DEPENDS ${xml} VERBATIM)
+                add_custom_command(OUTPUT ${src}
+                    COMMAND ${WAYLAND_SCANNER} private-code ${xml} ${src}
+                    DEPENDS ${xml} VERBATIM)
+                set(PROTO_GENERATED ${PROTO_GENERATED} ${hdr} ${src} PARENT_SCOPE)
+            endfunction()
+
+            grit_wayland_proto(stable/xdg-shell/xdg-shell.xml xdg-shell)
+            grit_wayland_proto(unstable/xdg-decoration/xdg-decoration-unstable-v1.xml xdg-decoration-unstable-v1)
         endif()
     endif()
 
     # --- X11 backend (fallback) ---
-    pkg_check_modules(X11 IMPORTED_TARGET x11)
-    if(X11_FOUND)
+    pkg_check_modules(X11  IMPORTED_TARGET x11)
+    pkg_check_modules(XEXT IMPORTED_TARGET xext)
+    if(X11_FOUND AND XEXT_FOUND)
         set(HAVE_X11 TRUE)
     endif()
 
@@ -161,11 +167,12 @@ set(GRIT_SOURCES
     src/keychain.cpp
     src/session.cpp
     src/clipboard.cpp
-    src/csd.cpp
 )
 
 if(LINUX OR CMAKE_SYSTEM_NAME MATCHES "FreeBSD")
-    list(APPEND GRIT_SOURCES src/window_linux.cpp ${PROTO_GENERATED})
+    # CSD is Wayland-only: draws titlebar + close button when the compositor
+    # refuses server-side decorations (GNOME).
+    list(APPEND GRIT_SOURCES src/window_linux.cpp src/csd.cpp ${PROTO_GENERATED})
 endif()
 
 # MCP is the dev/agent automation channel — it lets scripts/mcp_client.py
@@ -190,7 +197,7 @@ if(APPLE)
     )
     set_source_files_properties(${GRIT_ICNS} PROPERTIES
         MACOSX_PACKAGE_LOCATION "Resources")
-    list(APPEND GRIT_SOURCES src/macos_chrome.mm ${GRIT_ICNS})
+    list(APPEND GRIT_SOURCES src/window_macos.mm ${GRIT_ICNS})
 
     add_executable(grit MACOSX_BUNDLE ${GRIT_SOURCES})
 
@@ -254,7 +261,7 @@ if(LINUX OR CMAKE_SYSTEM_NAME MATCHES "FreeBSD")
     endif()
     if(HAVE_X11)
         target_compile_definitions(grit PRIVATE HAVE_X11=1)
-        target_link_libraries(grit PRIVATE PkgConfig::X11)
+        target_link_libraries(grit PRIVATE PkgConfig::X11 PkgConfig::XEXT)
     endif()
 else()
     target_link_libraries(grit PRIVATE
@@ -268,6 +275,8 @@ else()
             "-framework CoreText"
             "-framework CoreFoundation"
             "-framework Cocoa"
+            "-framework OpenGL"
+            "-framework QuartzCore"
         )
     endif()
 endif()
