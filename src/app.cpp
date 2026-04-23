@@ -1417,6 +1417,155 @@ void App::OnWorkspaceChanged(int, const std::string& id) {
     MarkDirty();
 }
 
+// Scan the installed `claude` executable for the model IDs it currently
+// supports. Claude adds models frequently, and we can't tell the list
+// from an HTTP call (ACP spawns a local process), so we read the IDs
+// directly out of the binary — exactly the strings the CLI will accept
+// as `--model <name>`.
+//
+// The registry at models.dev has an "anthropic" namespace listing every
+// model Anthropic ever shipped (including retired ones and dated
+// variants), and the "opencode" namespace mixes MiniMax/Qwen models
+// routed through Anthropic's wire shape. Neither is the real list of
+// what `claude --model` accepts. The binary is.
+//
+// We match canonical IDs of the form `claude-<family>-<major>[-<minor>]`
+// where family is opus/sonnet/haiku and each version field is 1-2
+// digits. That rejects dated variants (claude-opus-4-20250514) and
+// context-width suffixes (claude-opus-4-6[1m]), leaving one entry per
+// real model. Result cached for the life of the process.
+static std::vector<DropdownItem> ScanClaudeModels() {
+    static std::vector<DropdownItem> cache;
+    static bool cached = false;
+    if (cached) return cache;
+    cached = true;
+
+    // Find claude binary
+    std::string claudePath;
+    if (FILE* p = popen("command -v claude 2>/dev/null", "r")) {
+        char buf[1024];
+        if (fgets(buf, sizeof(buf), p)) {
+            claudePath = buf;
+            while (!claudePath.empty() &&
+                   (claudePath.back() == '\n' || claudePath.back() == '\r'))
+                claudePath.pop_back();
+        }
+        pclose(p);
+    }
+    if (claudePath.empty()) return cache;
+
+    // Resolve the versioned symlink. The top-level `claude` is usually a
+    // symlink to ~/.local/share/claude/versions/x.y.z — we need the
+    // resolved path so ifstream actually reads the binary data.
+    try {
+        claudePath = std::filesystem::canonical(claudePath).string();
+    } catch (...) {
+        return cache;
+    }
+
+    std::ifstream f(claudePath, std::ios::binary);
+    if (!f) return cache;
+    std::string data((std::istreambuf_iterator<char>(f)),
+                     std::istreambuf_iterator<char>());
+
+    auto isIdChar = [](unsigned char c) {
+        return (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '-';
+    };
+    auto isDigits = [](const std::string& s) {
+        if (s.empty() || s.size() > 2) return false;
+        for (char c : s) if (c < '0' || c > '9') return false;
+        return true;
+    };
+
+    std::set<std::string> found;
+    const std::string needle = "claude-";
+    size_t pos = 0;
+    while ((pos = data.find(needle, pos)) != std::string::npos) {
+        // Only accept matches at the start of an ASCII run, so we don't
+        // pick up garbage from overlapping strings in the binary.
+        if (pos > 0 && isIdChar((unsigned char)data[pos - 1])) { pos++; continue; }
+        size_t end = pos + needle.size();
+        while (end < data.size() && isIdChar((unsigned char)data[end])) end++;
+        std::string id = data.substr(pos, end - pos);
+        pos = end;
+
+        // Validate: claude-(opus|sonnet|haiku)-N[-M], N and M each 1-2 digits.
+        static const std::array<const char*, 3> families = {"opus", "sonnet", "haiku"};
+        for (const char* fam : families) {
+            std::string prefix = std::string("claude-") + fam + "-";
+            if (id.rfind(prefix, 0) != 0) continue;
+            std::string rest = id.substr(prefix.size());
+            size_t dash = rest.find('-');
+            std::string major = (dash == std::string::npos) ? rest : rest.substr(0, dash);
+            std::string minor = (dash == std::string::npos) ? "" : rest.substr(dash + 1);
+            if (!isDigits(major)) break;
+            if (!minor.empty() && !isDigits(minor)) break;
+            // Also reject if there's a third segment — dated variants look
+            // like "opus-4-20250514" which would have empty minor here
+            // (above isDigits excludes 8-digit strings), but also "4-1-foo".
+            if (!minor.empty() && minor.find('-') != std::string::npos) break;
+            found.insert(id);
+            break;
+        }
+    }
+
+    if (found.empty()) return cache;
+
+    // Sort: family priority (opus > sonnet > haiku), newer versions first.
+    // `hasMinor` distinguishes "claude-opus-4" (no minor) from
+    // "claude-opus-4-0" (explicit minor = 0) so the display name comes
+    // out right for both.
+    struct Entry { std::string id; int family = 3, major = 0, minor = 0; bool hasMinor = false; };
+    auto parse = [](const std::string& id) -> Entry {
+        Entry e; e.id = id;
+        const char* fams[] = {"opus", "sonnet", "haiku"};
+        int famLens[] = {4, 6, 5};
+        std::string rest;
+        for (int i = 0; i < 3; i++) {
+            std::string prefix = std::string("claude-") + fams[i] + "-";
+            if (id.rfind(prefix, 0) == 0) {
+                e.family = i;
+                rest = id.substr(prefix.size());
+                (void)famLens;
+                break;
+            }
+        }
+        size_t dash = rest.find('-');
+        if (dash == std::string::npos) {
+            e.major = std::atoi(rest.c_str());
+        } else {
+            e.major = std::atoi(rest.substr(0, dash).c_str());
+            e.minor = std::atoi(rest.substr(dash + 1).c_str());
+            e.hasMinor = true;
+        }
+        return e;
+    };
+
+    std::vector<Entry> entries;
+    entries.reserve(found.size());
+    for (auto& id : found) entries.push_back(parse(id));
+    std::sort(entries.begin(), entries.end(), [](const Entry& a, const Entry& b) {
+        if (a.family != b.family) return a.family < b.family;
+        if (a.major != b.major) return a.major > b.major;
+        // Minor: "-4" sorts above "-4-0" above "-4-7"? Convention: no-minor
+        // represents the "latest in major X", so keep it at top. Then
+        // descending minor for the rest.
+        if (a.hasMinor != b.hasMinor) return !a.hasMinor;
+        return a.minor > b.minor;
+    });
+
+    static const std::array<const char*, 3> displayFamily = {"Opus", "Sonnet", "Haiku"};
+    for (auto& e : entries) {
+        std::string label = "Claude ";
+        label += (e.family < 3 ? displayFamily[e.family] : "?");
+        label += ' ';
+        label += std::to_string(e.major);
+        if (e.hasMinor) { label += '.'; label += std::to_string(e.minor); }
+        cache.push_back({e.id, label});
+    }
+    return cache;
+}
+
 void App::OnProviderChanged(int, const std::string& id) {
     activeProvider_ = id;
     apiKeyButton_.visible = (id == "zen" || id == "opencode-go");
@@ -1430,43 +1579,26 @@ void App::OnProviderChanged(int, const std::string& id) {
         statusLabel_.text = "Claude (ACP)";
         connected_ = true;
 
-        // Populate Claude models from the registry (filtered to Anthropic
-        // protocol). This keeps the list in sync as Anthropic adds/remove
-        // models — no more hardcoding that drifts out of date.
-        std::string registryKey = "opencode";
-        if (registryLoaded_ && modelsRegistry_.contains(registryKey) &&
-            modelsRegistry_[registryKey].is_object()) {
-            const auto& p = modelsRegistry_[registryKey];
-            modelDropdown_.items.clear();
-            if (p.contains("models") && p["models"].is_object()) {
-                for (auto it = p["models"].begin(); it != p["models"].end(); ++it) {
-                    const std::string& mid = it.key();
-                    const auto& m = it.value();
-                    std::string npm = p.value("npm", "");
-                    if (m.contains("provider") && m["provider"].is_object() &&
-                        m["provider"].contains("npm") && m["provider"]["npm"].is_string()) {
-                        npm = m["provider"]["npm"].get<std::string>();
-                    }
-                    if (npm != "@ai-sdk/anthropic") continue;
-                    std::string name = m.value("name", mid);
-                    modelDropdown_.items.push_back({mid, name});
-                }
-            }
-            std::sort(modelDropdown_.items.begin(), modelDropdown_.items.end(),
-                      [](const DropdownItem& a, const DropdownItem& b) {
-                          return a.label < b.label;
-                      });
-        }
-
+        // Read model list straight from the `claude` binary — that's the
+        // authoritative list of what `claude --model` accepts, and it
+        // tracks every CLI update for free. Fallback hardcoded list only
+        // kicks in if the binary can't be located (uninstalled or not on
+        // PATH).
+        modelDropdown_.items = ScanClaudeModels();
         if (modelDropdown_.items.empty()) {
-            // Fallback if registry hasn't loaded yet
             modelDropdown_.items = {
                 {"claude-opus-4-7", "Claude Opus 4.7"},
-                {"claude-sonnet-4-7", "Claude Sonnet 4.7"},
+                {"claude-sonnet-4-6", "Claude Sonnet 4.6"},
                 {"claude-haiku-4-5", "Claude Haiku 4.5"},
             };
         }
-        int sel = 1;  // default sonnet
+        // Default: first Sonnet entry if present, else first item.
+        int sel = 0;
+        for (size_t i = 0; i < modelDropdown_.items.size(); i++) {
+            if (modelDropdown_.items[i].id.find("sonnet") != std::string::npos) {
+                sel = (int)i; break;
+            }
+        }
         if (!restoredModelPref_.empty()) {
             for (size_t i = 0; i < modelDropdown_.items.size(); i++) {
                 if (modelDropdown_.items[i].id == restoredModelPref_) { sel = (int)i; break; }
