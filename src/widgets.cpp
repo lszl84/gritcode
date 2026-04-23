@@ -485,8 +485,23 @@ void TextInput::Update(float dt, FontManager& fm) {
 // Dropdown
 // ============================================================================
 
+float Dropdown::VisiblePopupHeight() const {
+    return std::min(TotalPopupHeight(), MaxVisibleItems() * ItemHeight());
+}
+
+float Dropdown::MaxScroll() const {
+    float ms = TotalPopupHeight() - VisiblePopupHeight();
+    return ms > 0 ? ms : 0;
+}
+
 WidgetRect Dropdown::PopupRect() const {
-    return {bounds.x, bounds.y - PopupHeight(), bounds.w, PopupHeight()};
+    return {bounds.x, bounds.y - VisiblePopupHeight(), bounds.w, VisiblePopupHeight()};
+}
+
+void Dropdown::Update(float dt) {
+    if (!open || autoScrollSpeed == 0) return;
+    scrollOffset += autoScrollSpeed * dt;
+    scrollOffset = std::max(0.0f, std::min(scrollOffset, MaxScroll()));
 }
 
 void Dropdown::Paint(GLRenderer& r, FontManager& fm) const {
@@ -519,21 +534,25 @@ void Dropdown::PaintPopup(GLRenderer& r, FontManager& fm) const {
     WidgetRect pr = PopupRect();
     r.DrawRoundedRect(pr.x, pr.y, pr.w, pr.h, radius, popupBg);
 
+    // Clip rendering to the popup bounds so scrolled items don't leak
+    r.PushClip(pr.x, pr.y, pr.w, pr.h);
+
     float itemH = ItemHeight();
     int last = (int)items.size() - 1;
     Color selColor{0.39f, 0.71f, 1.0f};
-    for (int i = 0; i < (int)items.size(); i++) {
-        float iy = pr.y + i * itemH;
-        bool isFirst = (i == 0);
-        bool isLast = (i == last);
+
+    // Compute which items are visible
+    int firstVisible = (int)(scrollOffset / itemH);
+    int lastVisible = firstVisible + (int)(pr.h / itemH) + 2;  // +2 for partial rows
+    firstVisible = std::max(0, firstVisible);
+    lastVisible = std::min(lastVisible, last);
+
+    for (int i = firstVisible; i <= lastVisible; i++) {
+        float iy = pr.y + i * itemH - scrollOffset;
 
         if (i == hoveredItem) {
-            // Hover rows on the edges need their outer corners rounded to
-            // match the popup's rounded background — otherwise the hover
-            // rectangle peeks out of the corner radius. We do it by drawing
-            // a rounded rect that extends past the row by `radius` and
-            // clipping to the row bounds, so the bleeding side becomes
-            // square and the visible side stays round.
+            bool isFirst = (i == 0 && scrollOffset < 1);
+            bool isLast = (i == last && scrollOffset > MaxScroll() - 1);
             if (isFirst && isLast) {
                 r.DrawRoundedRect(pr.x, iy, pr.w, itemH, radius, popupHover);
             } else if (isFirst) {
@@ -549,9 +568,6 @@ void Dropdown::PaintPopup(GLRenderer& r, FontManager& fm) const {
             }
         }
         if (i == selectedIndex) {
-            // Selection indicator: a short thick rounded pill on the left,
-            // inset from the row edges so the popup's corner radius never
-            // clips it. Centred vertically in the row.
             float pillW = 4;
             float pillH = itemH * 0.45f;
             float pillX = pr.x + 6;
@@ -562,6 +578,16 @@ void Dropdown::PaintPopup(GLRenderer& r, FontManager& fm) const {
         float ity = iy + (itemH - fm.LineHeight(style)) / 2;
         r.DrawShapedRun(fm, irun, pr.x + 14, ity, fm.Ascent(style), textColor);
     }
+
+    r.PopClip();
+
+    // Scrollbar indicator
+    if (TotalPopupHeight() > VisiblePopupHeight()) {
+        float trackH = pr.h;
+        float thumbH = std::max(20.0f, trackH * (pr.h / TotalPopupHeight()));
+        float thumbY = pr.y + (scrollOffset / MaxScroll()) * (trackH - thumbH);
+        r.DrawRect(pr.x + pr.w - 4, thumbY, 3, thumbH, {0.4f, 0.4f, 0.4f, 0.6f});
+    }
 }
 
 bool Dropdown::OnMouseDown(float x, float y) {
@@ -570,7 +596,7 @@ bool Dropdown::OnMouseDown(float x, float y) {
     if (open) {
         WidgetRect pr = PopupRect();
         if (PointInRect(x, y, pr)) {
-            int idx = (int)((y - pr.y) / ItemHeight());
+            int idx = (int)((y - pr.y + scrollOffset) / ItemHeight());
             if (idx >= 0 && idx < (int)items.size()) {
                 selectedIndex = idx;
                 if (onSelect) onSelect(idx, items[idx].id);
@@ -582,7 +608,21 @@ bool Dropdown::OnMouseDown(float x, float y) {
         return true;
     }
 
-    if (PointInRect(x, y, bounds)) { open = true; return true; }
+    if (PointInRect(x, y, bounds)) {
+        open = true;
+        scrollOffset = 0;
+        autoScrollSpeed = 0;
+        // Scroll to show the selected item
+        if (selectedIndex > 0) {
+            float itemTop = selectedIndex * ItemHeight();
+            float visH = VisiblePopupHeight();
+            if (itemTop + ItemHeight() > visH) {
+                scrollOffset = itemTop + ItemHeight() - visH;
+                if (scrollOffset > MaxScroll()) scrollOffset = MaxScroll();
+            }
+        }
+        return true;
+    }
     return false;
 }
 
@@ -593,9 +633,28 @@ void Dropdown::OnMouseMove(float x, float y) {
     if (open) {
         WidgetRect pr = PopupRect();
         if (PointInRect(x, y, pr)) {
-            hoveredItem = (int)((y - pr.y) / ItemHeight());
+            hoveredItem = (int)((y - pr.y + scrollOffset) / ItemHeight());
+            if (hoveredItem >= (int)items.size()) hoveredItem = -1;
+
+            // Auto-scroll when hovering near the top/bottom edge
+            float distFromTop = y - pr.y;
+            float distFromBottom = (pr.y + pr.h) - y;
+            if (distFromTop < kEdgeZone && scrollOffset > 0) {
+                autoScrollSpeed = -200.0f * (1.0f - distFromTop / kEdgeZone);
+            } else if (distFromBottom < kEdgeZone && scrollOffset < MaxScroll()) {
+                autoScrollSpeed = 200.0f * (1.0f - distFromBottom / kEdgeZone);
+            } else {
+                autoScrollSpeed = 0;
+            }
         } else {
             hoveredItem = -1;
+            autoScrollSpeed = 0;
         }
     }
+}
+
+void Dropdown::OnScroll(float dy) {
+    if (!open) return;
+    scrollOffset -= dy * ItemHeight();
+    scrollOffset = std::max(0.0f, std::min(scrollOffset, MaxScroll()));
 }

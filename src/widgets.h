@@ -136,6 +136,11 @@ public:
     bool open = false;
     int hoveredItem = -1;
     bool enabled = true;
+    float scrollOffset = 0;       // vertical scroll in pixels
+    float autoScrollSpeed = 0;    // pixels/sec when hovering near edge
+    float autoScrollAccum = 0;    // accumulated sub-pixel scroll
+
+    static constexpr float kEdgeZone = 24.0f;  // px from popup edge to trigger auto-scroll
 
     std::function<void(int index, const std::string& id)> onSelect;
 
@@ -144,7 +149,9 @@ public:
     bool OnMouseDown(float x, float y);
     bool OnMouseUp(float x, float y);
     void OnMouseMove(float x, float y);
-    void Close() { open = false; hoveredItem = -1; }
+    void OnScroll(float dy);  // mouse wheel inside popup
+    void Update(float dt);  // tick auto-scroll
+    void Close() { open = false; hoveredItem = -1; scrollOffset = 0; autoScrollSpeed = 0; }
 
     std::string SelectedId() const {
         return (selectedIndex >= 0 && selectedIndex < (int)items.size())
@@ -155,7 +162,10 @@ public:
             ? items[selectedIndex].label : "";
     }
 
-    float PopupHeight() const { return items.size() * ItemHeight(); }
     float ItemHeight() const { return 32; }
+    float MaxVisibleItems() const { return 12; }
+    float VisiblePopupHeight() const;
+    float TotalPopupHeight() const { return items.size() * ItemHeight(); }
+    float MaxScroll() const;
     WidgetRect PopupRect() const;
 };

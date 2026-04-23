@@ -2746,6 +2746,10 @@ void App::OnScroll(float delta) {
         MarkDirty();
         return;
     }
+    // Scroll inside open dropdown popups
+    if (modelDropdown_.open) { modelDropdown_.OnScroll(delta); MarkDirty(); return; }
+    if (providerDropdown_.open) { providerDropdown_.OnScroll(delta); MarkDirty(); return; }
+    if (workspaceDropdown_.open) { workspaceDropdown_.OnScroll(delta); MarkDirty(); return; }
     scrollView_.OnScroll(delta);
     MarkDirty();
 }
@@ -2975,6 +2979,10 @@ void App::Run() {
             if (apiKeyEditing_)
                 apiKeyInput_.Update(dt, scrollView_.Fonts());
             scrollView_.Update(dt);
+            // Auto-scroll open dropdowns when hovering near edges
+            if (modelDropdown_.open) { modelDropdown_.Update(dt); MarkDirty(); }
+            if (providerDropdown_.open) { providerDropdown_.Update(dt); MarkDirty(); }
+            if (workspaceDropdown_.open) { workspaceDropdown_.Update(dt); MarkDirty(); }
         }
 
         bool showDots = requestInProgress_
