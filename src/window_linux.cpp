@@ -171,8 +171,15 @@ static void wl_set_cursor(WlState* st, const char* name) {
     wl_cursor_image* img = cur->images[0];
     wl_buffer* buf = wl_cursor_image_get_buffer(img);
     if (!buf) return;
+    // The theme was loaded at cursor_size * scale, so img->width/hotspot are
+    // in buffer (physical) pixels. Tell the compositor the surface is HiDPI
+    // so it treats the buffer at that scale, and convert the hotspot into
+    // logical/surface-local pixels.
+    int hx = img->hotspot_x / st->scale;
+    int hy = img->hotspot_y / st->scale;
+    wl_surface_set_buffer_scale(st->cursor_surface, st->scale);
     wl_pointer_set_cursor(st->pointer, st->last_enter_serial,
-                          st->cursor_surface, img->hotspot_x, img->hotspot_y);
+                          st->cursor_surface, hx, hy);
     wl_surface_attach(st->cursor_surface, buf, 0, 0);
     wl_surface_damage_buffer(st->cursor_surface, 0, 0, img->width, img->height);
     wl_surface_commit(st->cursor_surface);
@@ -195,11 +202,21 @@ static void xdg_wm_base_handle_ping(void*, xdg_wm_base* b, uint32_t s) {
 }
 static const xdg_wm_base_listener wm_base_lst = { xdg_wm_base_handle_ping };
 
+// Forward decl: apply a pending toplevel size synchronously — resize the EGL
+// window, update our logical size, notify the app. Safe to call before EGL is
+// up (it will just update the size fields).
+static void wl_apply_pending_resize(WlState* st);
+
 static void xdg_surface_handle_configure(void* data, xdg_surface* s, uint32_t serial) {
     auto* st = static_cast<WlState*>(data);
     xdg_surface_ack_configure(s, serial);
     st->configured = true;
     st->dirty = true;
+    // Apply the pending size right here so we re-render AT the new size on the
+    // very next frame. If we waited until BeginContentFrame, the app's render
+    // loop would never wake up (it gates on App::dirty_, not WlState::dirty)
+    // and drag-resize would silently do nothing.
+    wl_apply_pending_resize(st);
 }
 static const xdg_surface_listener xdg_surface_lst = { xdg_surface_handle_configure };
 
@@ -663,33 +680,41 @@ static void frame_callback_done(void* data, wl_callback* cb, uint32_t) {
 static const wl_callback_listener frame_cb_lst = { frame_callback_done };
 
 // ---- BeginFrame / EndFrame --------------------------------------------------
-// BeginContentFrame applies any pending resize, notifies the callback, and
-// binds the CSD content FBO (if CSD) or the swapchain framebuffer.
 
-static int wl_begin_content(WlState* st, int* outW, int* outH,
-                            int* outLogicalW, int* outLogicalH, int* outOffsetY) {
-    // Apply pending resize.
+// Apply any pending compositor-driven resize. Called from xdg_surface.configure
+// (so drag-resize wakes the render loop) and as a fallback from BeginFrame
+// (covers the initial configure that arrives before EGL is set up).
+static void wl_apply_pending_resize(WlState* st) {
     if (st->pending_width > 0 && st->pending_height > 0 &&
         (st->pending_width != st->width || st->pending_height != st->height)) {
         st->width = st->pending_width;
         st->height = st->pending_height;
-        st->pending_width = 0;
-        st->pending_height = 0;
     }
+    st->pending_width = 0;
+    st->pending_height = 0;
+
+    if (!st->egl_window) return;  // pre-EGL; first real frame will catch up
+
     int want_w = st->width * st->scale;
     int want_h = st->height * st->scale;
-    if (want_w != st->applied_buffer_w || want_h != st->applied_buffer_h) {
-        wl_egl_window_resize(st->egl_window, want_w, want_h, 0, 0);
-        st->applied_buffer_w = want_w;
-        st->applied_buffer_h = want_h;
-        wl_sync_geometry(st);
-        // Notify app: the effective content size (CSD eats the titlebar)
-        int title_h = st->use_csd ? CsdCompositor::TITLEBAR_H : 0;
-        if (st->resizeCb)
-            st->resizeCb(st->width * st->scale,
-                         (st->height - title_h) * st->scale,
-                         (float)st->scale);
-    }
+    if (want_w == st->applied_buffer_w && want_h == st->applied_buffer_h) return;
+
+    wl_egl_window_resize(st->egl_window, want_w, want_h, 0, 0);
+    st->applied_buffer_w = want_w;
+    st->applied_buffer_h = want_h;
+    wl_sync_geometry(st);
+    int title_h = st->use_csd ? CsdCompositor::TITLEBAR_H : 0;
+    if (st->resizeCb)
+        st->resizeCb(st->width * st->scale,
+                     (st->height - title_h) * st->scale,
+                     (float)st->scale);
+}
+
+// BeginContentFrame binds the CSD content FBO (if CSD) or the swapchain
+// framebuffer, and returns its dimensions.
+static int wl_begin_content(WlState* st, int* outW, int* outH,
+                            int* outLogicalW, int* outLogicalH, int* outOffsetY) {
+    wl_apply_pending_resize(st);
 
     int title_h = st->use_csd ? CsdCompositor::TITLEBAR_H : 0;
     int contentPixelH = (st->height - title_h) * st->scale;

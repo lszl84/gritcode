@@ -191,6 +191,10 @@ void CsdCompositor::DrawCloseButton(int windowW, int windowH, int scale) {
     glDrawArrays(GL_TRIANGLES, 0, 6);
     glBindVertexArray(0);
     glUseProgram(0);
+    // Restore blending so the next-frame content-FBO drawing gets proper
+    // alpha-blended glyph output.
+    glEnable(GL_BLEND);
+    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
 }
 
 void CsdCompositor::EndFrame(int windowW, int windowH, int scale) {
