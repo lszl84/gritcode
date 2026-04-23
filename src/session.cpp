@@ -65,6 +65,7 @@ static json MessageToJson(const ChatMessage& m) {
     if (!m.toolCalls.empty()) j["tool_calls"] = m.toolCalls;
     if (!m.toolCallId.empty()) j["tool_call_id"] = m.toolCallId;
     if (!m.reasoningContent.empty()) j["reasoningContent"] = m.reasoningContent;
+    if (m.isSummary) j["isSummary"] = true;
     return j;
 }
 
@@ -75,6 +76,7 @@ static ChatMessage MessageFromJson(const json& j) {
     if (j.contains("tool_calls")) m.toolCalls = j["tool_calls"].get<std::vector<json>>();
     if (j.contains("tool_call_id")) m.toolCallId = j["tool_call_id"].get<std::string>();
     if (j.contains("reasoningContent")) m.reasoningContent = j["reasoningContent"].get<std::string>();
+    m.isSummary = j.value("isSummary", false);
     return m;
 }
 

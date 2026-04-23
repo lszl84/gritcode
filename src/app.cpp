@@ -16,6 +16,7 @@
 
 #include "app.h"
 #include "debug_log.h"
+#include "version.h"
 #include <cstdio>
 #include <cstring>
 #include <fstream>
@@ -1697,72 +1698,6 @@ std::string App::BuildRequestJson() {
 
     j["messages"] = msgs;
 
-    // --- Phase 3: Estimate total tokens and drop oldest if over budget ---
-    {
-        // Rough estimate: system prompt + tool defs + messages
-        std::string sysContent = msgs.empty() ? "" : msgs[0].value("content", "");
-        size_t totalChars = sysContent.size();
-        // Tool defs contribute significantly — estimate from JSON size
-        totalChars += ToolDefsJson().size();
-        // All message content characters
-        for (size_t i = 1; i < msgs.size(); i++) {
-            if (msgs[i].contains("content") && msgs[i]["content"].is_string())
-                totalChars += msgs[i]["content"].get_ref<const std::string&>().size();
-            if (msgs[i].contains("reasoning_content") && msgs[i]["reasoning_content"].is_string())
-                totalChars += msgs[i]["reasoning_content"].get_ref<const std::string&>().size();
-            if (msgs[i].contains("tool_calls") && msgs[i]["tool_calls"].is_array())
-                for (auto& tc : msgs[i]["tool_calls"])
-                    if (tc.contains("function") && tc["function"].is_object() &&
-                        tc["function"].contains("arguments") && tc["function"]["arguments"].is_string())
-                        totalChars += tc["function"]["arguments"].get_ref<const std::string&>().size();
-        }
-        size_t estimatedTokens = totalChars / 4;
-
-        DLOG("[CONTEXT] estimated %zu tokens, budget %d, messages %zu",
-             estimatedTokens, tokenBudget, msgs.size());
-
-        if ((int)estimatedTokens > tokenBudget) {
-            // Drop oldest messages (skip system prompt at index 0) until
-            // we fit. Keep the most recent turns intact.
-            int dropFrom = 1;  // never drop system prompt (index 0)
-            size_t keptChars = sysContent.size() + ToolDefsJson().size();
-            // Walk from the newest message backwards
-            for (int i = (int)msgs.size() - 1; i >= 1; i--) {
-                size_t msgChars = 0;
-                if (msgs[i].contains("content") && msgs[i]["content"].is_string())
-                    msgChars += msgs[i]["content"].get_ref<const std::string&>().size();
-                if (msgs[i].contains("reasoning_content") && msgs[i]["reasoning_content"].is_string())
-                    msgChars += msgs[i]["reasoning_content"].get_ref<const std::string&>().size();
-                if (msgs[i].contains("tool_calls") && msgs[i]["tool_calls"].is_array())
-                    for (auto& tc : msgs[i]["tool_calls"])
-                        if (tc.contains("function") && tc["function"].is_object() &&
-                            tc["function"].contains("arguments") && tc["function"]["arguments"].is_string())
-                            msgChars += tc["function"]["arguments"].get_ref<const std::string&>().size();
-                keptChars += msgChars;
-                if ((int)(keptChars / 4) < tokenBudget)
-                    dropFrom = i;
-            }
-            if (dropFrom > 1) {
-                DLOG("[CONTEXT] over budget — dropping messages 1..%d, keeping %d..%zu",
-                     dropFrom - 1, dropFrom, msgs.size() - 1);
-                int dropped = dropFrom - 1;
-                AppendSystem("📦 Context compacted: dropped " + std::to_string(dropped) +
-                             " older messages to fit within the model's context window.");
-                // Insert a compaction notice so the model knows context was lost
-                json compactMsg = {
-                    {"role", "user"},
-                    {"content", "[system: earlier conversation context has been compacted to fit within the model's context window. The most relevant recent context is preserved above.]"}
-                };
-                json trimmed = json::array();
-                trimmed.push_back(msgs[0]);  // system prompt
-                trimmed.push_back(compactMsg);
-                for (size_t i = dropFrom; i < msgs.size(); i++)
-                    trimmed.push_back(msgs[i]);
-                msgs = std::move(trimmed);
-            }
-        }
-    }
-
     // Tools
     j["tools"] = json::parse(ToolDefsJson());
     j["tool_choice"] = "auto";
@@ -1966,6 +1901,270 @@ void App::SendMessage() {
 
     retryCount_ = 0;  // user-initiated send resets retry counter
     DoSendToProvider();
+}
+
+// ---------------------------------------------------------------------------
+// Context compaction
+//
+// Goal: when the full history would overflow the model's context window,
+// replace the oldest portion with a real LLM-generated summary — the same
+// strategy opencode uses (~/Developer/opencode/packages/opencode/src/session/
+// compaction.ts). The previous grit implementation rewrote only the wire
+// request while leaving session_.History() untouched; since history only
+// grows, every subsequent request re-hit the same over-budget condition and
+// re-"compacted" the same messages, spamming the UI with "📦 Context
+// compacted" lines on every turn and never actually shrinking the working
+// set. The fix persists the compaction in session_.History() and gates
+// re-entry on a growth threshold.
+//
+// Flow:
+//   1. MaybeCompactThenSend() estimates tokens. If within budget, calls
+//      DoSendActualRequest() synchronously and returns.
+//   2. If over budget, picks the most recent non-summary user message as the
+//      split point. Head = history[0..split), tail = history[split..] stays
+//      intact (we never break tool_use/tool_result pairs).
+//   3. Fires an async summary request through the same httpClient_ with a
+//      system prompt instructing the model to produce a faithful summary.
+//      The current user sees a "📦 Compacting context…" notice in the UI so
+//      the extra round-trip doesn't look like the app is hung.
+//   4. ApplyCompaction() (on the main thread, after the summary returns)
+//      replaces the head with a single user-role ChatMessage carrying
+//      isSummary=true, persists to disk, and calls DoSendActualRequest().
+//   5. historyCompactBaseCount_ is bumped to the post-compaction size so the
+//      hysteresis check in step 1 won't re-compact until enough new messages
+//      have accumulated.
+// ---------------------------------------------------------------------------
+void App::MaybeCompactThenSend() {
+    auto& hist = session_.History();
+    int histSize = (int)hist.size();
+
+    // Hysteresis: require some minimum growth since last compaction before
+    // we try again. Without this, repeated over-budget requests would each
+    // fire a new compaction even though the post-compaction history hasn't
+    // meaningfully grown.
+    int growth = histSize - historyCompactBaseCount_;
+    if (growth < 5 && historyCompactBaseCount_ > 0) {
+        DoSendActualRequest();
+        return;
+    }
+
+    // Rough token estimate: 4 chars ≈ 1 token. Same heuristic BuildRequestJson
+    // used to carry — kept here so the compaction decision doesn't depend on
+    // first serializing the whole wire body.
+    size_t totalChars = 0;
+    for (auto& m : hist) {
+        totalChars += m.content.size() + m.reasoningContent.size();
+        for (auto& tc : m.toolCalls) {
+            if (tc.contains("arguments") && tc["arguments"].is_string())
+                totalChars += tc["arguments"].get_ref<const std::string&>().size();
+        }
+    }
+    // Add a fixed overhead for the system prompt + tool definitions.
+    totalChars += 8000;
+    int estTokens = (int)(totalChars / 4);
+
+    ModelLimits limits = GetModelLimits();
+    int threshold = limits.contextWindow - limits.maxOutput - 8000;
+    if (threshold < 8000) threshold = 8000;
+
+    DLOG("[COMPACT] est %d tokens, threshold %d, messages %d, base %d",
+         estTokens, threshold, histSize, historyCompactBaseCount_);
+
+    if (estTokens <= threshold) {
+        DoSendActualRequest();
+        return;
+    }
+
+    // Find the most recent non-summary user message — that's where the
+    // current turn starts, and the head we can safely summarize ends right
+    // before it. Since every user turn begins with role=user, splitting here
+    // never leaves an orphan tool_use in the head or an orphan tool_result in
+    // the tail.
+    int splitIdx = -1;
+    for (int i = histSize - 1; i >= 0; i--) {
+        if (hist[i].role == "user" && !hist[i].isSummary) {
+            splitIdx = i;
+            break;
+        }
+    }
+    if (splitIdx <= 0) {
+        // Nothing older than the current turn to summarize.
+        DoSendActualRequest();
+        return;
+    }
+
+    RunSummaryThenResend(splitIdx);
+}
+
+void App::RunSummaryThenResend(int splitIdx) {
+    compacting_ = true;
+    auto& hist = session_.History();
+    int headCount = splitIdx;
+
+    AppendSystem("📦 Compacting context — summarizing " + std::to_string(headCount) +
+                 " older messages before continuing. This usually takes a few seconds…");
+
+    // Render the head as plain text. We feed the summary model a flat
+    // transcript rather than replaying the raw tool_use / tool_result
+    // structure, because (a) it works identically for any wire protocol and
+    // (b) the summary model doesn't need the machine-readable tool shape —
+    // it just needs to read what happened.
+    std::string headText;
+    headText.reserve(16384);
+    for (int i = 0; i < splitIdx; i++) {
+        auto& m = hist[i];
+        headText += "--- ";
+        if (m.isSummary) headText += "earlier summary";
+        else headText += m.role;
+        headText += " ---\n";
+        if (!m.content.empty()) headText += m.content + "\n";
+        for (auto& tc : m.toolCalls) {
+            headText += "[tool call: " + tc.value("name", std::string("?")) + " ";
+            headText += tc.value("arguments", std::string("{}"));
+            headText += "]\n";
+        }
+        headText += "\n";
+    }
+
+    // Cap the summary-call input so the summary request itself doesn't
+    // overflow. Budget = context window − response budget − prompt overhead.
+    ModelLimits limits = GetModelLimits();
+    size_t maxChars = (size_t)(limits.contextWindow - 6000) * 4;
+    if (maxChars < 40000) maxChars = 40000;
+    if (headText.size() > maxChars) {
+        size_t drop = headText.size() - maxChars;
+        headText = "[... much older history truncated to fit this summarization call ...]\n\n"
+                   + headText.substr(drop);
+    }
+
+    const std::string summarySystem =
+        "You are helping to compact a long coding-assistant conversation so it fits "
+        "within the model's context window for future turns. Produce a detailed, "
+        "faithful summary that preserves:\n"
+        "  • The user's overall goal(s) and any sub-tasks.\n"
+        "  • Concrete decisions made and their rationale.\n"
+        "  • Files touched, functions edited, and the substance of each change.\n"
+        "  • Results of commands run (build pass/fail, test outcomes, error messages).\n"
+        "  • Open questions, blockers, and what should happen next.\n"
+        "  • Any user preferences, constraints, or corrections given.\n"
+        "Write a compact past-tense narrative. Do not invent details, do not add a "
+        "sign-off, do not ask questions. Output only the summary.";
+
+    std::string summaryUser =
+        "Summarize this conversation so a fresh session can continue the work "
+        "without re-reading it:\n\n" + headText;
+
+    auto protocol = ProtocolForActiveModel();
+    std::string reqJson;
+    if (protocol == net::CurlHttpClient::Protocol::Anthropic) {
+        json j;
+        j["model"] = activeModel_;
+        j["stream"] = true;
+        j["max_tokens"] = 2500;
+        j["system"] = summarySystem;
+        j["messages"] = json::array({
+            {{"role", "user"}, {"content", summaryUser}}
+        });
+        reqJson = j.dump();
+    } else {
+        json j;
+        j["model"] = activeModel_;
+        j["stream"] = true;
+        j["max_tokens"] = 2500;
+        j["messages"] = json::array({
+            {{"role", "system"}, {"content", summarySystem}},
+            {{"role", "user"},   {"content", summaryUser}}
+        });
+        reqJson = j.dump();
+    }
+
+    // Make sure the base URL is set for the current provider — DoSendToProvider
+    // would normally do this, but we're intercepting before it runs.
+    {
+        std::string baseUrl = (activeProvider_ == "opencode-go")
+            ? "https://opencode.ai/zen/go/v1"
+            : "https://opencode.ai/zen/v1";
+        if (!baseUrl.empty()) httpClient_.SetBaseUrl(baseUrl);
+    }
+
+    uint64_t gen = requestGen_.load();
+
+    httpClient_.SendStreaming(protocol, reqJson,
+        // onChunk — discarded; we don't surface partial summary text.
+        [](const std::string&, bool){},
+        // onComplete
+        [this, gen, splitIdx, headCount](
+            bool ok, const std::string& content, const std::string& error,
+            const std::vector<json>&, const std::string&,
+            int, int, const std::string&)
+        {
+            std::string summary = content;
+            std::string err = error;
+            bool success = ok && !summary.empty();
+            events_.Push([this, gen, splitIdx, headCount, success, summary, err]() {
+                if (gen != requestGen_.load()) {
+                    // Cancelled (Esc) or superseded — drop the summary, leave
+                    // history untouched. compacting_ must still be cleared so
+                    // a future send isn't blocked.
+                    compacting_ = false;
+                    return;
+                }
+                ApplyCompaction(splitIdx, success, summary, err, headCount);
+            });
+        });
+}
+
+void App::ApplyCompaction(int splitIdx, bool success, const std::string& summary,
+                          const std::string& error, int origHeadCount) {
+    auto& hist = session_.History();
+    // Guard: history could have mutated (unlikely on main thread, but safe).
+    if (splitIdx <= 0 || splitIdx > (int)hist.size()) {
+        compacting_ = false;
+        DoSendActualRequest();
+        return;
+    }
+
+    std::string summaryBody;
+    if (success) {
+        summaryBody =
+            "[Prior conversation summary — the earlier turns have been compacted "
+            "into this summary to fit the model's context window. Treat it as "
+            "authoritative background for continuing the current task.]\n\n" +
+            summary;
+        AppendSystem("📦 Context compacted: " + std::to_string(origHeadCount) +
+                     " older messages replaced by a summary.");
+    } else {
+        // Fallback — even a failed summary should shrink history, otherwise
+        // the very next request hits the same overflow. Keep the hysteresis
+        // floor so we don't immediately retry.
+        summaryBody =
+            "[Prior conversation context was dropped to fit the model's "
+            "context window. Summary unavailable" +
+            (error.empty() ? std::string("") : (": " + error)) + ".]";
+        AppendSystem("⚠️ Compaction summary failed" +
+                     (error.empty() ? std::string("") : (" (" + error + ")")) +
+                     " — dropping " + std::to_string(origHeadCount) +
+                     " older messages without a summary so the next request can fit.");
+    }
+
+    ChatMessage summaryMsg;
+    summaryMsg.role = "user";
+    summaryMsg.content = std::move(summaryBody);
+    summaryMsg.isSummary = true;
+
+    std::vector<ChatMessage> newHist;
+    newHist.reserve(hist.size() - splitIdx + 1);
+    newHist.push_back(std::move(summaryMsg));
+    for (int i = splitIdx; i < (int)hist.size(); i++) {
+        newHist.push_back(std::move(hist[i]));
+    }
+    hist = std::move(newHist);
+    historyCompactBaseCount_ = (int)hist.size();
+    session_.MarkDirty();
+    session_.Save();
+
+    compacting_ = false;
+    DoSendActualRequest();
 }
 
 void App::DoSendToProvider() {
@@ -2234,6 +2433,15 @@ void App::DoSendToProvider() {
         return;
     }
 
+    // Non-Claude path: run the compaction preflight. If the history is over
+    // budget it fires an async summary LLM call; ApplyCompaction() rewrites
+    // session_.History() in place and then calls DoSendActualRequest(). If
+    // compaction is not needed, MaybeCompactThenSend() falls straight through
+    // to DoSendActualRequest() synchronously.
+    MaybeCompactThenSend();
+}
+
+void App::DoSendActualRequest() {
     // Zen / OpenCode Go provider: HTTP streaming. The wire protocol depends
     // on the active model, not the provider — opencode-go serves both
     // OpenAI-compatible and Anthropic-style models under the same base URL.
@@ -2388,48 +2596,19 @@ void App::DoSendToProvider() {
                     return;
                 }
 
-                // Auto-continue: if the model was in a tool loop (toolRound_ > 0)
-                // and sends text without tool calls, check if it describes planned
-                // actions ("let me", "i will", etc.). If so, nudge it to actually
-                // call tools instead of stopping. This prevents the "say-do gap"
-                // where models plan actions in text but don't follow through.
-                if (toolCalls.empty() && toolRound_ > 0 && toolRound_ < 40 && !content.empty()) {
-                    std::string lower;
-                    lower.reserve(content.size());
-                    for (char c : content) lower += (char)std::tolower((unsigned char)c);
-                    bool hasActionPhrase =
-                        lower.find("let me") != std::string::npos ||
-                        lower.find("i will") != std::string::npos ||
-                        lower.find("i'll") != std::string::npos ||
-                        lower.find("i need to") != std::string::npos ||
-                        lower.find("i should") != std::string::npos ||
-                        lower.find("next step") != std::string::npos ||
-                        lower.find("continue") != std::string::npos;
-                    if (hasActionPhrase) {
-                        DLOG("[DEBUG-AUTO-CONTINUE] model described actions but sent no tools — nudging");
-                        ChatMessage m;
-                        m.role = "assistant";
-                        m.content = content;
-                        if (!reasoningBuffer_.empty())
-                            m.reasoningContent = reasoningBuffer_;
-                        session_.History().push_back(std::move(m));
-                        session_.History().push_back({"user", "[system: you described planned actions but did not call any tools. Please immediately call the tools you mentioned to actually perform those actions. Do not describe — just call the tools.]", {}, {}});
-                        toolRound_++;
-
-                        if (!responseBuffer_.empty()) {
-                            RenderMarkdownToBlocks(true);
-                            responseBuffer_.clear();
-                        }
-                        if (receivingThinking_) {
-                            receivingThinking_ = false;
-                            scrollView_.StopThinking(scrollView_.BlockCount() - 1);
-                        }
-
-                        DoSendToProvider();
-                        MarkDirty();
-                        return;
-                    }
-                }
+                // We used to run a substring-match heuristic here ("let me",
+                // "i will", ...) to nudge the model back into tool-calling
+                // when it stopped mid-task with planning text. That was
+                // fragile in both directions: false positives nudged a model
+                // that had legitimately finished and was waiting for user
+                // feedback, and false negatives missed mid-task stops with
+                // neutral phrasing. Opencode's prompt loop (see
+                // ~/Developer/opencode/packages/opencode/src/session/prompt.ts)
+                // trusts the model: if the turn ends without tool calls, the
+                // turn is over. We follow the same rule — keep the two
+                // unambiguous signals handled below (finish_reason=="tool_calls"
+                // with no parsed tool_calls, and finish_reason=="length"), and
+                // rely on the system prompt + user retrying for everything else.
 
                 // Some providers (notably Z.AI GLM via the Zen gateway) may
                 // return finish_reason="tool_calls" but the tool_call data

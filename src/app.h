@@ -116,6 +116,18 @@ private:
     bool requestInProgress_ = false;
     int toolRound_ = 0;
 
+    // Compaction state.
+    // historyCompactBaseCount_: number of messages left in history immediately
+    //   after the last successful compaction. The preflight only attempts
+    //   another compaction once history has grown beyond this by a hysteresis
+    //   margin — without this guard we'd re-compact on every single request
+    //   since history never shrinks between requests (it just grows by one
+    //   assistant + tool pair per round).
+    // compacting_: true while a summary LLM call is in flight. The main request
+    //   will fire only after the summary returns (or fails and we fall back).
+    int historyCompactBaseCount_ = 0;
+    bool compacting_ = false;
+
     // models.dev registry — canonical source for the Zen and OpenCode Go
     // provider/model lists. Fetched once at startup (with a disk cache at
     // $XDG_CACHE_HOME/gritcode/models.json). Used to populate the
@@ -155,6 +167,16 @@ private:
     void Connect(const std::string& apiKey = "");
     void SendMessage();
     void DoSendToProvider();
+    // Compaction preflight (Zen/HTTP path only — Claude subprocess manages
+    // its own context). If history is over budget, synthesizes a summary
+    // via the model, replaces the head of history with an isSummary=true
+    // marker message, then falls through to DoSendActualRequest(). If under
+    // budget, calls DoSendActualRequest() directly.
+    void MaybeCompactThenSend();
+    void RunSummaryThenResend(int splitIdx);
+    void ApplyCompaction(int splitIdx, bool success, const std::string& summary,
+                         const std::string& error, int origHeadCount);
+    void DoSendActualRequest();
     void OnModelsReceived(std::vector<net::ModelInfo> models, int httpStatus);
     void StartFetchRegistry();
     void OnRegistryReceived(nlohmann::json registry, int httpStatus);

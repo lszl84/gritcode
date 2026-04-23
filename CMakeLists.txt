@@ -5,29 +5,20 @@ set(CMAKE_CXX_STANDARD 23)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
-# Version string from git state.
+# Version string from git state — generated at *build* time into version.h,
+# so `git describe --tags --always --dirty` always reflects the current tree.
 # Tagged commit:        v0.1.0
 # After tag:            v0.1.0-14-g3a7f2c1
 # Uncommitted changes:  v0.1.0-14-g3a7f2c1-dirty
 # No tags yet:          0.1.0-g3a7f2c1 or 0.1.0-g3a7f2c1-dirty
+set(GRIT_VERSION_HEADER ${CMAKE_BINARY_DIR}/generated/version.h)
+# Bootstrap: make sure the header exists before the first compile.
 execute_process(
-    COMMAND git describe --tags --always --dirty
-    WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
-    OUTPUT_VARIABLE GIT_DESCRIBE
-    OUTPUT_STRIP_TRAILING_WHITESPACE
-    ERROR_QUIET
+    COMMAND ${CMAKE_COMMAND}
+            -DSOURCE_DIR=${CMAKE_SOURCE_DIR}
+            -DOUTPUT=${GRIT_VERSION_HEADER}
+            -P ${CMAKE_SOURCE_DIR}/cmake/GenVersion.cmake
 )
-# If git describe returned a tag-based version (starts with v), use it directly.
-# Otherwise (no tags), prepend the project version.
-if(GIT_DESCRIBE MATCHES "^v")
-    string(SUBSTRING "${GIT_DESCRIBE}" 1 -1 VERSION_STRING)
-else()
-    set(VERSION_STRING "${PROJECT_VERSION_MAJOR}.${PROJECT_VERSION_MINOR}.0-${GIT_DESCRIBE}")
-endif()
-if(NOT GIT_DESCRIBE)
-    set(VERSION_STRING "${PROJECT_VERSION_MAJOR}.${PROJECT_VERSION_MINOR}.0")
-endif()
-message(STATUS "Version: ${VERSION_STRING}")
 
 include(FetchContent)
 
@@ -208,7 +199,7 @@ if(APPLE)
         MACOSX_BUNDLE_INFO_PLIST ${CMAKE_SOURCE_DIR}/cmake/Info.plist.in
         MACOSX_BUNDLE_BUNDLE_NAME "Gritcode"
         MACOSX_BUNDLE_GUI_IDENTIFIER "ai.gritcode.app"
-        MACOSX_BUNDLE_BUNDLE_VERSION "${VERSION_STRING}"
+        MACOSX_BUNDLE_BUNDLE_VERSION "${PROJECT_VERSION}"
         MACOSX_BUNDLE_SHORT_VERSION_STRING "${PROJECT_VERSION_MAJOR}.${PROJECT_VERSION_MINOR}.${PROJECT_VERSION_PATCH}"
         MACOSX_BUNDLE_ICON_FILE grit.icns
     )
@@ -220,7 +211,21 @@ target_include_directories(grit PRIVATE
     ${cmark_BINARY_DIR}/src
     ${cmark_SOURCE_DIR}/src
     src
+    ${CMAKE_BINARY_DIR}/generated
 )
+
+# Regenerate version.h on every build so `git describe` reflects the current
+# tree. The script only rewrites the file when the content changes, so only
+# the TU(s) that #include "version.h" recompile, and only when it matters.
+add_custom_target(gen_version ALL
+    COMMAND ${CMAKE_COMMAND}
+            -DSOURCE_DIR=${CMAKE_SOURCE_DIR}
+            -DOUTPUT=${GRIT_VERSION_HEADER}
+            -P ${CMAKE_SOURCE_DIR}/cmake/GenVersion.cmake
+    BYPRODUCTS ${GRIT_VERSION_HEADER}
+    VERBATIM
+)
+add_dependencies(grit gen_version)
 
 target_link_libraries(grit PRIVATE
     OpenGL::GL
@@ -266,10 +271,6 @@ else()
         )
     endif()
 endif()
-
-target_compile_definitions(grit PRIVATE
-    GRIT_VERSION="${VERSION_STRING}"
-)
 
 if(GRIT_ENABLE_MCP)
     target_compile_definitions(grit PRIVATE GRIT_ENABLE_MCP)
