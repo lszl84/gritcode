@@ -15,26 +15,25 @@
 // along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 #include "clipboard.h"
-#include <GLFW/glfw3.h>
+#include "window.h"
 
-static GLFWwindow* g_window = nullptr;
+static AppWindow* g_window = nullptr;
 
 namespace Clipboard {
 
-void Init(GLFWwindow* window) {
+void Init(AppWindow* window) {
     g_window = window;
 }
 
 void Copy(const std::string& text) {
     if (g_window && !text.empty()) {
-        glfwSetClipboardString(g_window, text.c_str());
+        g_window->SetClipboard(text);
     }
 }
 
 std::string Paste() {
     if (!g_window) return "";
-    const char* text = glfwGetClipboardString(g_window);
-    return text ? std::string(text) : "";
+    return g_window->GetClipboard();
 }
 
 }  // namespace Clipboard

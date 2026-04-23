@@ -15,18 +15,14 @@
 // along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 #pragma once
-#include <GLFW/glfw3.h>
 #include <string>
+
+class AppWindow;
 
 namespace Clipboard {
 
-// Initialize clipboard with a window handle. Must be called before Copy/Paste.
-void Init(GLFWwindow* window);
-
-// Copy text to the system clipboard.
+void Init(AppWindow* window);
 void Copy(const std::string& text);
-
-// Get text from the system clipboard.
 std::string Paste();
 
 }  // namespace Clipboard
