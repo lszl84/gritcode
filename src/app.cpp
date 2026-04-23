@@ -1504,7 +1504,8 @@ App::ModelLimits App::GetModelLimits() {
     lim.contextWindow = 128000;
     lim.maxOutput = 65536;
 
-    std::string registryKey = (activeProvider_ == "zen") ? "opencode" : activeProvider_;
+    std::string registryKey = (activeProvider_ == "zen" || activeProvider_ == "opencode-go")
+        ? "opencode" : activeProvider_;
     if (registryLoaded_ && modelsRegistry_.contains(registryKey) &&
         modelsRegistry_[registryKey].is_object()) {
         const auto& p = modelsRegistry_[registryKey];
