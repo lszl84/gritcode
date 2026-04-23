@@ -1635,7 +1635,10 @@ std::string App::BuildRequestJson() {
             "## Behavior\n"
             "- When given a task, work through it step by step using your tools.\n"
             "- Do not just describe what you would do — actually do it by calling tools.\n"
+            "- NEVER say 'Let me...' or 'I will...' without immediately calling the tools to do it.\n"
+            "  Actions must ALWAYS be tool calls, never text descriptions of planned actions.\n"
             "- After each tool result, assess whether the task is complete and continue if not.\n"
+            "  If you need to do more work, immediately call more tools. Do NOT stop and wait.\n"
             "- When making changes, verify they work (e.g., run tests or the build).\n"
             "- Keep responses concise. Lead with actions, not explanations.\n";
         msgs.push_back({{"role", "system"}, {"content", sysPrompt}});
@@ -1742,6 +1745,9 @@ std::string App::BuildRequestJson() {
             if (dropFrom > 1) {
                 DLOG("[CONTEXT] over budget — dropping messages 1..%d, keeping %d..%zu",
                      dropFrom - 1, dropFrom, msgs.size() - 1);
+                int dropped = dropFrom - 1;
+                AppendSystem("📦 Context compacted: dropped " + std::to_string(dropped) +
+                             " older messages to fit within the model's context window.");
                 // Insert a compaction notice so the model knows context was lost
                 json compactMsg = {
                     {"role", "user"},
@@ -1830,7 +1836,10 @@ std::string App::BuildAnthropicRequestJson() {
             "## Behavior\n"
             "- When given a task, work through it step by step using your tools.\n"
             "- Do not just describe what you would do — actually do it by calling tools.\n"
+            "- NEVER say 'Let me...' or 'I will...' without immediately calling the tools to do it.\n"
+            "  Actions must ALWAYS be tool calls, never text descriptions of planned actions.\n"
             "- After each tool result, assess whether the task is complete and continue if not.\n"
+            "  If you need to do more work, immediately call more tools. Do NOT stop and wait.\n"
             "- When making changes, verify they work (e.g., run tests or the build).\n"
             "- Keep responses concise. Lead with actions, not explanations.\n";
     }
@@ -2377,6 +2386,49 @@ void App::DoSendToProvider() {
                     }
                     ExecuteToolCalls(toolCalls, content);
                     return;
+                }
+
+                // Auto-continue: if the model was in a tool loop (toolRound_ > 0)
+                // and sends text without tool calls, check if it describes planned
+                // actions ("let me", "i will", etc.). If so, nudge it to actually
+                // call tools instead of stopping. This prevents the "say-do gap"
+                // where models plan actions in text but don't follow through.
+                if (toolCalls.empty() && toolRound_ > 0 && toolRound_ < 40 && !content.empty()) {
+                    std::string lower;
+                    lower.reserve(content.size());
+                    for (char c : content) lower += (char)std::tolower((unsigned char)c);
+                    bool hasActionPhrase =
+                        lower.find("let me") != std::string::npos ||
+                        lower.find("i will") != std::string::npos ||
+                        lower.find("i'll") != std::string::npos ||
+                        lower.find("i need to") != std::string::npos ||
+                        lower.find("i should") != std::string::npos ||
+                        lower.find("next step") != std::string::npos ||
+                        lower.find("continue") != std::string::npos;
+                    if (hasActionPhrase) {
+                        DLOG("[DEBUG-AUTO-CONTINUE] model described actions but sent no tools — nudging");
+                        ChatMessage m;
+                        m.role = "assistant";
+                        m.content = content;
+                        if (!reasoningBuffer_.empty())
+                            m.reasoningContent = reasoningBuffer_;
+                        session_.History().push_back(std::move(m));
+                        session_.History().push_back({"user", "[system: you described planned actions but did not call any tools. Please immediately call the tools you mentioned to actually perform those actions. Do not describe — just call the tools.]", {}, {}});
+                        toolRound_++;
+
+                        if (!responseBuffer_.empty()) {
+                            RenderMarkdownToBlocks(true);
+                            responseBuffer_.clear();
+                        }
+                        if (receivingThinking_) {
+                            receivingThinking_ = false;
+                            scrollView_.StopThinking(scrollView_.BlockCount() - 1);
+                        }
+
+                        DoSendToProvider();
+                        MarkDirty();
+                        return;
+                    }
                 }
 
                 // Some providers (notably Z.AI GLM via the Zen gateway) may
