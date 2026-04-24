@@ -7,10 +7,17 @@
 #include <GL/gl.h>
 #include <cstdint>
 
+class FontManager;
+
 class CsdCompositor {
 public:
     bool Init();
     void Shutdown();
+
+    // Register the app's FontManager so we can rasterize the "gritcode"
+    // titlebar text the first time we draw. Safe to call multiple times —
+    // the title texture is rebuilt only when the pointer changes.
+    void SetFontManager(const FontManager* fm);
 
     struct Frame {
         int width  = 0;  // content width in pixels (scale applied)
@@ -66,6 +73,13 @@ private:
     GLint  uCScreen_ = -1, uCWindow_ = -1, uCRadius_ = -1,
            uCSigma_ = -1, uCShadow_ = -1, uCOutline_ = -1, uCTex_ = -1;
 
+    // Title text (pre-rasterized "gritcode" bitmap).
+    GLuint titleProg_ = 0, titleTex_ = 0;
+    GLint  uTRect_ = -1, uTScreen_ = -1, uTBarColor_ = -1, uTTextColor_ = -1, uTTex_ = -1;
+    int    titleTexW_ = 0, titleTexH_ = 0;
+    const FontManager* titleFont_ = nullptr;
+    const FontManager* titleBuiltFrom_ = nullptr;
+
     float closeHoverAmt_ = 0.0f;
     bool  closeHover_ = false;
     bool  closePressed_ = false;
@@ -73,4 +87,6 @@ private:
     bool CompileShaders();
     void EnsureFbo(GLuint* fbo, GLuint* tex, int* curW, int* curH, int w, int h);
     void DrawCloseButton(int mainW, int mainH, int scale);
+    void DrawTitle(int mainW, int mainH, int scale);
+    void BuildTitleTexture();
 };

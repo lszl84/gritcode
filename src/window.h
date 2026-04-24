@@ -20,6 +20,8 @@
 #include <functional>
 #include <string>
 
+class FontManager;
+
 // Platform-native window abstraction. Replaces GLFW.
 // Linux: Wayland (primary) with X11 fallback.
 // macOS: NSWindow + NSOpenGLView.
@@ -75,6 +77,10 @@ public:
 
     void SetClipboard(const std::string& text);
     std::string GetClipboard();
+
+    // Provide the app's FontManager so CSD can render the titlebar title.
+    // No-op when CSD isn't active (X11/macOS).
+    void SetFontManager(const FontManager* fm);
 
     // Platform-specific handle (void* to avoid exposing platform types)
     void* NativeHandle() const;

@@ -27,6 +27,7 @@
 #endif
 #include <string>
 #include <vector>
+#include <map>
 #include <mutex>
 #include <queue>
 #include <atomic>
@@ -152,6 +153,15 @@ private:
     size_t lastMarkdownLen_ = 0;
     double lastMarkdownTime_ = 0;
 
+    // Claude ACP tool-call streaming state. One THINKING block per tool round
+    // (matches Zen path visually): each "Tool: <name>\n  <arg>: <val>\n..." as
+    // tool_use blocks stream in, then "\n<name>:\n<output>\n" when tool_result
+    // user messages arrive. acpToolBlockIdx_ == -1 means no open tool block.
+    int acpToolBlockIdx_ = -1;
+    std::map<int, std::string> acpToolInputBuf_;    // content-block index → partial JSON
+    std::map<int, std::string> acpToolNames_;       // content-block index → tool name
+    std::map<std::string, std::string> acpToolUseIdToName_;  // tool_use_id → name
+
     // Waiting indicator (plain dots, not a block)
     float waitingDotTimer_ = 0;
     int waitingDotFrame_ = -1;  // current animation frame (-1 = not showing)
@@ -181,6 +191,7 @@ private:
     void StartFetchRegistry();
     void OnRegistryReceived(nlohmann::json registry, int httpStatus);
     void PopulateModelsFromRegistry(const std::string& providerId);
+    void PopulateClaudeModels();
     std::string GetRegistryCachePath();
     void OnWorkspaceChanged(int idx, const std::string& id);
     void OnProviderChanged(int idx, const std::string& id);

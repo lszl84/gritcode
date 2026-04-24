@@ -100,8 +100,9 @@ private:
 
     uint64_t Key(uint32_t glyph, int face) const { return ((uint64_t)face << 32) | glyph; }
 
-    int LoadFace(const std::string& path, int sizePx);
-    std::string FindFont(const char* family, bool bold, bool italic) const;
+    struct FontMatch { std::string path; long index = 0; };
+    int LoadFace(const std::string& path, int sizePx, long faceIndex = 0);
+    FontMatch FindFont(const char* family, bool bold, bool italic) const;
     int FindFallbackFace(uint32_t codepoint, int sizePx) const;
 
     mutable std::map<uint64_t, int> fallbackCache_;

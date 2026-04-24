@@ -39,7 +39,7 @@ FontManager::~FontManager() {
 
 #if defined(GRIT_LINUX) || defined(GRIT_FREEBSD)
 
-std::string FontManager::FindFont(const char* family, bool bold, bool italic) const {
+FontManager::FontMatch FontManager::FindFont(const char* family, bool bold, bool italic) const {
     FcPattern* pat = FcPatternCreate();
     FcPatternAddString(pat, FC_FAMILY, (const FcChar8*)family);
     if (bold) FcPatternAddInteger(pat, FC_WEIGHT, FC_WEIGHT_BOLD);
@@ -52,15 +52,18 @@ std::string FontManager::FindFont(const char* family, bool bold, bool italic) co
 
     FcResult result;
     FcPattern* match = FcFontMatch(nullptr, pat, &result);
-    std::string path;
+    FontMatch out;
     if (match) {
         FcChar8* file = nullptr;
         if (FcPatternGetString(match, FC_FILE, 0, &file) == FcResultMatch)
-            path = (const char*)file;
+            out.path = (const char*)file;
+        int idx = 0;
+        if (FcPatternGetInteger(match, FC_INDEX, 0, &idx) == FcResultMatch)
+            out.index = idx;
         FcPatternDestroy(match);
     }
     FcPatternDestroy(pat);
-    return path;
+    return out;
 }
 
 int FontManager::FindFallbackFace(uint32_t codepoint, int sizePx) const {
@@ -81,14 +84,15 @@ int FontManager::FindFallbackFace(uint32_t codepoint, int sizePx) const {
     if (match) {
         FcChar8* file = nullptr;
         if (FcPatternGetString(match, FC_FILE, 0, &file) == FcResultMatch) {
-            // Check if this font file+size was already loaded
             std::string path((const char*)file);
-            std::string faceKey = path + ":" + std::to_string(sizePx);
+            int fcIndex = 0;
+            FcPatternGetInteger(match, FC_INDEX, 0, &fcIndex);
+            std::string faceKey = path + ":" + std::to_string(sizePx) + ":" + std::to_string(fcIndex);
             auto fit = loadedFaces_.find(faceKey);
             if (fit != loadedFaces_.end()) {
                 faceIdx = fit->second;
             } else {
-                faceIdx = const_cast<FontManager*>(this)->LoadFace(path, sizePx);
+                faceIdx = const_cast<FontManager*>(this)->LoadFace(path, sizePx, fcIndex);
                 if (faceIdx >= 0)
                     loadedFaces_[faceKey] = faceIdx;
             }
@@ -171,23 +175,21 @@ static const struct { const char* requested; const char* macos; } FONT_MAP[] = {
     {nullptr, nullptr}
 };
 
-std::string FontManager::FindFont(const char* family, bool bold, bool italic) const {
+FontManager::FontMatch FontManager::FindFont(const char* family, bool bold, bool italic) const {
     CTFontSymbolicTraits traits = 0;
     if (bold) traits |= kCTFontBoldTrait;
     if (italic) traits |= kCTFontItalicTrait;
 
-    // Try the exact requested family first
-    std::string path = CTFindByFamily(family, traits);
-    if (!path.empty()) return path;
+    FontMatch out;
+    out.path = CTFindByFamily(family, traits);
+    if (!out.path.empty()) return out;
 
-    // Fall back to macOS equivalents
     for (auto* m = FONT_MAP; m->requested; m++) {
         if (strcmp(family, m->requested) == 0) {
-            path = CTFindByFamily(m->macos, traits);
-            if (!path.empty()) return path;
+            out.path = CTFindByFamily(m->macos, traits);
+            if (!out.path.empty()) return out;
         }
     }
-
     return {};
 }
 
@@ -242,7 +244,7 @@ static void InitFontDiscovery() { /* CoreText needs no init */ }
 
 #endif
 
-int FontManager::LoadFace(const std::string& path, int sizePx) {
+int FontManager::LoadFace(const std::string& path, int sizePx, long faceIndex) {
     auto& buf = fileCache_[path];
     if (!buf) {
         buf = std::make_shared<std::vector<uint8_t>>();
@@ -259,9 +261,15 @@ int FontManager::LoadFace(const std::string& path, int sizePx) {
         fclose(fp);
     }
 
+    // Fontconfig encodes variable-font named instances in the high 16 bits of
+    // FC_INDEX (e.g. 0x00040000 = base face 0, instance 4). FreeType accepts
+    // that layout directly in FT_New_Memory_Face, which is the only way to
+    // get real bold weight out of a single-file variable font like
+    // NotoSans[wght].ttf.
     Face f;
-    if (FT_New_Memory_Face(ft_, buf->data(), (FT_Long)buf->size(), 0, &f.ft)) {
-        fprintf(stderr, "Failed to load font: %s\n", path.c_str());
+    if (FT_New_Memory_Face(ft_, buf->data(), (FT_Long)buf->size(),
+                           (FT_Long)faceIndex, &f.ft)) {
+        fprintf(stderr, "Failed to load font: %s (index %ld)\n", path.c_str(), faceIndex);
         return -1;
     }
 
@@ -319,17 +327,17 @@ bool FontManager::Init(int baseSizePx) {
     int thinkingSizePx = std::max(10, baseSizePx - 3);
 
     auto loadStyle = [&](FontStyle style, const char* family, bool bold, bool italic, int sizePx) {
-        std::string path = FindFont(family, bold, italic);
-        if (path.empty()) {
+        FontMatch m = FindFont(family, bold, italic);
+        if (m.path.empty()) {
             fprintf(stderr, "Font not found: %s bold=%d italic=%d\n", family, bold, italic);
             return;
         }
-        int primaryIdx = LoadFace(path, sizePx);
+        int primaryIdx = LoadFace(m.path, sizePx, m.index);
 
-        std::string arabicPath = FindFont("Noto Sans Arabic", bold, false);
+        FontMatch am = FindFont("Noto Sans Arabic", bold, false);
         int arabicIdx = -1;
-        if (!arabicPath.empty())
-            arabicIdx = LoadFace(arabicPath, sizePx);
+        if (!am.path.empty())
+            arabicIdx = LoadFace(am.path, sizePx, am.index);
 
         styleFaces_[style] = {primaryIdx, arabicIdx >= 0 ? arabicIdx : primaryIdx};
     };

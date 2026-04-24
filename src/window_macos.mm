@@ -440,6 +440,10 @@ void AppWindow::OnScrollEvent(ScrollCb cb)     { if (impl_->mac) impl_->mac->scr
 void AppWindow::OnKeyEvent(KeyCb cb)           { if (impl_->mac) impl_->mac->keyCb       = std::move(cb); }
 void AppWindow::OnCharEvent(CharCb cb)         { if (impl_->mac) impl_->mac->charCb      = std::move(cb); }
 
+void AppWindow::SetFontManager(const FontManager*) {
+    // macOS uses NSWindow's native titlebar — no CSD, no custom title draw.
+}
+
 void AppWindow::SetClipboard(const std::string& text) {
     @autoreleasepool {
         NSPasteboard* pb = [NSPasteboard generalPasteboard];

@@ -653,6 +653,9 @@ bool App::Init(bool sessionChooser) {
         return false;
     }
 
+    // CSD (Wayland) needs the app's FontManager to rasterize the titlebar title.
+    window_.SetFontManager(&scrollView_.Fonts());
+
     // Workspace dropdown
     workspaceDropdown_.onSelect = [&](int i, const std::string& id) { OnWorkspaceChanged(i, id); };
 
@@ -1224,7 +1227,9 @@ void App::OnRegistryReceived(json registry, int httpStatus) {
     // If the user is already on a registry-backed provider, refresh the
     // dropdown so they see the canonical list instead of whatever /models
     // or the cache had.
-    if (activeProvider_ == "zen" || activeProvider_ == "opencode-go") {
+    if (activeProvider_ == "claude") {
+        PopulateClaudeModels();
+    } else if (activeProvider_ == "zen" || activeProvider_ == "opencode-go") {
         PopulateModelsFromRegistry(activeProvider_);
         // Connect() parked the status label at "Go (loading models...)" while
         // waiting for the registry. Now that it's here, move it to the normal
@@ -1430,59 +1435,80 @@ void App::OnProviderChanged(int, const std::string& id) {
     } else {
         statusLabel_.text = "Claude (ACP)";
         connected_ = true;
-
-        // Populate Claude models from the registry (filtered to Anthropic
-        // protocol). This keeps the list in sync as Anthropic adds/remove
-        // models — no more hardcoding that drifts out of date.
-        std::string registryKey = "opencode";
-        if (registryLoaded_ && modelsRegistry_.contains(registryKey) &&
-            modelsRegistry_[registryKey].is_object()) {
-            const auto& p = modelsRegistry_[registryKey];
-            modelDropdown_.items.clear();
-            if (p.contains("models") && p["models"].is_object()) {
-                for (auto it = p["models"].begin(); it != p["models"].end(); ++it) {
-                    const std::string& mid = it.key();
-                    const auto& m = it.value();
-                    std::string npm = p.value("npm", "");
-                    if (m.contains("provider") && m["provider"].is_object() &&
-                        m["provider"].contains("npm") && m["provider"]["npm"].is_string()) {
-                        npm = m["provider"]["npm"].get<std::string>();
-                    }
-                    if (npm != "@ai-sdk/anthropic") continue;
-                    // models.dev tags some third-party models (MiniMax,
-                    // Qwen) with the Anthropic wire protocol because they
-                    // expose a compatible API. Those aren't Claude, so
-                    // require a `claude-` id prefix to keep them out of
-                    // the ACP dropdown.
-                    if (mid.rfind("claude-", 0) != 0) continue;
-                    std::string name = m.value("name", mid);
-                    modelDropdown_.items.push_back({mid, name});
-                }
-            }
-            std::sort(modelDropdown_.items.begin(), modelDropdown_.items.end(),
-                      [](const DropdownItem& a, const DropdownItem& b) {
-                          return a.label < b.label;
-                      });
-        }
-
-        if (modelDropdown_.items.empty()) {
-            // Fallback if registry hasn't loaded yet
-            modelDropdown_.items = {
-                {"claude-opus-4-7", "Claude Opus 4.7"},
-                {"claude-sonnet-4-7", "Claude Sonnet 4.7"},
-                {"claude-haiku-4-5", "Claude Haiku 4.5"},
-            };
-        }
-        int sel = 1;  // default sonnet
-        if (!restoredModelPref_.empty()) {
-            for (size_t i = 0; i < modelDropdown_.items.size(); i++) {
-                if (modelDropdown_.items[i].id == restoredModelPref_) { sel = (int)i; break; }
-            }
-            restoredModelPref_.clear();
-        }
-        modelDropdown_.selectedIndex = sel;
-        activeModel_ = modelDropdown_.items[sel].id;
+        PopulateClaudeModels();
     }
+    MarkDirty();
+}
+
+void App::PopulateClaudeModels() {
+    // Populate Claude models from the registry (filtered to Anthropic
+    // protocol). Keeps the list in sync as Anthropic adds/removes models.
+    modelDropdown_.items.clear();
+    const std::string registryKey = "opencode";
+    bool fromRegistry = false;
+    if (registryLoaded_ && modelsRegistry_.contains(registryKey) &&
+        modelsRegistry_[registryKey].is_object()) {
+        const auto& p = modelsRegistry_[registryKey];
+        if (p.contains("models") && p["models"].is_object()) {
+            for (auto it = p["models"].begin(); it != p["models"].end(); ++it) {
+                const std::string& mid = it.key();
+                const auto& m = it.value();
+                std::string npm = p.value("npm", "");
+                if (m.contains("provider") && m["provider"].is_object() &&
+                    m["provider"].contains("npm") && m["provider"]["npm"].is_string()) {
+                    npm = m["provider"]["npm"].get<std::string>();
+                }
+                if (npm != "@ai-sdk/anthropic") continue;
+                // models.dev tags some third-party models (MiniMax, Qwen)
+                // with the Anthropic wire protocol because they expose a
+                // compatible API. Require a `claude-` id prefix to keep
+                // them out of the ACP dropdown.
+                if (mid.rfind("claude-", 0) != 0) continue;
+                std::string name = m.value("name", mid);
+                modelDropdown_.items.push_back({mid, name});
+            }
+        }
+        std::sort(modelDropdown_.items.begin(), modelDropdown_.items.end(),
+                  [](const DropdownItem& a, const DropdownItem& b) {
+                      return a.label < b.label;
+                  });
+        fromRegistry = !modelDropdown_.items.empty();
+    }
+
+    if (modelDropdown_.items.empty()) {
+        // Fallback if registry hasn't loaded yet. restoredModelPref_ is
+        // preserved so the real registry-backed refresh can honor it once
+        // OnRegistryReceived fires.
+        modelDropdown_.items = {
+            {"claude-opus-4-7", "Claude Opus 4.7"},
+            {"claude-sonnet-4-6", "Claude Sonnet 4.6"},
+            {"claude-haiku-4-5", "Claude Haiku 4.5"},
+        };
+    }
+
+    // Selection priority: restoredModelPref_ > activeModel_ > default sonnet.
+    int sel = -1;
+    if (!restoredModelPref_.empty()) {
+        for (size_t i = 0; i < modelDropdown_.items.size(); i++) {
+            if (modelDropdown_.items[i].id == restoredModelPref_) { sel = (int)i; break; }
+        }
+        if (sel >= 0 && fromRegistry) restoredModelPref_.clear();
+    }
+    if (sel < 0 && !activeModel_.empty()) {
+        for (size_t i = 0; i < modelDropdown_.items.size(); i++) {
+            if (modelDropdown_.items[i].id == activeModel_) { sel = (int)i; break; }
+        }
+    }
+    if (sel < 0) {
+        sel = 0;
+        for (size_t i = 0; i < modelDropdown_.items.size(); i++) {
+            if (modelDropdown_.items[i].id.find("sonnet") != std::string::npos) {
+                sel = (int)i; break;
+            }
+        }
+    }
+    modelDropdown_.selectedIndex = sel;
+    activeModel_ = modelDropdown_.items[sel].id;
     MarkDirty();
 }
 
@@ -2169,6 +2195,13 @@ void App::ApplyCompaction(int splitIdx, bool success, const std::string& summary
 
 void App::DoSendToProvider() {
     if (activeProvider_ == "claude") {
+        // Fresh ACP turn — drop any per-turn tool streaming state from a
+        // previous (possibly cancelled) run.
+        acpToolBlockIdx_ = -1;
+        acpToolInputBuf_.clear();
+        acpToolNames_.clear();
+        acpToolUseIdToName_.clear();
+
         // Claude ACP: spawn `claude --print` with stream-json output.
         //
         // popen() is unsafe here: the read pipe fd gets inherited by every
@@ -2302,14 +2335,67 @@ void App::DoSendToProvider() {
                         auto& evt = j["event"];
                         std::string evtType = evt.value("type", "");
 
-                        if (evtType == "content_block_stop") {
-                            events_.Push([this, gen]() {
+                        if (evtType == "content_block_start" && evt.contains("content_block")) {
+                            auto& cb = evt["content_block"];
+                            int idx = evt.value("index", -1);
+                            if (cb.value("type", "") == "tool_use") {
+                                std::string tname = cb.value("name", "");
+                                std::string tid = cb.value("id", "");
+                                events_.Push([this, idx, tname, tid, gen]() {
+                                    if (gen != requestGen_.load()) return;
+                                    acpToolNames_[idx] = tname;
+                                    acpToolUseIdToName_[tid] = tname;
+                                    acpToolInputBuf_[idx] = "";
+
+                                    // Finalize any in-flight assistant text so
+                                    // markdown settles before the tool block
+                                    // appears below it.
+                                    if (!responseBuffer_.empty()) {
+                                        RenderMarkdownToBlocks(true);
+                                        responseBuffer_.clear();
+                                        lastMarkdownLen_ = 0;
+                                    }
+                                    if (receivingThinking_) {
+                                        receivingThinking_ = false;
+                                    }
+
+                                    std::string header = "Tool: " + tname + "\n";
+                                    if (acpToolBlockIdx_ < 0) {
+                                        scrollView_.AppendStream(BlockType::THINKING, header);
+                                        acpToolBlockIdx_ = (int)scrollView_.BlockCount() - 1;
+                                        scrollView_.StartThinking(acpToolBlockIdx_);
+                                    } else {
+                                        scrollView_.ContinueStream(header);
+                                    }
+                                    MarkDirty();
+                                });
+                            }
+                        } else if (evtType == "content_block_stop") {
+                            int idx = evt.value("index", -1);
+                            events_.Push([this, idx, gen]() {
                                 if (gen != requestGen_.load()) return;
+                                auto nit = acpToolNames_.find(idx);
+                                if (nit != acpToolNames_.end()) {
+                                    // Tool_use block finished — parse the
+                                    // accumulated input JSON and emit one line
+                                    // per argument, matching Zen's layout.
+                                    auto bit = acpToolInputBuf_.find(idx);
+                                    std::string partial = (bit != acpToolInputBuf_.end()) ? bit->second : "";
+                                    std::string argText;
+                                    try {
+                                        json args = json::parse(partial.empty() ? "{}" : partial);
+                                        for (auto& [k, v] : args.items()) {
+                                            argText += "  " + k + ": " + v.dump() + "\n";
+                                        }
+                                    } catch (...) {}
+                                    if (!argText.empty() && acpToolBlockIdx_ >= 0) {
+                                        scrollView_.ContinueStream(argText);
+                                    }
+                                    acpToolInputBuf_.erase(idx);
+                                    acpToolNames_.erase(idx);
+                                }
                                 if (receivingThinking_) {
                                     receivingThinking_ = false;
-                                    // Don't stop thinking animation yet —
-                                    // keep dots visible until text_delta
-                                    // actually starts streaming content.
                                 }
                                 MarkDirty();
                             });
@@ -2323,6 +2409,12 @@ void App::DoSendToProvider() {
                                     fullResponse += text;
                                     events_.Push([this, text, gen]() {
                                         if (gen != requestGen_.load()) return;
+                                        // Close any open tool-call block before
+                                        // text streams in — tool round is over.
+                                        if (acpToolBlockIdx_ >= 0) {
+                                            scrollView_.StopThinking(acpToolBlockIdx_);
+                                            acpToolBlockIdx_ = -1;
+                                        }
                                         bool firstChunk = responseBuffer_.empty();
                                         if (receivingThinking_) {
                                             receivingThinking_ = false;
@@ -2346,6 +2438,15 @@ void App::DoSendToProvider() {
                                         MarkDirty();
                                     });
                                 }
+                            } else if (deltaType == "input_json_delta") {
+                                int idx = evt.value("index", -1);
+                                std::string pj = delta.value("partial_json", "");
+                                if (idx >= 0 && !pj.empty()) {
+                                    events_.Push([this, idx, pj, gen]() {
+                                        if (gen != requestGen_.load()) return;
+                                        acpToolInputBuf_[idx] += pj;
+                                    });
+                                }
                             } else if (deltaType == "thinking_delta") {
                                 std::string thinking = delta.value("thinking", "");
                                 if (!thinking.empty()) {
@@ -2361,6 +2462,42 @@ void App::DoSendToProvider() {
                                         MarkDirty();
                                     });
                                 }
+                            }
+                        }
+                    } else if (type == "user" && j.contains("message")) {
+                        // tool_result content from the claude subprocess. Append
+                        // each result to the current tool block (same visual
+                        // shape as Zen's ExecuteToolCalls finalizer) and close
+                        // the block's thinking animation.
+                        auto& msg = j["message"];
+                        if (msg.contains("content") && msg["content"].is_array()) {
+                            for (auto& part : msg["content"]) {
+                                if (part.value("type", "") != "tool_result") continue;
+                                std::string tid = part.value("tool_use_id", "");
+                                std::string out;
+                                if (part.contains("content")) {
+                                    auto& c = part["content"];
+                                    if (c.is_string()) out = c.get<std::string>();
+                                    else if (c.is_array()) {
+                                        for (auto& seg : c) {
+                                            if (seg.value("type", "") == "text")
+                                                out += seg.value("text", "");
+                                        }
+                                    }
+                                }
+                                events_.Push([this, tid, out, gen]() {
+                                    if (gen != requestGen_.load()) return;
+                                    auto nit = acpToolUseIdToName_.find(tid);
+                                    std::string tname = (nit != acpToolUseIdToName_.end()) ? nit->second : "";
+                                    if (acpToolBlockIdx_ >= 0) {
+                                        std::string resultText = "\n" + tname + ":\n" + StripAnsi(out) + "\n";
+                                        scrollView_.ContinueStream(resultText);
+                                        scrollView_.StopThinking(acpToolBlockIdx_);
+                                        acpToolBlockIdx_ = -1;
+                                    }
+                                    acpToolUseIdToName_.erase(tid);
+                                    MarkDirty();
+                                });
                             }
                         }
                     } else if (type == "result") {
@@ -2398,6 +2535,10 @@ void App::DoSendToProvider() {
                 if (receivingThinking_) {
                     receivingThinking_ = false;
                 }
+                acpToolBlockIdx_ = -1;
+                acpToolInputBuf_.clear();
+                acpToolNames_.clear();
+                acpToolUseIdToName_.clear();
                 scrollView_.StopAllAnimations();
                 if (!responseBuffer_.empty()) {
                     RenderMarkdownToBlocks(true);

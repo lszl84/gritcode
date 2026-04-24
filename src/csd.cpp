@@ -22,11 +22,13 @@
 #include <GL/glext.h>
 
 #include "csd.h"
+#include "font.h"
 
 #include <cstdio>
 #include <cmath>
 #include <cstring>
 #include <algorithm>
+#include <vector>
 
 // -- tiny shader helpers ----------------------------------------------------
 
@@ -170,6 +172,37 @@ static constexpr float TITLEBAR_G = 0.14f;
 static constexpr float TITLEBAR_B = 0.18f;
 static constexpr float SHADOW_SIGMA = 14.0f;
 
+// Title text — bold lowercase, centered in the titlebar.
+static constexpr const char* kTitleText = "gritcode";
+
+// Simple alpha-modulated sampler for the pre-rasterized title bitmap.
+// UV is flipped vertically: mainFbo is GL y-up, but our CPU bitmap is stored
+// with row 0 at the top of the glyphs (standard image orientation).
+static const char* kTitleVS = R"(#version 330 core
+layout(location = 0) in vec2 aPos;
+uniform vec4 uRect;
+uniform vec2 uScreen;
+out vec2 vUV;
+void main() {
+    vec2 px  = uRect.xy + aPos * uRect.zw;
+    vec2 ndc = vec2(px.x / uScreen.x, px.y / uScreen.y) * 2.0 - 1.0;
+    gl_Position = vec4(ndc, 0.0, 1.0);
+    vUV = vec2(aPos.x, 1.0 - aPos.y);
+}
+)";
+
+static const char* kTitleFS = R"(#version 330 core
+in  vec2 vUV;
+out vec4 fragColor;
+uniform sampler2D uTex;
+uniform vec3 uBarColor;
+uniform vec3 uTextColor;
+void main() {
+    float a = texture(uTex, vUV).r;
+    fragColor = vec4(mix(uBarColor, uTextColor, a), 1.0);
+}
+)";
+
 bool CsdCompositor::CompileShaders() {
     closeProg_ = link_program(kCloseVS, kCloseFS);
     if (!closeProg_) return false;
@@ -188,6 +221,14 @@ bool CsdCompositor::CompileShaders() {
     uCShadow_  = glGetUniformLocation(composeProg_, "uShadow");
     uCOutline_ = glGetUniformLocation(composeProg_, "uOutline");
     uCTex_     = glGetUniformLocation(composeProg_, "uTex");
+
+    titleProg_ = link_program(kTitleVS, kTitleFS);
+    if (!titleProg_) return false;
+    uTRect_      = glGetUniformLocation(titleProg_, "uRect");
+    uTScreen_    = glGetUniformLocation(titleProg_, "uScreen");
+    uTBarColor_  = glGetUniformLocation(titleProg_, "uBarColor");
+    uTTextColor_ = glGetUniformLocation(titleProg_, "uTextColor");
+    uTTex_       = glGetUniformLocation(titleProg_, "uTex");
 
     const float quad[] = { 0,0, 1,0, 1,1, 0,0, 1,1, 0,1 };
 
@@ -224,6 +265,93 @@ void CsdCompositor::Shutdown() {
     if (contentTex_)  { glDeleteTextures(1, &contentTex_); contentTex_ = 0; }
     if (mainFbo_)     { glDeleteFramebuffers(1, &mainFbo_); mainFbo_ = 0; }
     if (mainTex_)     { glDeleteTextures(1, &mainTex_); mainTex_ = 0; }
+    if (titleProg_)   { glDeleteProgram(titleProg_); titleProg_ = 0; }
+    if (titleTex_)    { glDeleteTextures(1, &titleTex_); titleTex_ = 0; }
+    titleBuiltFrom_ = nullptr;
+    titleTexW_ = titleTexH_ = 0;
+}
+
+void CsdCompositor::SetFontManager(const FontManager* fm) {
+    titleFont_ = fm;
+}
+
+void CsdCompositor::BuildTitleTexture() {
+    if (!titleFont_ || titleFont_ == titleBuiltFrom_) return;
+
+    ShapedRun run = titleFont_->Shape(kTitleText, FontStyle::Bold);
+    float ascent = titleFont_->Ascent(FontStyle::Bold);
+    float lineH  = titleFont_->LineHeight(FontStyle::Bold);
+
+    int bmpH = (int)std::ceil(lineH) + 2;
+    int bmpW = (int)std::ceil(run.totalWidth) + 6;
+    if (bmpW < 1 || bmpH < 1) return;
+
+    std::vector<uint8_t> bmp(bmpW * bmpH, 0);
+    const uint8_t* atlas = titleFont_->AtlasData();
+    int atlasW = titleFont_->AtlasWidth();
+
+    for (const auto& g : run.glyphs) {
+        const GlyphInfo& gi = titleFont_->EnsureGlyph(g.glyphId, g.faceIdx);
+        if (gi.width == 0 || gi.height == 0) continue;
+        int gx = (int)(g.xPos + gi.bearingX);
+        int gy = (int)(ascent - gi.bearingY);
+        for (int r = 0; r < gi.height; r++) {
+            int dstY = gy + r;
+            if (dstY < 0 || dstY >= bmpH) continue;
+            const uint8_t* src = atlas + (gi.atlasY + r) * atlasW + gi.atlasX;
+            uint8_t* dst = bmp.data() + dstY * bmpW + gx;
+            int cols = gi.width;
+            if (gx < 0) { src -= gx; dst -= gx; cols += gx; }
+            if (gx + cols > bmpW) cols = bmpW - gx;
+            for (int c = 0; c < cols; c++) {
+                if (src[c] > dst[c]) dst[c] = src[c];
+            }
+        }
+    }
+
+    if (!titleTex_) glGenTextures(1, &titleTex_);
+    glBindTexture(GL_TEXTURE_2D, titleTex_);
+    glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RED, bmpW, bmpH, 0,
+                 GL_RED, GL_UNSIGNED_BYTE, bmp.data());
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+
+    titleTexW_ = bmpW;
+    titleTexH_ = bmpH;
+    titleBuiltFrom_ = titleFont_;
+}
+
+void CsdCompositor::DrawTitle(int mainW, int mainH, int scale) {
+    BuildTitleTexture();
+    if (!titleTex_ || titleTexW_ <= 0 || titleTexH_ <= 0) return;
+
+    const int S = scale;
+    // The title bitmap was rasterized at the app's already-scale-aware
+    // font size, so its pixels are already "HiDPI" — draw 1:1 in mainFbo
+    // without extra scaling.
+    int quadW = titleTexW_;
+    int quadH = titleTexH_;
+    int cx = (mainW - quadW) / 2;
+    int cy = mainH - (TITLEBAR_H * S + quadH) / 2;  // vertical-center in titlebar
+
+    glDisable(GL_BLEND);
+    glUseProgram(titleProg_);
+    glUniform4f(uTRect_, (float)cx, (float)cy, (float)quadW, (float)quadH);
+    glUniform2f(uTScreen_, (float)mainW, (float)mainH);
+    glUniform3f(uTBarColor_, TITLEBAR_R, TITLEBAR_G, TITLEBAR_B);
+    glUniform3f(uTTextColor_, 0.82f, 0.84f, 0.90f);
+    glActiveTexture(GL_TEXTURE0);
+    glBindTexture(GL_TEXTURE_2D, titleTex_);
+    glUniform1i(uTTex_, 0);
+    glBindVertexArray(closeVao_);  // same 0..1 unit-quad VAO
+    glDrawArrays(GL_TRIANGLES, 0, 6);
+    glBindVertexArray(0);
+    glUseProgram(0);
+    glEnable(GL_BLEND);
+    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
 }
 
 void CsdCompositor::EnsureFbo(GLuint* fbo, GLuint* tex, int* curW, int* curH,
@@ -315,6 +443,7 @@ void CsdCompositor::EndFrame(int windowW, int windowH, int scale, bool floating)
                       GL_COLOR_BUFFER_BIT, GL_NEAREST);
     glBindFramebuffer(GL_FRAMEBUFFER, mainFbo_);
     glViewport(0, 0, winPxW, winPxH);
+    DrawTitle(winPxW, winPxH, S);
     DrawCloseButton(winPxW, winPxH, S);
 
     // ---- Pass 3: compose mainFbo onto default FB with shadow + corners ----

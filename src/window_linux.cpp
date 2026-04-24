@@ -1750,6 +1750,17 @@ void AppWindow::OnCharEvent(CharCb cb) {
 #endif
 }
 
+void AppWindow::SetFontManager(const FontManager* fm) {
+#ifdef HAVE_WAYLAND
+    if (impl_->wl && impl_->wl->csd) {
+        impl_->wl->csd->SetFontManager(fm);
+        impl_->wl->dirty = true;
+    }
+#else
+    (void)fm;
+#endif
+}
+
 void AppWindow::SetClipboard(const std::string& text) {
 #ifdef HAVE_WAYLAND
     if (impl_->wl) {
