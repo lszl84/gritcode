@@ -64,6 +64,7 @@ public:
     const std::string& Provider() const { return provider_; }
     const std::string& Model() const { return model_; }
     const std::string& SessionId() const { return sessionId_; }
+    const std::string& Cwd() const { return cwd_; }
     bool IsDirty() const { return dirty_; }
     void MarkDirty() { dirty_ = true; }
 
