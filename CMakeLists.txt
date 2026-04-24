@@ -44,38 +44,70 @@ FetchContent_MakeAvailable(json)
 find_package(OpenGL REQUIRED)
 
 if(LINUX OR CMAKE_SYSTEM_NAME MATCHES "FreeBSD")
-    # Linux and FreeBSD: use system packages for most dependencies.
-    # Build GLFW from source because distro packages often lack Wayland
-    # support (causing XWayland fallback and rounded-corner overflow bugs).
-    set(GLFW_BUILD_DOCS OFF CACHE BOOL "" FORCE)
-    set(GLFW_BUILD_TESTS OFF CACHE BOOL "" FORCE)
-    set(GLFW_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
-    set(GLFW_INSTALL OFF CACHE BOOL "" FORCE)
-    FetchContent_Declare(glfw
-        GIT_REPOSITORY https://github.com/glfw/glfw.git
-        GIT_TAG 3.4
-        GIT_SHALLOW ON
-    )
-    FetchContent_MakeAvailable(glfw)
-
     find_package(PkgConfig REQUIRED)
     pkg_check_modules(FREETYPE REQUIRED IMPORTED_TARGET freetype2)
     pkg_check_modules(HARFBUZZ REQUIRED IMPORTED_TARGET harfbuzz)
     pkg_check_modules(FONTCONFIG REQUIRED IMPORTED_TARGET fontconfig)
     pkg_check_modules(LIBCURL REQUIRED IMPORTED_TARGET libcurl)
     pkg_check_modules(LIBSECRET REQUIRED IMPORTED_TARGET libsecret-1)
+    pkg_check_modules(EGL REQUIRED IMPORTED_TARGET egl)
+
+    # --- Wayland backend ---
+    pkg_check_modules(WAYLAND_CLIENT IMPORTED_TARGET wayland-client)
+    pkg_check_modules(WAYLAND_EGL    IMPORTED_TARGET wayland-egl)
+    pkg_check_modules(WAYLAND_CURSOR IMPORTED_TARGET wayland-cursor)
+    pkg_check_modules(XKBCOMMON      IMPORTED_TARGET xkbcommon)
+
+    set(HAVE_WAYLAND FALSE)
+    set(HAVE_X11 FALSE)
+    set(PROTO_GENERATED)
+
+    if(WAYLAND_CLIENT_FOUND AND WAYLAND_EGL_FOUND AND WAYLAND_CURSOR_FOUND AND XKBCOMMON_FOUND)
+        find_program(WAYLAND_SCANNER wayland-scanner)
+        if(WAYLAND_SCANNER)
+            set(HAVE_WAYLAND TRUE)
+            pkg_get_variable(WAYLAND_PROTOCOLS_DIR wayland-protocols pkgdatadir)
+            if(NOT WAYLAND_PROTOCOLS_DIR OR NOT EXISTS "${WAYLAND_PROTOCOLS_DIR}")
+                set(WAYLAND_PROTOCOLS_DIR ${CMAKE_CURRENT_BINARY_DIR}/wayland-protocols)
+                file(MAKE_DIRECTORY ${WAYLAND_PROTOCOLS_DIR}/stable/xdg-shell)
+                set(XDG_SHELL_URL "https://gitlab.freedesktop.org/wayland/wayland-protocols/-/raw/main/stable/xdg-shell/xdg-shell.xml")
+                if(NOT EXISTS ${WAYLAND_PROTOCOLS_DIR}/stable/xdg-shell/xdg-shell.xml)
+                    file(DOWNLOAD ${XDG_SHELL_URL} ${WAYLAND_PROTOCOLS_DIR}/stable/xdg-shell/xdg-shell.xml SHOW_PROGRESS)
+                endif()
+            endif()
+            set(PROTO_GEN_DIR ${CMAKE_CURRENT_BINARY_DIR}/proto)
+            file(MAKE_DIRECTORY ${PROTO_GEN_DIR})
+
+            function(grit_wayland_proto xml_rel base)
+                set(xml ${WAYLAND_PROTOCOLS_DIR}/${xml_rel})
+                set(hdr ${PROTO_GEN_DIR}/${base}-client-protocol.h)
+                set(src ${PROTO_GEN_DIR}/${base}-protocol.c)
+                add_custom_command(OUTPUT ${hdr}
+                    COMMAND ${WAYLAND_SCANNER} client-header ${xml} ${hdr}
+                    DEPENDS ${xml} VERBATIM)
+                add_custom_command(OUTPUT ${src}
+                    COMMAND ${WAYLAND_SCANNER} private-code ${xml} ${src}
+                    DEPENDS ${xml} VERBATIM)
+                set(PROTO_GENERATED ${PROTO_GENERATED} ${hdr} ${src} PARENT_SCOPE)
+            endfunction()
+
+            grit_wayland_proto(stable/xdg-shell/xdg-shell.xml xdg-shell)
+            grit_wayland_proto(unstable/xdg-decoration/xdg-decoration-unstable-v1.xml xdg-decoration-unstable-v1)
+        endif()
+    endif()
+
+    # --- X11 backend (fallback) ---
+    pkg_check_modules(X11  IMPORTED_TARGET x11)
+    pkg_check_modules(XEXT IMPORTED_TARGET xext)
+    if(X11_FOUND AND XEXT_FOUND)
+        set(HAVE_X11 TRUE)
+    endif()
+
+    if(NOT HAVE_WAYLAND AND NOT HAVE_X11)
+        message(FATAL_ERROR "Need at least one of: Wayland or X11")
+    endif()
 else()
     # macOS / Windows: build from source
-    set(GLFW_BUILD_DOCS OFF CACHE BOOL "" FORCE)
-    set(GLFW_BUILD_TESTS OFF CACHE BOOL "" FORCE)
-    set(GLFW_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
-    set(GLFW_INSTALL OFF CACHE BOOL "" FORCE)
-    FetchContent_Declare(glfw
-        GIT_REPOSITORY https://github.com/glfw/glfw.git
-        GIT_TAG 3.4
-        GIT_SHALLOW ON
-    )
-
     set(FT_DISABLE_BZIP2 ON CACHE BOOL "" FORCE)
     set(FT_DISABLE_BROTLI ON CACHE BOOL "" FORCE)
     set(FT_DISABLE_HARFBUZZ ON CACHE BOOL "" FORCE)
@@ -119,14 +151,13 @@ else()
         GIT_SHALLOW ON
     )
 
-    FetchContent_MakeAvailable(glfw freetype harfbuzz curl)
+    FetchContent_MakeAvailable(freetype harfbuzz curl)
 endif()
 
 # --- Executable ---
 set(GRIT_SOURCES
     src/main.cpp
     src/app.cpp
-    src/glfw_window.cpp
     src/gl_renderer.cpp
     src/font.cpp
     src/scroll_view.cpp
@@ -137,6 +168,12 @@ set(GRIT_SOURCES
     src/session.cpp
     src/clipboard.cpp
 )
+
+if(LINUX OR CMAKE_SYSTEM_NAME MATCHES "FreeBSD")
+    # CSD is Wayland-only: draws titlebar + close button when the compositor
+    # refuses server-side decorations (GNOME).
+    list(APPEND GRIT_SOURCES src/window_linux.cpp src/csd.cpp ${PROTO_GENERATED})
+endif()
 
 # MCP is the dev/agent automation channel — it lets scripts/mcp_client.py
 # drive a running grit for testing. Release builds don't need it (and end
@@ -160,7 +197,7 @@ if(APPLE)
     )
     set_source_files_properties(${GRIT_ICNS} PROPERTIES
         MACOSX_PACKAGE_LOCATION "Resources")
-    list(APPEND GRIT_SOURCES src/macos_chrome.mm ${GRIT_ICNS})
+    list(APPEND GRIT_SOURCES src/window_macos.mm ${GRIT_ICNS})
 
     add_executable(grit MACOSX_BUNDLE ${GRIT_SOURCES})
 
@@ -205,16 +242,29 @@ target_link_libraries(grit PRIVATE
 
 if(LINUX OR CMAKE_SYSTEM_NAME MATCHES "FreeBSD")
     target_link_libraries(grit PRIVATE
-        glfw
+        PkgConfig::EGL
         PkgConfig::FREETYPE
         PkgConfig::HARFBUZZ
         PkgConfig::FONTCONFIG
         PkgConfig::LIBCURL
         PkgConfig::LIBSECRET
     )
+    if(HAVE_WAYLAND)
+        target_compile_definitions(grit PRIVATE HAVE_WAYLAND=1)
+        target_include_directories(grit PRIVATE ${PROTO_GEN_DIR})
+        target_link_libraries(grit PRIVATE
+            PkgConfig::WAYLAND_CLIENT
+            PkgConfig::WAYLAND_EGL
+            PkgConfig::WAYLAND_CURSOR
+            PkgConfig::XKBCOMMON
+        )
+    endif()
+    if(HAVE_X11)
+        target_compile_definitions(grit PRIVATE HAVE_X11=1)
+        target_link_libraries(grit PRIVATE PkgConfig::X11 PkgConfig::XEXT)
+    endif()
 else()
     target_link_libraries(grit PRIVATE
-        glfw
         freetype
         harfbuzz
         CURL::libcurl
@@ -225,6 +275,8 @@ else()
             "-framework CoreText"
             "-framework CoreFoundation"
             "-framework Cocoa"
+            "-framework OpenGL"
+            "-framework QuartzCore"
         )
     endif()
 endif()

@@ -637,7 +637,7 @@ static std::string ToolDefsJson() {
 bool App::Init(bool sessionChooser) {
     chooserMode_ = sessionChooser;
     if (!window_.Init(1000, 750, "Gritcode")) return false;
-    Clipboard::Init(window_.Handle());
+    Clipboard::Init(&window_);
 
     if (!scrollView_.Init(window_.Width(), window_.Height() - (int)((barHeight_ + inputHeight_ + chromeTopPad_) * window_.Scale()),
                           window_.Scale()))
@@ -3061,7 +3061,7 @@ void App::OnKey(int key, int mods, bool pressed) {
             }
             MarkDirty();
         } else if (key == XKB_KEY_Escape) {
-            glfwSetWindowShouldClose(window_.Handle(), GLFW_TRUE);
+            window_.SetShouldClose(true);
         }
         return;
     }
@@ -3296,7 +3296,8 @@ void App::Run() {
         struct timespec t0, t1;
         clock_gettime(CLOCK_MONOTONIC, &t0);
 
-        renderer_.BeginFrame(window_.Width(), window_.Height(), scrollView_.Fonts());
+        auto frame = window_.BeginContentFrame();
+        renderer_.BeginFrame(frame.width, frame.height, scrollView_.Fonts());
 
         if (chooserMode_) {
             PaintChooser();
@@ -3324,7 +3325,7 @@ void App::Run() {
         }
 
         renderer_.EndFrame();
-        window_.SwapBuffers();
+        window_.EndContentFrame();
 
         // Perf tracking
         clock_gettime(CLOCK_MONOTONIC, &t1);

@@ -297,7 +297,23 @@ int FontManager::LoadFace(const std::string& path, int sizePx) {
 }
 
 bool FontManager::Init(int baseSizePx) {
-    if (FT_Init_FreeType(&ft_)) return false;
+    // Reset: Init may be called again when the display scale changes (HiDPI).
+    // Without this reset, stale faces at the wrong pixel size accumulate and
+    // the atlas keeps old glyph positions that no longer match the new sizes.
+    for (auto& f : faces_) {
+        if (f.hb) hb_font_destroy(f.hb);
+        if (f.ft) FT_Done_Face(f.ft);
+    }
+    faces_.clear();
+    styleFaces_.clear();
+    loadedFaces_.clear();
+    fallbackCache_.clear();
+    cache_.assign(CACHE_SIZE, CacheSlot{});
+    curX_ = 1; curY_ = 1; rowH_ = 0;
+    std::fill(atlasData_.begin(), atlasData_.end(), 0);
+    atlasGen_++;  // Force renderer to re-upload the (now-cleared) atlas
+
+    if (!ft_ && FT_Init_FreeType(&ft_)) return false;
     InitFontDiscovery();
 
     int thinkingSizePx = std::max(10, baseSizePx - 3);

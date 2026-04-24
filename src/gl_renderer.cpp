@@ -97,6 +97,12 @@ bool GLRenderer::Init() {
     glDeleteShader(fs);
 
     locProj_ = glGetUniformLocation(program_, "uProj");
+    GLint locAtlas = glGetUniformLocation(program_, "uAtlas");
+    if (locAtlas >= 0) {
+        glUseProgram(program_);
+        glUniform1i(locAtlas, 0);  // sampler uses texture unit 0
+        glUseProgram(0);
+    }
 
     glGenVertexArrays(1, &vao_);
     glGenBuffers(1, &vbo_);
@@ -148,6 +154,13 @@ void GLRenderer::BeginFrame(int viewportW, int viewportH, const FontManager& fm)
     fm_ = &fm;
     batch_.clear();
     batch_.reserve(16384);  // Pre-allocate for ~2700 quads (avoids realloc)
+
+    // Re-assert blending state each frame: the CSD compositor disables blend
+    // when drawing its opaque close button, and if we don't re-enable here
+    // the next frame's glyph quads render as solid blocks (texture alpha is
+    // computed but never used without blend).
+    glEnable(GL_BLEND);
+    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
 
     glViewport(0, 0, vpW_, vpH_);
 #ifdef NDEBUG
