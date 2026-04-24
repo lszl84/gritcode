@@ -277,6 +277,18 @@ static std::string ExpandTilde(const std::string& path) {
     return path;
 }
 
+static std::string CollapseHome(const std::string& path) {
+    const char* home = getenv("HOME");
+    if (!home || !*home) return path;
+    std::string h(home);
+    if (path == h) return "~";
+    if (path.size() > h.size() && path.compare(0, h.size(), h) == 0 &&
+        path[h.size()] == '/') {
+        return "~" + path.substr(h.size());
+    }
+    return path;
+}
+
 static std::string WriteFile(const std::string& path, const std::string& content) {
     std::string expanded = ExpandTilde(path);
     // Create parent directories if needed
@@ -839,6 +851,7 @@ bool App::Init(bool sessionChooser) {
         std::string cwd = getcwd(cwdBuf, sizeof(cwdBuf)) ? cwdBuf : ".";
         session_.SetCwd(cwd);
         session_.LoadForCwd(cwd);
+        window_.SetTitle(CollapseHome(cwd).c_str());
         debug::SetSessionId(session_.SessionId());
         PopulateWorkspaceDropdown();
         RestoreSessionToView();
@@ -1630,7 +1643,7 @@ void App::OnWorkspaceChanged(int, const std::string& id) {
 
     session_.SetCwd(id);
     session_.LoadForCwd(id);
-    window_.SetTitle(("Grit — " + id).c_str());
+    window_.SetTitle(CollapseHome(id).c_str());
     RestoreSessionToView();
 
     // Re-connect with current provider
@@ -3384,7 +3397,7 @@ void App::OnMouseDown(float x, float y, bool shift) {
             std::string cwd = getcwd(cwdBuf, sizeof(cwdBuf)) ? cwdBuf : ".";
             session_.SetCwd(cwd);
             session_.LoadForCwd(cwd);
-            window_.SetTitle(("Grit — " + cwd).c_str());
+            window_.SetTitle(CollapseHome(cwd).c_str());
             RestoreSessionToView();
             StartConnect();
         }
@@ -3573,7 +3586,7 @@ void App::OnKey(int key, int mods, bool pressed) {
                 std::string cwd = getcwd(cwdBuf, sizeof(cwdBuf)) ? cwdBuf : ".";
                 session_.SetCwd(cwd);
                 session_.LoadForCwd(cwd);
-                window_.SetTitle(("Grit — " + cwd).c_str());
+                window_.SetTitle(CollapseHome(cwd).c_str());
                 PopulateWorkspaceDropdown();
                 RestoreSessionToView();
                 StartConnect();
@@ -3723,7 +3736,7 @@ void App::ChooserSelect(int idx) {
     session_.SetCwd(dir);
     session_.LoadForCwd(dir);
     chooserMode_ = false;
-    window_.SetTitle(("Grit — " + dir).c_str());
+    window_.SetTitle(CollapseHome(dir).c_str());
     PopulateWorkspaceDropdown();
     RestoreSessionToView();
     StartConnect();
@@ -3745,7 +3758,7 @@ void App::ChooserSelectPath(const std::string& path) {
     session_.SetCwd(dir);
     session_.LoadForCwd(dir);
     chooserMode_ = false;
-    window_.SetTitle(("Grit — " + dir).c_str());
+    window_.SetTitle(CollapseHome(dir).c_str());
     RestoreSessionToView();
     StartConnect();
     MarkDirty();

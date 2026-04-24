@@ -1536,8 +1536,15 @@ void AppWindow::Show() {
 }
 
 void AppWindow::SetTitle(const char* title) {
+    if (!title) title = "";
 #ifdef HAVE_WAYLAND
-    if (impl_->wl) xdg_toplevel_set_title(impl_->wl->toplevel, title);
+    if (impl_->wl) {
+        xdg_toplevel_set_title(impl_->wl->toplevel, title);
+        if (impl_->wl->csd) {
+            impl_->wl->csd->SetTitle(title);
+            impl_->wl->dirty = true;
+        }
+    }
 #endif
 #ifdef HAVE_X11
     if (impl_->x11) XStoreName(impl_->x11->display, impl_->x11->window, title);

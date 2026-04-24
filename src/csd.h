@@ -6,6 +6,7 @@
 #pragma once
 #include <GL/gl.h>
 #include <cstdint>
+#include <string>
 
 class FontManager;
 
@@ -14,10 +15,14 @@ public:
     bool Init();
     void Shutdown();
 
-    // Register the app's FontManager so we can rasterize the "gritcode"
-    // titlebar text the first time we draw. Safe to call multiple times —
-    // the title texture is rebuilt only when the pointer changes.
+    // Register the app's FontManager so we can rasterize the titlebar text
+    // the first time we draw. Safe to call multiple times — the title
+    // texture is rebuilt only when the font or the title string changes.
     void SetFontManager(const FontManager* fm);
+
+    // Set the titlebar text (defaults to "gritcode" before first call).
+    // Invalidates the cached bitmap so the next EndFrame rebuilds it.
+    void SetTitle(const std::string& title);
 
     struct Frame {
         int width  = 0;  // content width in pixels (scale applied)
@@ -86,6 +91,8 @@ private:
     int    titleTexW_ = 0, titleTexH_ = 0;
     const FontManager* titleFont_ = nullptr;
     const FontManager* titleBuiltFrom_ = nullptr;
+    std::string title_ = "gritcode";
+    std::string titleBuiltText_;
 
     float closeHoverAmt_ = 0.0f;
     bool  closeHover_ = false;

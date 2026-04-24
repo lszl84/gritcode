@@ -205,9 +205,6 @@ static float ease_out_cubic(float t) {
     return 1.0f - u * u * u;
 }
 
-// Title text — bold lowercase, centered in the titlebar.
-static constexpr const char* kTitleText = "gritcode";
-
 // Simple alpha-modulated sampler for the pre-rasterized title bitmap.
 // UV is flipped vertically: mainFbo is GL y-up, but our CPU bitmap is stored
 // with row 0 at the top of the glyphs (standard image orientation).
@@ -302,6 +299,7 @@ void CsdCompositor::Shutdown() {
     if (titleProg_)   { glDeleteProgram(titleProg_); titleProg_ = 0; }
     if (titleTex_)    { glDeleteTextures(1, &titleTex_); titleTex_ = 0; }
     titleBuiltFrom_ = nullptr;
+    titleBuiltText_.clear();
     titleTexW_ = titleTexH_ = 0;
 }
 
@@ -309,10 +307,17 @@ void CsdCompositor::SetFontManager(const FontManager* fm) {
     titleFont_ = fm;
 }
 
-void CsdCompositor::BuildTitleTexture() {
-    if (!titleFont_ || titleFont_ == titleBuiltFrom_) return;
+void CsdCompositor::SetTitle(const std::string& title) {
+    if (title == title_) return;
+    title_ = title;
+    titleBuiltFrom_ = nullptr;  // force rebuild
+}
 
-    ShapedRun run = titleFont_->Shape(kTitleText, FontStyle::Bold);
+void CsdCompositor::BuildTitleTexture() {
+    if (!titleFont_) return;
+    if (titleFont_ == titleBuiltFrom_ && title_ == titleBuiltText_) return;
+
+    ShapedRun run = titleFont_->Shape(title_.c_str(), FontStyle::Bold);
     float ascent = titleFont_->Ascent(FontStyle::Bold);
     float lineH  = titleFont_->LineHeight(FontStyle::Bold);
 
@@ -356,6 +361,7 @@ void CsdCompositor::BuildTitleTexture() {
     titleTexW_ = bmpW;
     titleTexH_ = bmpH;
     titleBuiltFrom_ = titleFont_;
+    titleBuiltText_ = title_;
 }
 
 void CsdCompositor::DrawTitle(int mainW, int mainH, int scale) {
