@@ -81,6 +81,7 @@ struct WlState {
     // Input
     wl_pointer*  pointer = nullptr;
     wl_keyboard* keyboard = nullptr;
+    wl_touch*    touch = nullptr;
 
     // Cursor
     wl_cursor_theme* cursor_theme = nullptr;
@@ -135,7 +136,14 @@ struct WlState {
 
     // CSD
     bool use_csd = false;
+    bool floating = true;          // tiled/maximized/fullscreen disables shadow+corners
+    uint32_t current_edge = 0;     // hover edge under pointer (0 = none)
     CsdCompositor* csd = nullptr;
+
+    // Active touch point (we track only the first finger for simple
+    // single-touch tap/drag — matches how wl_pointer is wired).
+    int32_t touch_id = -1;
+    double tx = 0, ty = 0;
 
     // Clipboard
     wl_data_device* data_device = nullptr;
@@ -162,10 +170,36 @@ static double wl_monotonic() {
     return ts.tv_sec + ts.tv_nsec / 1e9;
 }
 
+// Logical-pixel shadow margin around the surface content. Zero while the
+// window is tiled / maximized / fullscreen (no room for a drop shadow then).
+static int wl_effective_shadow(const WlState* st) {
+    return (st->use_csd && st->floating) ? CsdCompositor::SHADOW_EXTENT : 0;
+}
+
+// CSS-style cursor name → legacy X11 name fallback, for themes that only ship
+// one of the two spellings.
+static const char* wl_cursor_legacy_alias(const char* name) {
+    struct A { const char* css; const char* legacy; };
+    static const A ALIAS[] = {
+        { "default",   "left_ptr" },
+        { "n-resize",  "top_side" },       { "s-resize",  "bottom_side" },
+        { "w-resize",  "left_side" },      { "e-resize",  "right_side" },
+        { "nw-resize", "top_left_corner" },{ "ne-resize", "top_right_corner" },
+        { "sw-resize", "bottom_left_corner" },
+        { "se-resize", "bottom_right_corner" },
+    };
+    for (const auto& a : ALIAS) if (!strcmp(name, a.css)) return a.legacy;
+    return nullptr;
+}
+
 static void wl_set_cursor(WlState* st, const char* name) {
     if (!st->pointer || !st->cursor_theme || !st->cursor_surface) return;
     if (st->current_cursor && !strcmp(st->current_cursor, name)) return;
     wl_cursor* cur = wl_cursor_theme_get_cursor(st->cursor_theme, name);
+    if (!cur) {
+        if (const char* alt = wl_cursor_legacy_alias(name))
+            cur = wl_cursor_theme_get_cursor(st->cursor_theme, alt);
+    }
     if (!cur && strcmp(name, "default")) cur = wl_cursor_theme_get_cursor(st->cursor_theme, "left_ptr");
     if (!cur || !cur->image_count) return;
     wl_cursor_image* img = cur->images[0];
@@ -188,9 +222,34 @@ static void wl_set_cursor(WlState* st, const char* name) {
 
 static void wl_sync_geometry(WlState* st) {
     if (!st->xsurface) return;
-    xdg_surface_set_window_geometry(st->xsurface, 0, 0, st->width, st->height);
+    const int sh  = wl_effective_shadow(st);
+    const int rad = (st->use_csd && st->floating) ? CsdCompositor::CORNER_RADIUS : 0;
+
+    // Tell the compositor the "real" window lives inset by the shadow.
+    xdg_surface_set_window_geometry(st->xsurface, sh, sh, st->width, st->height);
+
+    // Input region: only the window content receives clicks; the shadow border
+    // is click-through to whatever's below. SSD mode: whole surface accepts input.
+    if (st->use_csd) {
+        wl_region* input = wl_compositor_create_region(st->compositor);
+        wl_region_add(input, sh, sh, st->width, st->height);
+        wl_surface_set_input_region(st->surface, input);
+        wl_region_destroy(input);
+    } else {
+        wl_surface_set_input_region(st->surface, nullptr);
+    }
+
+    // Opaque region: shrunk by the corner radius so the compositor knows the
+    // rounded corners aren't solid. SSD: whole surface is opaque.
     wl_region* opaque = wl_compositor_create_region(st->compositor);
-    wl_region_add(opaque, 0, 0, st->width, st->height);
+    if (st->use_csd) {
+        if (st->width > 2 * rad && st->height > 2 * rad) {
+            wl_region_add(opaque, sh + rad, sh + rad,
+                          st->width - 2 * rad, st->height - 2 * rad);
+        }
+    } else {
+        wl_region_add(opaque, 0, 0, st->width, st->height);
+    }
     wl_surface_set_opaque_region(st->surface, opaque);
     wl_region_destroy(opaque);
 }
@@ -221,10 +280,34 @@ static void xdg_surface_handle_configure(void* data, xdg_surface* s, uint32_t se
 static const xdg_surface_listener xdg_surface_lst = { xdg_surface_handle_configure };
 
 static void toplevel_handle_configure(void* data, xdg_toplevel*,
-                                      int32_t w, int32_t h, wl_array*) {
+                                      int32_t w, int32_t h, wl_array* states) {
     auto* st = static_cast<WlState*>(data);
     if (w > 0) st->pending_width = w;
     if (h > 0) st->pending_height = h;
+
+    bool tiled = false, maximized = false, fullscreen = false;
+    if (states) {
+        uint32_t* s;
+        for (s = (uint32_t*)states->data;
+             (const char*)s < (const char*)states->data + states->size; ++s) {
+            switch (*s) {
+            case XDG_TOPLEVEL_STATE_MAXIMIZED:    maximized = true; break;
+            case XDG_TOPLEVEL_STATE_FULLSCREEN:   fullscreen = true; break;
+            case XDG_TOPLEVEL_STATE_TILED_LEFT:
+            case XDG_TOPLEVEL_STATE_TILED_RIGHT:
+            case XDG_TOPLEVEL_STATE_TILED_TOP:
+            case XDG_TOPLEVEL_STATE_TILED_BOTTOM: tiled = true; break;
+            }
+        }
+    }
+    bool was_floating = st->floating;
+    st->floating = !(tiled || maximized || fullscreen);
+    if (was_floating != st->floating) {
+        // Buffer geometry changes with shadow; force re-commit.
+        st->applied_buffer_w = 0;
+        st->applied_buffer_h = 0;
+        st->dirty = true;
+    }
 }
 static void toplevel_handle_close(void* data, xdg_toplevel*) {
     static_cast<WlState*>(data)->running = false;
@@ -279,8 +362,9 @@ static const wl_surface_listener surface_lst = {
 
 static int wl_compute_buffer_mouse(const WlState* st, double lx, double ly,
                                    float* out_x, float* out_y) {
-    // Translate logical window coords → content-area buffer pixels.
-    // Y adjusted for CSD titlebar.
+    // lx/ly are already window-local (shadow offset subtracted when they
+    // were stored in st->px/py). Convert logical window coords → content-area
+    // buffer pixels, with the Y adjusted for the CSD titlebar.
     int title_h = st->use_csd ? CsdCompositor::TITLEBAR_H : 0;
     double by = (ly - title_h) * st->scale;
     double bx = lx * st->scale;
@@ -290,33 +374,50 @@ static int wl_compute_buffer_mouse(const WlState* st, double lx, double ly,
     return 1;
 }
 
+// Pick an appropriate cursor for the current pointer position: resize glyph
+// near the border, default arrow otherwise. Kept separate so pointer_enter
+// and pointer_motion share the logic.
+static void wl_update_hover_cursor(WlState* st) {
+    if (!st->use_csd || !st->csd) { wl_set_cursor(st, "left_ptr"); st->current_edge = 0; return; }
+    uint32_t edge = st->floating
+        ? st->csd->ResizeEdge((int)st->px, (int)st->py, st->width, st->height)
+        : 0;
+    st->current_edge = edge;
+    const char* name = CsdCompositor::CursorNameForEdge(edge);
+    if (!name) name = "left_ptr";
+    wl_set_cursor(st, name);
+}
+
 static void pointer_handle_enter(void* data, wl_pointer*, uint32_t serial,
                                  wl_surface* surf, wl_fixed_t sx, wl_fixed_t sy) {
     auto* st = static_cast<WlState*>(data);
     if (surf != st->surface) return;
     st->last_enter_serial = serial;
-    st->px = wl_fixed_to_double(sx);
-    st->py = wl_fixed_to_double(sy);
-    wl_set_cursor(st, "left_ptr");
+    const double off = wl_effective_shadow(st);
+    st->px = wl_fixed_to_double(sx) - off;
+    st->py = wl_fixed_to_double(sy) - off;
+    wl_update_hover_cursor(st);
     if (st->use_csd && st->csd) {
         st->csd->SetCloseHover(st->csd->InCloseButton((int)st->px, (int)st->py,
-                                                      st->width, st->scale));
+                                                      st->width));
     }
 }
 static void pointer_handle_leave(void* data, wl_pointer*, uint32_t, wl_surface*) {
     auto* st = static_cast<WlState*>(data);
     if (st->use_csd && st->csd) st->csd->SetCloseHover(false);
     st->current_cursor = nullptr;
+    st->current_edge = 0;
 }
 static void pointer_handle_motion(void* data, wl_pointer*, uint32_t,
                                   wl_fixed_t sx, wl_fixed_t sy) {
     auto* st = static_cast<WlState*>(data);
-    st->px = wl_fixed_to_double(sx);
-    st->py = wl_fixed_to_double(sy);
-    wl_set_cursor(st, "left_ptr");
+    const double off = wl_effective_shadow(st);
+    st->px = wl_fixed_to_double(sx) - off;
+    st->py = wl_fixed_to_double(sy) - off;
+    wl_update_hover_cursor(st);
     if (st->use_csd && st->csd) {
         st->csd->SetCloseHover(st->csd->InCloseButton((int)st->px, (int)st->py,
-                                                      st->width, st->scale));
+                                                      st->width));
         st->dirty = true;
     }
     float bx, by;
@@ -330,15 +431,23 @@ static void pointer_handle_button(void* data, wl_pointer*, uint32_t serial,
     if (button == 0x110 /* BTN_LEFT */) {
         st->left_down = pressed;
         if (st->use_csd && pressed && st->csd) {
-            // Click on close button → close window
-            if (st->csd->InCloseButton((int)st->px, (int)st->py, st->width, st->scale)) {
+            // Hit order: close > resize-edge > titlebar move > content click.
+            if (st->csd->InCloseButton((int)st->px, (int)st->py, st->width)) {
+                st->csd->SetClosePressed(true);
                 st->running = false;
                 return;
             }
-            // Click on titlebar (not close) → request window move
-            if (st->csd->InTitlebar((int)st->px, (int)st->py, st->scale)) {
+            uint32_t edge = st->floating
+                ? st->csd->ResizeEdge((int)st->px, (int)st->py, st->width, st->height)
+                : 0;
+            if (edge != 0 && st->toplevel) {
+                xdg_toplevel_resize(st->toplevel, st->seat, serial, edge);
+                st->left_down = false;   // resize grab takes over the press
+                return;
+            }
+            if (st->csd->InTitlebar((int)st->px, (int)st->py)) {
                 xdg_toplevel_move(st->toplevel, st->seat, serial);
-                st->left_down = false;  // move takes focus
+                st->left_down = false;
                 return;
             }
         }
@@ -349,8 +458,8 @@ static void pointer_handle_button(void* data, wl_pointer*, uint32_t serial,
         }
     } else if (button == 0x111 /* BTN_RIGHT */) {
         if (pressed && st->use_csd && st->toplevel && st->csd &&
-            st->csd->InTitlebar((int)st->px, (int)st->py, st->scale) &&
-            !st->csd->InCloseButton((int)st->px, (int)st->py, st->width, st->scale)) {
+            st->csd->InTitlebar((int)st->px, (int)st->py) &&
+            !st->csd->InCloseButton((int)st->px, (int)st->py, st->width)) {
             xdg_toplevel_show_window_menu(st->toplevel, st->seat, serial,
                                           (int)st->px, (int)st->py);
         }
@@ -387,6 +496,98 @@ static const wl_pointer_listener pointer_lst = {
     pointer_handle_axis_discrete,
     pointer_handle_axis_value120,
     pointer_handle_axis_relative_direction,
+};
+
+// ---- touch ----------------------------------------------------------------
+// Single-finger tap/drag mapped into the same pointer-button / pointer-move
+// pathway. On touch-down we run the same hit-test hierarchy as a left click
+// (close > resize edge > titlebar move > content click); on touch-motion we
+// emit a move event with left_down=true.
+
+static void touch_handle_down(void* data, wl_touch*, uint32_t serial,
+                              uint32_t, wl_surface* surf, int32_t id,
+                              wl_fixed_t sx, wl_fixed_t sy) {
+    auto* st = static_cast<WlState*>(data);
+    if (surf != st->surface) return;
+    if (st->touch_id != -1) return;      // already tracking another finger
+    st->touch_id = id;
+    const double off = wl_effective_shadow(st);
+    st->tx = wl_fixed_to_double(sx) - off;
+    st->ty = wl_fixed_to_double(sy) - off;
+    st->px = st->tx; st->py = st->ty;
+    st->last_enter_serial = serial;
+
+    if (st->use_csd && st->csd) {
+        if (st->csd->InCloseButton((int)st->px, (int)st->py, st->width)) {
+            st->running = false;
+            return;
+        }
+        uint32_t edge = st->floating
+            ? st->csd->ResizeEdge((int)st->px, (int)st->py, st->width, st->height)
+            : 0;
+        if (edge != 0 && st->toplevel) {
+            xdg_toplevel_resize(st->toplevel, st->seat, serial, edge);
+            st->touch_id = -1;
+            return;
+        }
+        if (st->csd->InTitlebar((int)st->px, (int)st->py)) {
+            xdg_toplevel_move(st->toplevel, st->seat, serial);
+            st->touch_id = -1;
+            return;
+        }
+    }
+    st->left_down = true;
+    float bx, by;
+    if (wl_compute_buffer_mouse(st, st->px, st->py, &bx, &by) && st->mouseBtnCb)
+        st->mouseBtnCb(bx, by, true, (st->mods & MOD_SHIFT) != 0);
+}
+
+static void touch_handle_up(void* data, wl_touch*, uint32_t, uint32_t, int32_t id) {
+    auto* st = static_cast<WlState*>(data);
+    if (id != st->touch_id) return;
+    st->touch_id = -1;
+    if (!st->left_down) return;
+    st->left_down = false;
+    float bx, by;
+    if (wl_compute_buffer_mouse(st, st->px, st->py, &bx, &by) && st->mouseBtnCb)
+        st->mouseBtnCb(bx, by, false, (st->mods & MOD_SHIFT) != 0);
+}
+
+static void touch_handle_motion(void* data, wl_touch*, uint32_t, int32_t id,
+                                wl_fixed_t sx, wl_fixed_t sy) {
+    auto* st = static_cast<WlState*>(data);
+    if (id != st->touch_id) return;
+    const double off = wl_effective_shadow(st);
+    st->tx = wl_fixed_to_double(sx) - off;
+    st->ty = wl_fixed_to_double(sy) - off;
+    st->px = st->tx; st->py = st->ty;
+    float bx, by;
+    if (wl_compute_buffer_mouse(st, st->px, st->py, &bx, &by) && st->mouseMoveCb)
+        st->mouseMoveCb(bx, by, st->left_down);
+}
+
+static void touch_handle_frame(void*, wl_touch*) {}
+static void touch_handle_cancel(void* data, wl_touch*) {
+    auto* st = static_cast<WlState*>(data);
+    st->touch_id = -1;
+    if (st->left_down) {
+        st->left_down = false;
+        float bx, by;
+        if (wl_compute_buffer_mouse(st, st->px, st->py, &bx, &by) && st->mouseBtnCb)
+            st->mouseBtnCb(bx, by, false, false);
+    }
+}
+static void touch_handle_shape(void*, wl_touch*, int32_t, wl_fixed_t, wl_fixed_t) {}
+static void touch_handle_orientation(void*, wl_touch*, int32_t, wl_fixed_t) {}
+
+const wl_touch_listener touch_lst = {
+    touch_handle_down,
+    touch_handle_up,
+    touch_handle_motion,
+    touch_handle_frame,
+    touch_handle_cancel,
+    touch_handle_shape,
+    touch_handle_orientation,
 };
 
 // ---- keyboard -------------------------------------------------------------
@@ -500,6 +701,9 @@ static const wl_keyboard_listener keyboard_lst = {
     keyboard_handle_repeat_info,
 };
 
+// Forward decl so seat_handle_capabilities can register it.
+extern const wl_touch_listener touch_lst;
+
 static void seat_handle_capabilities(void* data, wl_seat* seat, uint32_t caps) {
     auto* st = static_cast<WlState*>(data);
     if ((caps & WL_SEAT_CAPABILITY_POINTER) && !st->pointer) {
@@ -513,6 +717,12 @@ static void seat_handle_capabilities(void* data, wl_seat* seat, uint32_t caps) {
         wl_keyboard_add_listener(st->keyboard, &keyboard_lst, st);
     } else if (!(caps & WL_SEAT_CAPABILITY_KEYBOARD) && st->keyboard) {
         wl_keyboard_release(st->keyboard); st->keyboard = nullptr;
+    }
+    if ((caps & WL_SEAT_CAPABILITY_TOUCH) && !st->touch) {
+        st->touch = wl_seat_get_touch(seat);
+        wl_touch_add_listener(st->touch, &touch_lst, st);
+    } else if (!(caps & WL_SEAT_CAPABILITY_TOUCH) && st->touch) {
+        wl_touch_release(st->touch); st->touch = nullptr;
     }
 }
 static void seat_handle_name(void*, wl_seat*, const char*) {}
@@ -659,17 +869,18 @@ static bool wl_init_egl(WlState* st) {
                                        EGL_NO_CONTEXT, ctx_attrs);
     if (st->egl_context == EGL_NO_CONTEXT) return false;
 
-    st->egl_window = wl_egl_window_create(st->surface,
-                                          st->width * st->scale,
-                                          st->height * st->scale);
+    const int sh = wl_effective_shadow(st);
+    const int buf_w = (st->width  + 2 * sh) * st->scale;
+    const int buf_h = (st->height + 2 * sh) * st->scale;
+    st->egl_window = wl_egl_window_create(st->surface, buf_w, buf_h);
     st->egl_surface = eglCreateWindowSurface(st->egl_display, st->egl_config,
                                              (EGLNativeWindowType)st->egl_window, nullptr);
     if (st->egl_surface == EGL_NO_SURFACE) return false;
 
     eglMakeCurrent(st->egl_display, st->egl_surface, st->egl_surface, st->egl_context);
     eglSwapInterval(st->egl_display, 0);  // compositor-paced via frame callbacks
-    st->applied_buffer_w = st->width * st->scale;
-    st->applied_buffer_h = st->height * st->scale;
+    st->applied_buffer_w = buf_w;
+    st->applied_buffer_h = buf_h;
     return true;
 }
 
@@ -695,8 +906,9 @@ static void wl_apply_pending_resize(WlState* st) {
 
     if (!st->egl_window) return;  // pre-EGL; first real frame will catch up
 
-    int want_w = st->width * st->scale;
-    int want_h = st->height * st->scale;
+    const int sh = wl_effective_shadow(st);
+    const int want_w = (st->width  + 2 * sh) * st->scale;
+    const int want_h = (st->height + 2 * sh) * st->scale;
     if (want_w == st->applied_buffer_w && want_h == st->applied_buffer_h) return;
 
     wl_egl_window_resize(st->egl_window, want_w, want_h, 0, 0);
@@ -737,7 +949,7 @@ static int wl_begin_content(WlState* st, int* outW, int* outH,
 
 static void wl_end_content(WlState* st) {
     if (st->use_csd && st->csd) {
-        st->csd->EndFrame(st->width, st->height, st->scale);
+        st->csd->EndFrame(st->width, st->height, st->scale, st->floating);
     }
     wl_callback* cb = wl_surface_frame(st->surface);
     wl_callback_add_listener(cb, &frame_cb_lst, st);
@@ -1044,6 +1256,7 @@ AppWindow::~AppWindow() {
         if (st->selection_offer) wl_data_offer_destroy(st->selection_offer);
         if (st->pending_offer) wl_data_offer_destroy(st->pending_offer);
         if (st->data_device) wl_data_device_release(st->data_device);
+        if (st->touch) wl_touch_release(st->touch);
         if (st->cursor_surface) wl_surface_destroy(st->cursor_surface);
         if (st->cursor_theme) wl_cursor_theme_destroy(st->cursor_theme);
         if (st->egl_surface != EGL_NO_SURFACE) {

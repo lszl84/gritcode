@@ -1,61 +1,76 @@
 // Gritcode — Client-side decorations (Wayland CSD)
-// Extracted from tt's platform layer. Shadow + rounded corners + titlebar
-// + close button, composited in a single pass.
+// Shadow + rounded corners + titlebar + close button, rendered via three
+// FBO passes ending in an SDF compose shader that applies a soft drop-shadow
+// and clips to a rounded-rect. Pattern ported from sibling project tt.
 
 #pragma once
 #include <GL/gl.h>
+#include <cstdint>
 
 class CsdCompositor {
 public:
     bool Init();
     void Shutdown();
 
-    // Call before app renders. Binds the content FBO and returns the
-    // content dimensions (window minus titlebar).
     struct Frame {
-        int width = 0;   // content width in pixels
-        int height = 0;  // content height in pixels
+        int width  = 0;  // content width in pixels (scale applied)
+        int height = 0;  // content height in pixels (scale applied)
     };
+    // Bind the content FBO and return its pixel dimensions. Call before the
+    // app issues any draw calls for the frame.
     Frame BeginFrame(int windowW, int windowH, int scale);
 
-    // Call after app renders. Composites titlebar/shadow/close button
-    // onto the default framebuffer and returns the full buffer size.
-    void EndFrame(int windowW, int windowH, int scale);
+    // Compose titlebar + content + close button into the main FBO, then
+    // run the shadow/corner shader onto the default framebuffer. `floating`
+    // controls whether the drop-shadow + rounded corners are active — they
+    // collapse to zero when the window is tiled / maximized / fullscreen.
+    void EndFrame(int windowW, int windowH, int scale, bool floating);
 
-    // Hit testing (in window logical coords, including titlebar)
-    bool InCloseButton(int x, int y, int windowW, int scale) const;
-    bool InTitlebar(int x, int y, int scale) const;
+    // Hit tests. x/y are in logical surface coords (i.e. with the window's
+    // origin at (0,0), titlebar occupying y < TITLEBAR_H).
+    bool  InCloseButton(int x, int y, int windowW) const;
+    bool  InTitlebar(int x, int y) const;
+    // Returns xdg_toplevel resize-edge value (0 = none, 1..10 per xdg-shell).
     uint32_t ResizeEdge(int x, int y, int windowW, int windowH) const;
+    // CSS-style cursor name for a given resize edge (e.g. "nw-resize").
+    // Returns nullptr when edge is 0.
+    static const char* CursorNameForEdge(uint32_t edge);
 
-    // Animation state
-    void SetCloseHover(bool hover) { closeHover_ = hover; }
+    void SetCloseHover(bool hover)     { closeHover_ = hover; }
     void SetClosePressed(bool pressed) { closePressed_ = pressed; }
-    bool CloseHover() const { return closeHover_; }
+    bool CloseHover() const            { return closeHover_; }
 
-    static constexpr int TITLEBAR_H = 40;
-    static constexpr int SHADOW_EXTENT = 32;
-    static constexpr int CORNER_RADIUS = 12;
+    static constexpr int TITLEBAR_H     = 40;
+    static constexpr int SHADOW_EXTENT  = 32;   // logical px of shadow on each side
+    static constexpr int CORNER_RADIUS  = 12;   // logical px, only while floating
+    static constexpr int BORDER_GRAB    = 8;    // logical px hit-zone for edge drag
+    static constexpr int CLOSE_SIZE     = 24;
+    static constexpr int CLOSE_MARGIN   = 8;
 
 private:
-    GLuint closeProg_ = 0, closeVao_ = 0, closeVbo_ = 0;
-    GLint uRect_ = -1, uScreen_ = -1, uHover_ = -1, uPressed_ = -1, uBarColor_ = -1;
-
-    GLuint composeProg_ = 0, quadVao_ = 0, quadVbo_ = 0;
-    GLint cTex_ = -1, cScreen_ = -1, cWindow_ = -1, cRadius_ = -1,
-          cSigma_ = -1, cShadow_ = -1, cOutline_ = -1;
-
+    // Pass 1 output — app content (no titlebar).
     GLuint contentFbo_ = 0, contentTex_ = 0;
-    int contentFboW_ = 0, contentFboH_ = 0;
+    int    contentFboW_ = 0, contentFboH_ = 0;
 
-    GLuint composeFbo_ = 0, composeTex_ = 0;
-    int composeFboW_ = 0, composeFboH_ = 0;
+    // Pass 2 output — window-sized composite (content + titlebar + close).
+    GLuint mainFbo_ = 0, mainTex_ = 0;
+    int    mainFboW_ = 0, mainFboH_ = 0;
+
+    // Close button shader.
+    GLuint closeProg_ = 0, closeVao_ = 0, closeVbo_ = 0;
+    GLint  uCloseRect_ = -1, uCloseScreen_ = -1, uCloseHover_ = -1,
+           uClosePressed_ = -1, uCloseBarColor_ = -1;
+
+    // Shadow + rounded-corner compose shader.
+    GLuint composeProg_ = 0, quadVao_ = 0, quadVbo_ = 0;
+    GLint  uCScreen_ = -1, uCWindow_ = -1, uCRadius_ = -1,
+           uCSigma_ = -1, uCShadow_ = -1, uCOutline_ = -1, uCTex_ = -1;
 
     float closeHoverAmt_ = 0.0f;
-    bool closeHover_ = false;
-    bool closePressed_ = false;
+    bool  closeHover_ = false;
+    bool  closePressed_ = false;
 
-    void EnsureContentFbo(int w, int h);
-    void EnsureComposeFbo(int w, int h);
-    void DrawCloseButton(int windowW, int windowH, int scale);
     bool CompileShaders();
+    void EnsureFbo(GLuint* fbo, GLuint* tex, int* curW, int* curH, int w, int h);
+    void DrawCloseButton(int mainW, int mainH, int scale);
 };
