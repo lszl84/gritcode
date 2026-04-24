@@ -332,8 +332,8 @@ void CsdCompositor::EndFrame(int windowW, int windowH, int scale, bool floating)
                            (float)winPxW,        (float)winPxH);
     glUniform1f(uCRadius_,  (float)(radius * S));
     glUniform1f(uCSigma_,   SHADOW_SIGMA * S);
-    glUniform1f(uCShadow_,  floating ? 0.275f : 0.0f);
-    glUniform1f(uCOutline_, floating ? 0.18f  : 0.0f);
+    glUniform1f(uCShadow_,  floating ? 0.14f : 0.0f);
+    glUniform1f(uCOutline_, floating ? 0.05f : 0.0f);
     glActiveTexture(GL_TEXTURE0);
     glBindTexture(GL_TEXTURE_2D, mainTex_);
     glUniform1i(uCTex_, 0);

@@ -1324,7 +1324,7 @@ bool AppWindow::Init(int width, int height, const char* title) {
         st->toplevel = xdg_surface_get_toplevel(st->xsurface);
         xdg_toplevel_add_listener(st->toplevel, &toplevel_lst, st);
         xdg_toplevel_set_title(st->toplevel, title ? title : "Gritcode");
-        xdg_toplevel_set_app_id(st->toplevel, "ai.gritcode.app");
+        xdg_toplevel_set_app_id(st->toplevel, "grit");
         xdg_toplevel_set_min_size(st->toplevel, 480, 360);
 
         // Request server-side decorations. If the compositor doesn't implement
@@ -1412,7 +1412,7 @@ try_x11:
         if (vi) XFree(vi);
 
         XStoreName(st->display, st->window, title ? title : "Gritcode");
-        XClassHint classHint; classHint.res_name = (char*)"gritcode"; classHint.res_class = (char*)"Gritcode";
+        XClassHint classHint; classHint.res_name = (char*)"grit"; classHint.res_class = (char*)"grit";
         XSetClassHint(st->display, st->window, &classHint);
         XSizeHints hints = {};
         hints.flags = PMinSize;
