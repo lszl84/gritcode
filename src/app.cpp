@@ -32,6 +32,9 @@
 #include <chrono>
 #include "keysyms.h"
 #include "clipboard.h"
+#ifdef GRIT_MACOS
+#include <mach-o/dyld.h>
+#endif
 
 // pipe2(O_CLOEXEC) is available on Linux and FreeBSD; on macOS fall back to pipe + fcntl.
 static int CloexecPipe(int pfd[2]) {
@@ -266,6 +269,61 @@ static std::string RunCommand(const std::string& cmd) {
     if (WIFEXITED(status) && WEXITSTATUS(status) != 0)
         result += "\n[exit code: " + std::to_string(WEXITSTATUS(status)) + "]";
     return result;
+}
+
+// Path to the currently-running grit binary. Used by the ACP path to point
+// Claude's --mcp-config at the same binary (for `grit --mcp-stdio`), so the
+// memory MCP server always matches the instance that spawned it.
+static std::string SelfExePath() {
+#ifdef GRIT_MACOS
+    uint32_t sz = 0;
+    _NSGetExecutablePath(nullptr, &sz);
+    std::string buf(sz, '\0');
+    if (_NSGetExecutablePath(buf.data(), &sz) != 0) return {};
+    while (!buf.empty() && buf.back() == '\0') buf.pop_back();
+    return buf;
+#else
+    char buf[4096];
+    ssize_t n = readlink("/proc/self/exe", buf, sizeof(buf) - 1);
+    if (n <= 0) return {};
+    buf[n] = 0;
+    return std::string(buf);
+#endif
+}
+
+// Writes a per-user MCP config that registers `grit --mcp-stdio` as a stdio
+// MCP server named "grit-memory". Returned path is passed to claude via
+// --mcp-config on each ACP spawn, so the memory_search tool is available to
+// Claude without the user ever touching their own claude MCP config.
+static std::string WriteClaudeMcpConfig() {
+    const char* xdg = getenv("XDG_CACHE_HOME");
+    const char* home = getenv("HOME");
+    std::string base;
+    if (xdg && *xdg) base = xdg;
+    else if (home) base = std::string(home) + "/.cache";
+    else base = "/tmp";
+    std::string dir = base + "/gritcode";
+    std::filesystem::create_directories(dir);
+    std::string path = dir + "/claude-mcp.json";
+
+    std::string self = SelfExePath();
+    if (self.empty()) return {};
+
+    json cfg;
+    cfg["mcpServers"]["grit-memory"] = {
+        {"command", self},
+        {"args", json::array({"--mcp-stdio"})}
+    };
+
+    std::string tmp = path + ".tmp";
+    std::ofstream f(tmp);
+    if (!f) return {};
+    f << cfg.dump(2);
+    f.close();
+    std::error_code ec;
+    std::filesystem::rename(tmp, path, ec);
+    if (ec) return {};
+    return path;
 }
 
 static std::string ExpandTilde(const std::string& path) {
@@ -568,7 +626,23 @@ static std::string WebSearch(const std::string& query) {
     return text;
 }
 
-static std::string ExecuteTool(const std::string& name, const std::string& argsJson) {
+static std::string FormatMemoryHits(const std::vector<MemoryDB::Hit>& hits) {
+    if (hits.empty()) return "No matches found.";
+    std::string out;
+    out += "Found " + std::to_string(hits.size()) + " match(es) across past sessions:\n\n";
+    for (size_t i = 0; i < hits.size(); i++) {
+        const auto& h = hits[i];
+        out += "### [" + std::to_string(i + 1) + "] " + h.cwd +
+               " (" + h.role + ", " + h.timestamp + ")\n";
+        out += h.text;
+        if (!out.empty() && out.back() != '\n') out += '\n';
+        out += "\n";
+    }
+    return out;
+}
+
+static std::string ExecuteTool(const std::string& name, const std::string& argsJson,
+                               MemoryDB* memory, const std::string& currentSessionId) {
     try {
         auto args = json::parse(argsJson);
         if (name == "bash") return RunCommand(args.value("command", ""));
@@ -578,6 +652,16 @@ static std::string ExecuteTool(const std::string& name, const std::string& argsJ
         if (name == "edit_file") return EditFile(args.value("path", ""), args.value("old_string", ""), args.value("new_string", ""));
         if (name == "web_fetch") return WebFetch(args.value("url", ""));
         if (name == "web_search") return WebSearch(args.value("query", ""));
+        if (name == "memory_search") {
+            if (!memory || !memory->IsOpen()) return "Memory index unavailable.";
+            std::string query = args.value("query", "");
+            int limit = args.value("limit", 5);
+            if (limit < 1) limit = 1;
+            if (limit > 20) limit = 20;
+            if (query.empty()) return "Error: 'query' is required.";
+            auto hits = memory->Search(query, limit, currentSessionId);
+            return FormatMemoryHits(hits);
+        }
     } catch (...) {}
     return "Error: unknown tool " + name;
 }
@@ -639,6 +723,14 @@ static std::string ToolDefsJson() {
             {"query",{{"type","string"},{"description","Search query"}}}
         }},{"required",json::array({"query"})}}}
     }}});
+    tools.push_back({{"type","function"},{"function",{
+        {"name","memory_search"},
+        {"description","Search past gritcode conversations across all your projects (excludes the current session). Use when the user references prior work in this or another project (\"last time\", \"in <project>\", \"how did we fix\", \"that thing from <name>\"). Query: 2-5 keywords, FTS5 syntax (phrases in quotes, AND/OR/NOT, prefix*). Returns up to `limit` verbatim turns with project, timestamp, role, text. Prefer this over guessing or asking the user to re-explain context they've already provided."},
+        {"parameters",{{"type","object"},{"properties",{
+            {"query",{{"type","string"},{"description","2-5 keywords. FTS5 MATCH expression."}}},
+            {"limit",{{"type","integer"},{"description","Max results (default 5, max 20)."}}}
+        }},{"required",json::array({"query"})}}}
+    }}});
     return tools.dump();
 }
 
@@ -650,6 +742,16 @@ bool App::Init(bool sessionChooser) {
     chooserMode_ = sessionChooser;
     if (!window_.Init(1000, 750, "Gritcode")) return false;
     Clipboard::Init(&window_);
+
+    // Memory DB — opened opportunistically. If the open fails we just won't
+    // index or search; the rest of the app keeps working.
+    memory_.Open(MemoryDB::DefaultPath());
+
+    // Write the claude --mcp-config JSON that registers grit-memory as a
+    // stdio MCP server. The path is passed to every ACP spawn below so the
+    // memory_search tool surfaces under Claude without the user editing
+    // their own MCP config. Empty on failure → we just skip the flag.
+    claudeMcpConfigPath_ = WriteClaudeMcpConfig();
 
     if (!scrollView_.Init(window_.Width(), window_.Height() - (int)((barHeight_ + inputHeight_ + chromeTopPad_) * window_.Scale()),
                           window_.Scale()))
@@ -1629,7 +1731,7 @@ void App::OnWorkspaceChanged(int, const std::string& id) {
     }
 
     // Save current session first
-    session_.Save();
+    SaveAndIndex();
 
     // Switch to new workspace
     if (!std::filesystem::is_directory(id)) {
@@ -1882,11 +1984,15 @@ std::string App::BuildRequestJson() {
             "by reading, writing, and editing files, and running shell commands.\n\n"
             "Working directory: " + cwd + "\n\n"
             "## Tools\n"
-            "You have these tools: bash, read_file, write_file, edit_file, list_directory.\n"
+            "You have these tools: bash, read_file, write_file, edit_file, list_directory, "
+            "web_fetch, web_search, memory_search.\n"
             "- Use write_file to create new files or overwrite existing ones.\n"
             "- Use edit_file to make targeted changes — provide enough context in old_string to be unique.\n"
             "- Use read_file to read files before editing them.\n"
-            "- Use bash to run commands, tests, install packages, etc.\n\n"
+            "- Use bash to run commands, tests, install packages, etc.\n"
+            "- Use memory_search when the user references prior work in this or another project "
+            "(\"last time\", \"in <project>\", \"how did we fix\"). It searches past gritcode "
+            "conversations across all projects. Pass 2-5 keywords. Prefer over guessing.\n\n"
             "## Behavior\n"
             "- When given a task, work through it step by step using your tools.\n"
             "- Do not just describe what you would do — actually do it by calling tools.\n"
@@ -2017,11 +2123,15 @@ std::string App::BuildAnthropicRequestJson() {
             "by reading, writing, and editing files, and running shell commands.\n\n"
             "Working directory: " + cwd + "\n\n"
             "## Tools\n"
-            "You have these tools: bash, read_file, write_file, edit_file, list_directory.\n"
+            "You have these tools: bash, read_file, write_file, edit_file, list_directory, "
+            "web_fetch, web_search, memory_search.\n"
             "- Use write_file to create new files or overwrite existing ones.\n"
             "- Use edit_file to make targeted changes — provide enough context in old_string to be unique.\n"
             "- Use read_file to read files before editing them.\n"
-            "- Use bash to run commands, tests, install packages, etc.\n\n"
+            "- Use bash to run commands, tests, install packages, etc.\n"
+            "- Use memory_search when the user references prior work in this or another project "
+            "(\"last time\", \"in <project>\", \"how did we fix\"). It searches past gritcode "
+            "conversations across all projects. Pass 2-5 keywords. Prefer over guessing.\n\n"
             "## Behavior\n"
             "- When given a task, work through it step by step using your tools.\n"
             "- Do not just describe what you would do — actually do it by calling tools.\n"
@@ -2135,6 +2245,22 @@ std::string App::BuildAnthropicRequestJson() {
     return j.dump();
 }
 
+void App::SaveAndIndex() {
+    session_.Save();
+    if (!memory_.IsOpen()) return;
+    // RebuildSession: drop all existing rows for this session_id and re-insert
+    // the current history. Cheaper than tracking deltas, idempotent across
+    // compaction (where the head of history is replaced by a summary), and
+    // cheap in absolute terms (a 500-turn rebuild is sub-100ms).
+    auto now = []{
+        time_t t = time(nullptr); struct tm tm; localtime_r(&t, &tm);
+        char buf[32]; strftime(buf, sizeof(buf), "%Y-%m-%dT%H:%M:%S", &tm);
+        return std::string(buf);
+    }();
+    memory_.RebuildSession(session_.SessionId(), session_.Cwd(),
+                           session_.History(), now);
+}
+
 void App::SendMessage(const std::string& overrideText) {
     const bool fromOverride = !overrideText.empty();
     std::string msg = fromOverride ? overrideText : messageInput_.text;
@@ -2163,7 +2289,7 @@ void App::SendMessage(const std::string& overrideText) {
     if (!fromOverride) messageInput_.Clear();
 
     session_.History().push_back({"user", msg, {}, {}});
-    session_.Save();
+    SaveAndIndex();
     requestInProgress_ = true;
     toolRound_ = 0;
 
@@ -2487,7 +2613,7 @@ void App::ApplyCompaction(int splitIdx, bool success, const std::string& summary
     hist = std::move(newHist);
     historyCompactBaseCount_ = (int)hist.size();
     session_.MarkDirty();
-    session_.Save();
+    SaveAndIndex();
 
     compacting_ = false;
     DoSendActualRequest();
@@ -2530,8 +2656,9 @@ void App::DoSendToProvider() {
 
         uint64_t gen = ++requestGen_;
         std::string model = activeModel_;
+        std::string mcpConfig = claudeMcpConfigPath_;
 
-        std::thread([this, prompt, model, gen]() {
+        std::thread([this, prompt, model, gen, mcpConfig]() {
             int inPipe[2];   // parent -> child stdin
             int outPipe[2];  // child stdout -> parent
             if (CloexecPipe(inPipe) < 0) {
@@ -2583,13 +2710,24 @@ void App::DoSendToProvider() {
                 dup2(outPipe[1], STDOUT_FILENO);
                 dup2(outPipe[1], STDERR_FILENO);
                 // Original fds are O_CLOEXEC so they auto-close on execvp
-                execlp("claude", "claude",
-                       "--print", "--verbose",
-                       "--output-format", "stream-json",
-                       "--include-partial-messages",
-                       "--dangerously-skip-permissions",
-                       "--model", model.c_str(),
-                       (char*)nullptr);
+                std::vector<const char*> argv = {
+                    "claude",
+                    "--print", "--verbose",
+                    "--output-format", "stream-json",
+                    "--include-partial-messages",
+                    "--dangerously-skip-permissions",
+                    "--model", model.c_str(),
+                };
+                // Register grit-memory as a stdio MCP server for this spawn
+                // only. We intentionally do NOT pass --strict-mcp-config:
+                // users who've added their own MCPs (github, linear, etc.)
+                // via `claude mcp add` should keep getting them here too.
+                if (!mcpConfig.empty()) {
+                    argv.push_back("--mcp-config");
+                    argv.push_back(mcpConfig.c_str());
+                }
+                argv.push_back(nullptr);
+                execvp("claude", const_cast<char* const*>(argv.data()));
                 _exit(127);
             }
 
@@ -2873,7 +3011,7 @@ void App::DoSendToProvider() {
                 sendButton_.enabled = true;
                 session_.SetProvider(activeProvider_);
                 session_.SetModel(activeModel_);
-                session_.Save();
+                SaveAndIndex();
                 // Natural turn end: auto-dispatch the next queued message if
                 // any BEFORE LayoutWidgets/refocus — otherwise LayoutWidgets
                 // sees (reqInProgress=false, queue non-empty) and flips into
@@ -3192,7 +3330,7 @@ void App::DoSendActualRequest() {
                 scrollView_.StopAllAnimations();
                 session_.SetProvider(activeProvider_);
                 session_.SetModel(activeModel_);
-                session_.Save();
+                SaveAndIndex();
                 // Natural turn end. If there are queued messages, dispatch the
                 // next one BEFORE LayoutWidgets/refocus — LayoutWidgets would
                 // otherwise see (reqInProgress=false, queue non-empty) and flip
@@ -3268,8 +3406,10 @@ void App::ExecuteToolCalls(const std::vector<json>& toolCalls, const std::string
     // thread must not clobber history when it finishes after the fact.
     auto tcCopy = toolCalls;
     uint64_t gen = requestGen_.load();
+    MemoryDB* mem = &memory_;
+    std::string excludeSid = session_.SessionId();
 
-    std::thread([this, tcCopy, gen]() {
+    std::thread([this, tcCopy, gen, mem, excludeSid]() {
         struct Result { std::string id, output; };
         std::vector<Result> results;
         for (auto& tc : tcCopy) {
@@ -3278,7 +3418,7 @@ void App::ExecuteToolCalls(const std::vector<json>& toolCalls, const std::string
             if (requestGen_.load() != gen) break;
             results.push_back({
                 tc.value("id", ""),
-                ExecuteTool(tc.value("name", ""), tc.value("arguments", "{}"))
+                ExecuteTool(tc.value("name", ""), tc.value("arguments", "{}"), mem, excludeSid)
             });
         }
 
@@ -3303,7 +3443,7 @@ void App::ExecuteToolCalls(const std::vector<json>& toolCalls, const std::string
             for (size_t i = 0; i < results.size(); i++) {
                 session_.History().push_back({"tool", results[i].output, {}, results[i].id});
             }
-            session_.Save();
+            SaveAndIndex();
 
             scrollView_.StopThinking(scrollView_.BlockCount() - 1);
             DoSendToProvider();  // Continue the loop
@@ -3356,7 +3496,7 @@ void App::CancelInFlight() {
             session_.History().push_back({"assistant", "[cancelled]", {}, {}});
         }
     }
-    session_.Save();
+    SaveAndIndex();
     scrollView_.StopAllAnimations();
     receivingThinking_ = false;
     responseBuffer_.clear();

@@ -20,6 +20,7 @@ GPU-rendered AI coding harness built in C++ with OpenGL, HarfBuzz, and FreeType.
 - *Secure API key storage* -- system keychain (libsecret on Linux, Keychain on macOS)
 - *Session persistence* -- per working directory, automatic restore
 - *Real context compaction* -- summary LLM call replaces old history in place; no rolling re-compaction
+- *Cross-project memory* -- SQLite FTS5 index over every saved session; =memory_search= tool surfaces prior conversations by keyword. Works on Zen and Claude ACP alike (ACP via a per-spawn stdio MCP server injected through =--mcp-config=).
 - *Markdown rendering* -- bold, italic, code blocks, headings, blockquotes, lists
 
 ** Is this production ready?
@@ -34,7 +35,7 @@ If you want to see it stabilize faster, [[https://github.com/sponsors/lszl84][sp
 
 #+begin_src bash
 sudo apt install libfreetype-dev libharfbuzz-dev libfontconfig-dev \
-  libcurl4-openssl-dev libsecret-1-dev cmake ninja-build \
+  libcurl4-openssl-dev libsecret-1-dev libsqlite3-dev cmake ninja-build \
   libopengl-dev libegl-dev \
   libwayland-dev wayland-protocols libxkbcommon-dev \
   libx11-dev libxext-dev
@@ -55,7 +56,7 @@ to =xdg-shell= / =xdg-decoration= and the X server directly.
 *** Linux (Arch)
 
 #+begin_src bash
-sudo pacman -S freetype2 harfbuzz fontconfig curl libsecret cmake ninja \
+sudo pacman -S freetype2 harfbuzz fontconfig curl libsecret sqlite cmake ninja \
   mesa libxkbcommon wayland wayland-protocols libx11 libxext
 
 git clone https://github.com/lszl84/gritcode.git
@@ -71,7 +72,7 @@ grit
 
 #+begin_src bash
 sudo dnf install freetype-devel harfbuzz-devel fontconfig-devel \
-  libcurl-devel libsecret-devel cmake ninja-build \
+  libcurl-devel libsecret-devel sqlite-devel cmake ninja-build \
   mesa-libGL-devel mesa-libEGL-devel \
   wayland-devel wayland-protocols libxkbcommon-devel \
   libX11-devel libXext-devel
@@ -93,7 +94,7 @@ sudo pkg install -g 'GhostBSD*-dev-*'
 
 # FreeBSD/GhostBSD: install build dependencies
 sudo pkg install cmake git pkgconf freetype2 harfbuzz fontconfig \
-  curl libsecret cmark wayland wayland-protocols libxkbcommon \
+  curl libsecret sqlite3 cmark wayland wayland-protocols libxkbcommon \
   libX11 libXext
 
 git clone https://github.com/lszl84/gritcode.git
@@ -123,7 +124,9 @@ cmake --build build
 open build/grit.app
 #+end_src
 
-On macOS, FreeType, HarfBuzz, and curl are fetched and built from source automatically by CMake. The window backend (=window_macos.mm=) is a thin Cocoa wrapper around =NSWindow= + =NSOpenGLView= — no GLFW dependency.
+On macOS, FreeType, HarfBuzz, curl, and SQLite are fetched and built from source automatically by CMake. The window backend (=window_macos.mm=) is a thin Cocoa wrapper around =NSWindow= + =NSOpenGLView= — no GLFW dependency.
+
+On Linux/BSD we deliberately prefer the system =sqlite3= package over bundling the amalgamation, so distro maintainers and security updates stay in charge of it.
 
 ** Architecture
 
@@ -139,16 +142,39 @@ On macOS, FreeType, HarfBuzz, and curl are fetched and built from source automat
 | =window_macos.mm=       | Cocoa NSWindow + NSOpenGLView backend                     |
 | =csd.cpp=               | Client-side decorations: rounded corners, shadow, titlebar |
 | =curl_http.cpp=         | Async HTTP with SSE streaming                             |
-| =mcp_server.cpp=        | MCP socket server for agent-driven automation             |
+| =mcp_server.cpp=        | TCP JSON-RPC server for test automation (*Debug only*)    |
+| =mcp_stdio.cpp=         | Stdio MCP server (=grit --mcp-stdio=) exposing =memory_search= to Claude ACP |
+| =memory.cpp=            | SQLite FTS5 index + search for cross-project memory       |
 | =session.cpp=           | Per-CWD session persistence                               |
 | =keychain.cpp=          | libsecret / Keychain API key storage                      |
+
+** Cross-project memory
+
+Gritcode indexes every turn of every session into a SQLite FTS5 database at
+=$XDG_DATA_HOME/gritcode/memory.db= (or =~/.local/share/gritcode/memory.db=).
+The =memory_search= tool is available to the agent on every provider.
+
+- *Zen* -- built-in tool in gritcode's own tool surface; called like =bash= or =read_file=.
+- *Claude ACP* -- gritcode spawns =claude= with =--mcp-config <path>= pointing
+  at a per-user JSON file at =$XDG_CACHE_HOME/gritcode/claude-mcp.json= that
+  registers =grit --mcp-stdio= as a stdio MCP server named =grit-memory=.
+  No user-side MCP config changes required; your own =claude mcp add= entries
+  continue to work alongside it.
+
+First-time backfill of existing sessions:
+
+#+begin_src bash
+grit --reindex
+#+end_src
+
+Idempotent. Safe to re-run.
 
 ** Requirements
 
 - Linux (Wayland or X11), macOS, or FreeBSD/GhostBSD
 - CMake 3.24+, Ninja (or Make), C++23 compiler
-- Linux: freetype2, harfbuzz, fontconfig, libcurl, libsecret-1, OpenGL + EGL (libopengl-dev + libegl-dev on Debian, mesa on Arch, mesa-libGL-devel + mesa-libEGL-devel on Fedora), at least one of: Wayland stack (wayland-client, wayland-egl, wayland-cursor, wayland-protocols, libxkbcommon) or X11 stack (libX11, libXext)
-- FreeBSD/GhostBSD: freetype2, harfbuzz, fontconfig, curl, libsecret, cmark, wayland + protocols + libxkbcommon and/or libX11 + libXext (via =pkg install=)
+- Linux: freetype2, harfbuzz, fontconfig, libcurl, libsecret-1, sqlite3, OpenGL + EGL (libopengl-dev + libegl-dev on Debian, mesa on Arch, mesa-libGL-devel + mesa-libEGL-devel on Fedora), at least one of: Wayland stack (wayland-client, wayland-egl, wayland-cursor, wayland-protocols, libxkbcommon) or X11 stack (libX11, libXext)
+- FreeBSD/GhostBSD: freetype2, harfbuzz, fontconfig, curl, libsecret, sqlite3, cmark, wayland + protocols + libxkbcommon and/or libX11 + libXext (via =pkg install=)
 - macOS: Xcode command line tools (dependencies fetched automatically)
 
 ** Contributing

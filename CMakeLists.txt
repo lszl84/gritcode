@@ -50,6 +50,7 @@ if(LINUX OR CMAKE_SYSTEM_NAME MATCHES "FreeBSD")
     pkg_check_modules(FONTCONFIG REQUIRED IMPORTED_TARGET fontconfig)
     pkg_check_modules(LIBCURL REQUIRED IMPORTED_TARGET libcurl)
     pkg_check_modules(LIBSECRET REQUIRED IMPORTED_TARGET libsecret-1)
+    pkg_check_modules(SQLITE3 REQUIRED IMPORTED_TARGET sqlite3)
     pkg_check_modules(EGL REQUIRED IMPORTED_TARGET egl)
 
     # --- Wayland backend ---
@@ -151,7 +152,24 @@ else()
         GIT_SHALLOW ON
     )
 
-    FetchContent_MakeAvailable(freetype harfbuzz curl)
+    # SQLite amalgamation — bundled on macOS/Windows where the system may not
+    # ship sqlite headers and distro packaging isn't a factor. On Linux/BSD we
+    # prefer the system package (see above) so distro maintainers can audit
+    # and update it independently.
+    FetchContent_Declare(sqlite3
+        URL https://www.sqlite.org/2025/sqlite-amalgamation-3500200.zip
+        URL_HASH SHA256=387991de2834b5da2894119ff4173a9ea0779ea55ebcf53d9a40b24d1dc2484e
+    )
+    FetchContent_MakeAvailable(freetype harfbuzz curl sqlite3)
+
+    add_library(sqlite3_amalgamation STATIC ${sqlite3_SOURCE_DIR}/sqlite3.c)
+    target_include_directories(sqlite3_amalgamation PUBLIC ${sqlite3_SOURCE_DIR})
+    target_compile_definitions(sqlite3_amalgamation PRIVATE
+        SQLITE_ENABLE_FTS5
+        SQLITE_THREADSAFE=2
+        SQLITE_DEFAULT_MEMSTATUS=0
+        SQLITE_OMIT_DEPRECATED
+    )
 endif()
 
 # --- Executable ---
@@ -167,6 +185,8 @@ set(GRIT_SOURCES
     src/keychain.cpp
     src/session.cpp
     src/clipboard.cpp
+    src/memory.cpp
+    src/mcp_stdio.cpp
 )
 
 if(LINUX OR CMAKE_SYSTEM_NAME MATCHES "FreeBSD")
@@ -248,6 +268,7 @@ if(LINUX OR CMAKE_SYSTEM_NAME MATCHES "FreeBSD")
         PkgConfig::FONTCONFIG
         PkgConfig::LIBCURL
         PkgConfig::LIBSECRET
+        PkgConfig::SQLITE3
     )
     if(HAVE_WAYLAND)
         target_compile_definitions(grit PRIVATE HAVE_WAYLAND=1)
@@ -268,6 +289,7 @@ else()
         freetype
         harfbuzz
         CURL::libcurl
+        sqlite3_amalgamation
     )
     if(APPLE)
         target_link_libraries(grit PRIVATE

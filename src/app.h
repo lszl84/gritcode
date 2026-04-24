@@ -22,6 +22,7 @@
 #include "keychain.h"
 #include "markdown_renderer.h"
 #include "session.h"
+#include "memory.h"
 #ifdef GRIT_ENABLE_MCP
 #include "mcp_server.h"
 #endif
@@ -143,6 +144,14 @@ private:
     // Backend state
     net::CurlHttpClient httpClient_;
     SessionManager session_;
+    // Cross-project conversation memory (FTS5 over every saved session).
+    // Opened in Init; written after every session save; queried by the
+    // memory_search tool. If the open fails (e.g. read-only home dir) the
+    // tool returns empty results — memory is an enhancement, not required.
+    MemoryDB memory_;
+    // Save the session AND re-index it into memory_. Replaces every direct
+    // session_.Save() call so the index never drifts from disk state.
+    void SaveAndIndex();
     std::string activeProvider_ = "zen";
     std::string activeModel_;
     // Set when a session is restored so OnModelsReceived can prefer the
@@ -177,6 +186,12 @@ private:
     // and per-request generation so a stale finalizer from a cancelled request
     // doesn't clobber the UI state of a newer one.
     std::atomic<pid_t> claudePid_{-1};
+    // Path to the per-user claude --mcp-config file that registers the
+    // grit-memory stdio MCP server. Written once at Init; passed to every
+    // ACP spawn via execlp so Claude picks up the memory_search tool
+    // without the user ever touching their own MCP config. Empty if the
+    // config couldn't be written (fallback: memory_search unavailable in ACP).
+    std::string claudeMcpConfigPath_;
     std::atomic<uint64_t> requestGen_{0};
     std::atomic<int> retryCount_{0};
 
