@@ -676,6 +676,22 @@ bool App::Init(bool sessionChooser) {
     sendButton_.text = "Send";
     sendButton_.onClick = [&]() { SendMessage(); };
 
+    // Queue-mode buttons — visible only when the agent is idle AND the queue
+    // is non-empty (see LayoutWidgets). Continue dispatches the queued
+    // messages; Clear drops them all and restores the normal input.
+    continueQueueButton_.text = "Continue";
+    continueQueueButton_.visible = false;
+    continueQueueButton_.onClick = [&]() {
+        DispatchNextQueued();
+    };
+    clearQueueButton_.text = "Clear queue";
+    clearQueueButton_.visible = false;
+    clearQueueButton_.onClick = [&]() {
+        pendingQueue_.clear();
+        LayoutWidgets();
+        MarkDirty();
+    };
+
     // API Key button + inline editor
     apiKeyButton_.text = "API Key...";
     apiKeyButton_.onClick = [&]() { ShowApiKeyDialog(); };
@@ -725,7 +741,11 @@ bool App::Init(bool sessionChooser) {
     // Window callbacks
     float currentScale = window_.Scale();
     window_.OnResize([&, currentScale](int w, int h, float scale) mutable {
-        int viewH = h - (int)((barHeight_ + inputHeight_ + chromeTopPad_) * scale);
+        // LayoutWidgets updates chipRowHeight_ (which depends on queue state),
+        // so call it first and then derive viewH from the freshly-computed
+        // chrome size.
+        LayoutWidgets();
+        int viewH = h - (int)((barHeight_ + inputHeight_ + chromeTopPad_) * scale) - (int)chipRowHeight_;
         if (viewH < 1) viewH = 1;
         if (scale != currentScale) {
             currentScale = scale;
@@ -733,7 +753,6 @@ bool App::Init(bool sessionChooser) {
         } else {
             scrollView_.OnResize(w, viewH);
         }
-        LayoutWidgets();
         MarkDirty();
     });
     window_.OnMouseButton([&](float x, float y, bool pressed, bool shift) {
@@ -909,6 +928,8 @@ void App::StartMCP() {
     };
 
     cb.getStatus = [this]() -> json {
+        json queue = json::array();
+        for (auto& q : pendingQueue_) queue.push_back(q);
         return {
             {"connected", connected_},
             {"requestInProgress", requestInProgress_},
@@ -918,7 +939,9 @@ void App::StartMCP() {
             {"messageCount", (int)session_.History().size()},
             {"waitingDotsVisible", waitingDotFrame_ >= 0},
             {"thinkingDotsActive", scrollView_.HasActiveThinking()},
-            {"sendButtonEnabled", sendButton_.enabled}
+            {"sendButtonEnabled", sendButton_.enabled},
+            {"pendingQueue", queue},
+            {"continueQueueVisible", continueQueueButton_.visible}
         };
     };
 
@@ -1004,11 +1027,41 @@ void App::LayoutWidgets() {
     float bar = barHeight_ * s;
     float inp = inputHeight_ * s;
 
+    // Chip layout (sets chipRowHeight_ for viewport math below).
+    ComputeQueueChipLayout();
+
     float barY = h - bar;
     float inputY = barY - inp;
 
+    // Idle-queue mode: agent idle but queue non-empty — swap input/Send for
+    // Continue/Clear so the user has to explicitly resume or clear.
+    bool idleQueueMode = !requestInProgress_ && !pendingQueue_.empty();
+    messageInput_.visible = !idleQueueMode;
+    sendButton_.visible = !idleQueueMode;
+    continueQueueButton_.visible = idleQueueMode;
+    clearQueueButton_.visible = idleQueueMode;
+    if (idleQueueMode) messageInput_.focused = false;
+
+    if (requestInProgress_) {
+        sendButton_.text = "Add";
+        sendButton_.enabled = pendingQueue_.size() < kMaxQueue_;
+    } else {
+        sendButton_.text = "Send";
+        sendButton_.enabled = true;
+    }
+
     messageInput_.bounds = {8, inputY + 5, w - 103, inp - 10};
     sendButton_.bounds = {w - 88, inputY + 5, 80, inp - 10};
+
+    if (idleQueueMode) {
+        float contW = 120 * s;
+        float clearW = 140 * s;
+        float gap = 8 * s;
+        float totalW = contW + clearW + gap;
+        float startX = (w - totalW) * 0.5f;
+        continueQueueButton_.bounds = {startX, inputY + 5, contW, inp - 10};
+        clearQueueButton_.bounds = {startX + contW + gap, inputY + 5, clearW, inp - 10};
+    }
 
     float bx = 8;
     workspaceDropdown_.bounds = {bx, barY + 5, 200 * s, bar - 10}; bx += 205 * s;
@@ -1059,7 +1112,14 @@ void App::PaintBottomBar() {
     float inputY = barY - inp;
     float topPad = chromeTopPad_ * s;
 
-    renderer_.DrawRect(0, inputY - topPad, w, inp + bar + topPad, chromeBg);
+    // Chrome background includes the chip row above the input when queue is non-empty.
+    float chromeY = inputY - topPad - chipRowHeight_;
+    float chromeH = inp + bar + topPad + chipRowHeight_;
+    renderer_.DrawRect(0, chromeY, w, chromeH, chromeBg);
+
+    if (chipRowHeight_ > 0) {
+        PaintQueueChips();
+    }
 
     // Scale transform: widgets use logical coords, renderer uses physical
     // For now, widgets draw at 1:1 since renderer works in physical pixels
@@ -1079,11 +1139,118 @@ void App::PaintBottomBar() {
     }
     messageInput_.Paint(renderer_, fm);
     sendButton_.Paint(renderer_, fm);
+    continueQueueButton_.Paint(renderer_, fm);
+    clearQueueButton_.Paint(renderer_, fm);
 
     // Dropdown popups last (z-order: on top of everything)
     workspaceDropdown_.PaintPopup(renderer_, fm);
     providerDropdown_.PaintPopup(renderer_, fm);
     modelDropdown_.PaintPopup(renderer_, fm);
+}
+
+// Build a one-line display label for a queued message: collapse whitespace,
+// truncate to ~48 codepoints with an ellipsis.
+static std::string ChipLabelFor(const std::string& raw) {
+    std::string label;
+    label.reserve(raw.size());
+    for (char c : raw) label += (c == '\n' || c == '\r' || c == '\t') ? ' ' : c;
+    const size_t maxCp = 48;
+    size_t cp = 0, byteEnd = 0;
+    while (byteEnd < label.size() && cp < maxCp) {
+        unsigned char c = (unsigned char)label[byteEnd];
+        if (c < 0x80) byteEnd++;
+        else if (c < 0xE0) byteEnd += 2;
+        else if (c < 0xF0) byteEnd += 3;
+        else byteEnd += 4;
+        cp++;
+    }
+    if (byteEnd < label.size()) return label.substr(0, byteEnd) + "…";
+    return label;
+}
+
+void App::ComputeQueueChipLayout() {
+    queueChipHits_.clear();
+    chipRowHeight_ = 0;
+    if (pendingQueue_.empty()) return;
+
+    float s = window_.Scale();
+    float w = window_.Width();
+    float bottomMargin = 2 * s;
+    float h = window_.Height() - bottomMargin;
+    float bar = barHeight_ * s;
+    float inp = inputHeight_ * s;
+    float inputY = h - bar - inp;
+
+    float chipH = 28 * s;
+    float rowGap = 6 * s;
+    float hPad = 12 * s;
+    float closeSize = chipH - 8 * s;
+    float closePad = 4 * s;
+    float startX = 8.0f * s;
+    float endX = w - 8.0f * s;
+    float chipW = std::max(closeSize * 3.0f, endX - startX);
+
+    size_t numRows = pendingQueue_.size();
+    chipRowHeight_ = (float)numRows * chipH + (float)(numRows + 1) * rowGap;
+
+    float chipsTopY = inputY - chipRowHeight_ + rowGap;
+
+    for (size_t i = 0; i < pendingQueue_.size(); i++) {
+        float rowY = chipsTopY + (float)i * (chipH + rowGap);
+
+        QueueChipHit hit;
+        hit.chip = {startX, rowY, chipW, chipH};
+        hit.bodyHit = {startX, rowY, chipW - closeSize - closePad, chipH};
+        float closeX = startX + chipW - hPad - closeSize;
+        hit.closeBtn = {closeX - closePad, rowY, closeSize + closePad * 2, chipH};
+        hit.label = ChipLabelFor(pendingQueue_[i]);
+        hit.idx = i;
+        queueChipHits_.push_back(hit);
+    }
+}
+
+void App::PaintQueueChips() {
+    if (queueChipHits_.empty()) return;
+
+    float s = window_.Scale();
+    auto& fm = scrollView_.Fonts();
+    Color chipBg{0.18f, 0.18f, 0.20f};
+    Color chipText{0.82f, 0.82f, 0.84f};
+    Color closeBg{0.28f, 0.14f, 0.14f};
+    Color closeIcon{0.92f, 0.72f, 0.72f};
+
+    float hPad = 12 * s;
+    float chipH = 28 * s;
+    float closeSize = chipH - 8 * s;
+
+    // Text clip reserves room for the close button on the right.
+    float textRightPad = closeSize + hPad * 2;
+
+    for (const auto& hit : queueChipHits_) {
+        float x = hit.chip.x;
+        float y = hit.chip.y;
+        float cw = hit.chip.w;
+
+        renderer_.DrawRoundedRect(x, y, cw, chipH, chipH * 0.5f, chipBg);
+
+        renderer_.PushClip(x + hPad, y, cw - textRightPad, chipH);
+        auto run = fm.Shape(hit.label, FontStyle::Regular);
+        float ty = y + (chipH - fm.LineHeight(FontStyle::Regular)) / 2;
+        renderer_.DrawShapedRun(fm, run, x + hPad, ty, fm.Ascent(FontStyle::Regular), chipText);
+        renderer_.PopClip();
+
+        float cxIcon = x + cw - hPad - closeSize;
+        float cyIcon = y + (chipH - closeSize) / 2;
+        renderer_.DrawRoundedRect(cxIcon, cyIcon, closeSize, closeSize, closeSize * 0.5f, closeBg);
+
+        auto xrun = fm.Shape("\xc3\x97", FontStyle::Regular);
+        float xw = xrun.totalWidth;
+        float xLineH = fm.LineHeight(FontStyle::Regular);
+        float xAscent = fm.Ascent(FontStyle::Regular);
+        float xx = cxIcon + (closeSize - xw) / 2.0f;
+        float xy = cyIcon + (closeSize - xLineH) / 2.0f;
+        renderer_.DrawShapedRun(fm, xrun, xx, xy, xAscent, closeIcon);
+    }
 }
 
 // ============================================================================
@@ -1955,26 +2122,98 @@ std::string App::BuildAnthropicRequestJson() {
     return j.dump();
 }
 
-void App::SendMessage() {
-    std::string msg = messageInput_.text;
-    if (msg.empty() || !connected_ || requestInProgress_) return;
+void App::SendMessage(const std::string& overrideText) {
+    const bool fromOverride = !overrideText.empty();
+    std::string msg = fromOverride ? overrideText : messageInput_.text;
+    if (msg.empty() || !connected_) return;
+
+    // Agent busy → append to the pending queue as a chip. The turn-completion
+    // paths (Zen onComplete and ACP subprocess finalizer) auto-dispatch the
+    // front of the queue. Escape cancel preserves the queue and flips to
+    // idle-queue mode (Continue / Clear).
+    if (requestInProgress_) {
+        if (pendingQueue_.size() >= kMaxQueue_) return;
+        pendingQueue_.push_back(msg);
+        if (!fromOverride) messageInput_.Clear();
+        LayoutWidgets();
+        // Resize the scroll view since the chip row steals vertical space.
+        float s = window_.Scale();
+        int viewH = window_.Height() - (int)((barHeight_ + inputHeight_ + chromeTopPad_) * s) - (int)chipRowHeight_;
+        if (viewH < 1) viewH = 1;
+        scrollView_.OnResize(window_.Width(), viewH);
+        MarkDirty();
+        return;
+    }
 
     // Show in UI
     scrollView_.AppendStream(BlockType::USER_PROMPT, msg);
-    messageInput_.Clear();
+    if (!fromOverride) messageInput_.Clear();
 
     session_.History().push_back({"user", msg, {}, {}});
     session_.Save();
     requestInProgress_ = true;
-    sendButton_.enabled = false;
     toolRound_ = 0;
 
     waitingDotTimer_ = 0;
     waitingDotFrame_ = -1;
+    // Recompute layout in case we transitioned out of idle-queue mode.
+    LayoutWidgets();
     MarkDirty();
 
     retryCount_ = 0;  // user-initiated send resets retry counter
     DoSendToProvider();
+}
+
+void App::DispatchNextQueued() {
+    if (pendingQueue_.empty()) return;
+    std::string next = std::move(pendingQueue_.front());
+    pendingQueue_.erase(pendingQueue_.begin());
+    // Route through SendMessage() with an override so the user's in-progress
+    // typing in messageInput_ is preserved — previously we used
+    // messageInput_.text as a scratch variable, which clobbered whatever the
+    // user was mid-typing when the turn ended.
+    // Save and restore focus across the LayoutWidgets call below — if there
+    // are still queued items left after the pop, LayoutWidgets would flip to
+    // idleQueueMode (reqInProgress=false && queue non-empty) and unfocus the
+    // input. SendMessage() flips reqInProgress=true so idle-queue mode is
+    // gone for the actual request, but the focus side effect sticks.
+    bool wasFocused = messageInput_.focused;
+    LayoutWidgets();
+    messageInput_.focused = wasFocused;
+    float s = window_.Scale();
+    int viewH = window_.Height() - (int)((barHeight_ + inputHeight_ + chromeTopPad_) * s) - (int)chipRowHeight_;
+    if (viewH < 1) viewH = 1;
+    scrollView_.OnResize(window_.Width(), viewH);
+    SendMessage(next);
+}
+
+void App::RemoveQueuedAt(size_t idx) {
+    if (idx >= pendingQueue_.size()) return;
+    pendingQueue_.erase(pendingQueue_.begin() + idx);
+    LayoutWidgets();
+    float s = window_.Scale();
+    int viewH = window_.Height() - (int)((barHeight_ + inputHeight_ + chromeTopPad_) * s) - (int)chipRowHeight_;
+    if (viewH < 1) viewH = 1;
+    scrollView_.OnResize(window_.Width(), viewH);
+}
+
+void App::ClickQueueChip(size_t idx) {
+    if (idx >= pendingQueue_.size()) return;
+    // Pull the chip's text into the input for editing. If the input already
+    // has text, appending the existing text to the back of the queue is more
+    // surprising than just replacing, so replace — the user clicked the chip
+    // intentionally.
+    std::string text = pendingQueue_[idx];
+    pendingQueue_.erase(pendingQueue_.begin() + idx);
+    messageInput_.text = text;
+    messageInput_.cursorPos = (int)text.size();
+    messageInput_.selStart = messageInput_.selEnd = 0;
+    messageInput_.focused = true;
+    LayoutWidgets();
+    float s = window_.Scale();
+    int viewH = window_.Height() - (int)((barHeight_ + inputHeight_ + chromeTopPad_) * s) - (int)chipRowHeight_;
+    if (viewH < 1) viewH = 1;
+    scrollView_.OnResize(window_.Width(), viewH);
 }
 
 // ---------------------------------------------------------------------------
@@ -2288,6 +2527,8 @@ void App::DoSendToProvider() {
                     AppendSystem("Error: pipe failed");
                     requestInProgress_ = false;
                     sendButton_.enabled = true;
+                    LayoutWidgets();
+                    RefocusMessageInputAfterTurn();
                     MarkDirty();
                 });
                 return;
@@ -2299,6 +2540,8 @@ void App::DoSendToProvider() {
                     AppendSystem("Error: pipe failed");
                     requestInProgress_ = false;
                     sendButton_.enabled = true;
+                    LayoutWidgets();
+                    RefocusMessageInputAfterTurn();
                     MarkDirty();
                 });
                 return;
@@ -2313,6 +2556,8 @@ void App::DoSendToProvider() {
                     AppendSystem("Error: fork failed");
                     requestInProgress_ = false;
                     sendButton_.enabled = true;
+                    LayoutWidgets();
+                    RefocusMessageInputAfterTurn();
                     MarkDirty();
                 });
                 return;
@@ -2616,6 +2861,20 @@ void App::DoSendToProvider() {
                 session_.SetProvider(activeProvider_);
                 session_.SetModel(activeModel_);
                 session_.Save();
+                // Natural turn end: auto-dispatch the next queued message if
+                // any BEFORE LayoutWidgets/refocus — otherwise LayoutWidgets
+                // sees (reqInProgress=false, queue non-empty) and flips into
+                // idle-queue mode, which hides+unfocuses the input. Dispatching
+                // first keeps reqInProgress high across back-to-back turns so
+                // the input stays visible and focused the whole time.
+                // Error paths (pipe/fork/exec) fall through to idle-queue mode
+                // where the user decides whether to Continue.
+                if (!pendingQueue_.empty()) {
+                    DispatchNextQueued();
+                } else {
+                    LayoutWidgets();
+                    RefocusMessageInputAfterTurn();
+                }
                 MarkDirty();
             });
         }).detach();
@@ -2767,6 +3026,12 @@ void App::DoSendActualRequest() {
                     }
                     requestInProgress_ = false;
                     sendButton_.enabled = true;
+                    // Error/rate-limit path: DO NOT auto-dispatch the queue.
+                    // Land in idle-queue mode so the user decides whether to
+                    // Continue (retry the turn by resending the next chip)
+                    // or Clear.
+                    LayoutWidgets();
+                    RefocusMessageInputAfterTurn();
                     MarkDirty();
                     return;
                 }
@@ -2915,6 +3180,18 @@ void App::DoSendActualRequest() {
                 session_.SetProvider(activeProvider_);
                 session_.SetModel(activeModel_);
                 session_.Save();
+                // Natural turn end. If there are queued messages, dispatch the
+                // next one BEFORE LayoutWidgets/refocus — LayoutWidgets would
+                // otherwise see (reqInProgress=false, queue non-empty) and flip
+                // to idle-queue mode, hiding+unfocusing the input between turns.
+                // Error paths return early above, so they fall through to real
+                // idle-queue mode where the user decides whether to Continue.
+                if (!pendingQueue_.empty()) {
+                    DispatchNextQueued();
+                } else {
+                    LayoutWidgets();
+                    RefocusMessageInputAfterTurn();
+                }
                 MarkDirty();
             });
         }
@@ -3071,6 +3348,11 @@ void App::CancelInFlight() {
     receivingThinking_ = false;
     responseBuffer_.clear();
     AppendSystem("Cancelled");
+    // Preserve pendingQueue_ — the user may have queued course-correction
+    // messages while the agent was going sideways. We land in idle-queue mode
+    // (Continue / Clear buttons visible) so they decide what happens next.
+    LayoutWidgets();
+    RefocusMessageInputAfterTurn();
     MarkDirty();
 }
 
@@ -3138,7 +3420,31 @@ void App::OnMouseDown(float x, float y, bool shift) {
         }
     }
 
+    // Queue chips: × badge removes; clicking the chip body pulls the text
+    // back into the message input for editing (only when the input is
+    // actually visible — in idle-queue mode it's hidden, so a body-click
+    // implicitly takes us out of that mode via the queue becoming empty or
+    // the user hitting Continue).
+    for (auto& hit : queueChipHits_) {
+        if (PointInRect(x, y, hit.closeBtn)) {
+            RemoveQueuedAt(hit.idx);
+            MarkDirty();
+            return;
+        }
+        // Body-click pulls the chip text back into the input for editing.
+        // Only meaningful while the input is visible (i.e., agent busy); in
+        // idle-queue mode the input is hidden and the user's options are
+        // Continue / Clear / ×, so body clicks are no-ops there.
+        if (messageInput_.visible && PointInRect(x, y, hit.bodyHit)) {
+            ClickQueueChip(hit.idx);
+            MarkDirty();
+            return;
+        }
+    }
+
     if (sendButton_.OnMouseDown(x, y)) { MarkDirty(); return; }
+    if (continueQueueButton_.OnMouseDown(x, y)) { MarkDirty(); return; }
+    if (clearQueueButton_.OnMouseDown(x, y)) { MarkDirty(); return; }
     if (apiKeyEditing_) {
         if (apiKeyAccept_.OnMouseDown(x, y)) { MarkDirty(); return; }
         if (apiKeyCancel_.OnMouseDown(x, y)) { MarkDirty(); return; }
@@ -3162,7 +3468,7 @@ void App::OnMouseDown(float x, float y, bool shift) {
 
     // Scroll view
     float s = window_.Scale();
-    float viewH = window_.Height() - (barHeight_ + inputHeight_ + chromeTopPad_) * s;
+    float viewH = window_.Height() - (barHeight_ + inputHeight_ + chromeTopPad_) * s - chipRowHeight_;
     if (y < viewH) {
         scrollView_.OnMouseDown(x, y, shift);
         dragTarget_ = DragTarget::ScrollView;
@@ -3176,6 +3482,8 @@ void App::OnMouseDown(float x, float y, bool shift) {
 
 void App::OnMouseUp(float x, float y) {
     sendButton_.OnMouseUp(x, y);
+    continueQueueButton_.OnMouseUp(x, y);
+    clearQueueButton_.OnMouseUp(x, y);
     if (apiKeyEditing_) { apiKeyAccept_.OnMouseUp(x, y); apiKeyCancel_.OnMouseUp(x, y); }
     else apiKeyButton_.OnMouseUp(x, y);
     scrollView_.OnMouseUp(x, y);
@@ -3215,12 +3523,14 @@ void App::OnMouseMove(float x, float y, bool leftDown) {
     sendButton_.OnMouseMove(x, y);
     if (apiKeyEditing_) { apiKeyAccept_.OnMouseMove(x, y); apiKeyCancel_.OnMouseMove(x, y); }
     else apiKeyButton_.OnMouseMove(x, y);
+    continueQueueButton_.OnMouseMove(x, y);
+    clearQueueButton_.OnMouseMove(x, y);
     workspaceDropdown_.OnMouseMove(x, y);
     providerDropdown_.OnMouseMove(x, y);
     modelDropdown_.OnMouseMove(x, y);
 
     float s = window_.Scale();
-    float viewH = window_.Height() - (barHeight_ + inputHeight_ + chromeTopPad_) * s;
+    float viewH = window_.Height() - (barHeight_ + inputHeight_ + chromeTopPad_) * s - chipRowHeight_;
     if (y < viewH) {
         scrollView_.OnMouseMove(x, y, leftDown);
     }

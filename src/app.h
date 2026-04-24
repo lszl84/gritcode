@@ -80,6 +80,13 @@ private:
     Dropdown modelDropdown_;
     TextInput messageInput_;
     Button sendButton_;
+    // "Continue with queued messages" vs "Clear queue" — visible only when the
+    // agent is idle AND the pending queue is non-empty. In that state the
+    // message input + Send button are hidden; user must either dispatch the
+    // queue or clear it (then the input reappears). Entering busy state
+    // restores the input so the user can append more messages mid-turn.
+    Button continueQueueButton_;
+    Button clearQueueButton_;
     Button apiKeyButton_;
     TextInput apiKeyInput_;
     Button apiKeyAccept_;
@@ -93,6 +100,17 @@ private:
     void UnfocusAllInputs() {
         apiKeyInput_.focused = false;
         messageInput_.focused = false;
+    }
+    // Called when a turn ends (naturally, on error, or on cancel). If the
+    // message input is visible — i.e. we're not in idle-queue mode and the
+    // API-key dialog isn't open — jump focus back to it so the user can keep
+    // typing (or queuing) without a fresh click. Especially important with
+    // the queue: the whole point is to let the user bombard follow-ups
+    // without breaking flow.
+    void RefocusMessageInputAfterTurn() {
+        if (apiKeyEditing_) return;
+        if (!messageInput_.visible) return;
+        messageInput_.focused = true;
     }
     // Window-level focus tracking. The compositor may briefly send a
     // keyboard leave+enter pair during xdg_toplevel_move (titlebar drag
@@ -183,16 +201,45 @@ private:
     float waitingDotTimer_ = 0;
     int waitingDotFrame_ = -1;  // current animation frame (-1 = not showing)
 
+    // Message queue. When a user hits Enter while the agent is busy, the
+    // message is appended here as a chip above the input instead of sending.
+    // On natural turn completion the front is auto-dispatched; on Escape the
+    // queue is preserved and the UI enters idle-queue mode (input hidden,
+    // Continue/Clear buttons visible).
+    std::vector<std::string> pendingQueue_;
+    static constexpr size_t kMaxQueue_ = 5;
+    struct QueueChipHit {
+        WidgetRect chip;       // full chip bounds (bg rect)
+        WidgetRect bodyHit;    // body click target (excludes close badge)
+        WidgetRect closeBtn;   // close badge hit target
+        std::string label;     // one-line truncated display text
+        size_t idx;            // index into pendingQueue_
+    };
+    std::vector<QueueChipHit> queueChipHits_;
+    // Physical-pixel vertical space currently occupied by the chip row (0 when
+    // queue is empty). Recomputed in LayoutWidgets; viewH uses it so the
+    // scroll view doesn't overlap the chips.
+    float chipRowHeight_ = 0;
+    void DispatchNextQueued();
+    void RemoveQueuedAt(size_t idx);
+    void ClickQueueChip(size_t idx);
+    // Computes chip rectangles for the current queue state and sets
+    // chipRowHeight_. Chips wrap to additional rows if a single row would
+    // overflow the available width. Must be called from LayoutWidgets before
+    // deriving the scroll-view viewport.
+    void ComputeQueueChipLayout();
+
     // Layout
     float barHeight_ = 40;
     float inputHeight_ = 50;
     float chromeTopPad_ = 4;  // Padding above the message row inside the bottom chrome
     void LayoutWidgets();
     void PaintBottomBar();
+    void PaintQueueChips();
 
     // Actions
     void Connect(const std::string& apiKey = "");
-    void SendMessage();
+    void SendMessage(const std::string& overrideText = "");
     void DoSendToProvider();
     // Compaction preflight (Zen/HTTP path only — Claude subprocess manages
     // its own context). If history is over budget, synthesizes a summary

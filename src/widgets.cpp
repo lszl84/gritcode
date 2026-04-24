@@ -149,6 +149,7 @@ void TextInput::EnsureCursorVisible(FontManager& fm) {
 }
 
 void TextInput::Paint(GLRenderer& r, FontManager& fm) const {
+    if (!visible) return;
     float radius = 14;
     float pad = 8;
 
@@ -242,6 +243,7 @@ std::string TextInput::GetSelectedText() const {
 }
 
 bool TextInput::OnMouseDown(float x, float y, FontManager& fm) {
+    if (!visible) return false;
     if (!PointInRect(x, y, bounds)) return false;
     focused = true;
 

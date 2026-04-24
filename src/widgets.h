@@ -86,6 +86,7 @@ public:
     Color cursorColor{0.85f, 0.85f, 0.85f};
     FontStyle style = FontStyle::Regular;
     bool focused = false;
+    bool visible = true;
     bool password = false;  // mask with dots
     int cursorPos = 0;      // byte position
     int selStart = 0;       // selection in codepoint offsets
