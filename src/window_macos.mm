@@ -90,6 +90,7 @@ struct MacState {
     AppWindow::ScrollCb    scrollCb;
     AppWindow::KeyCb       keyCb;
     AppWindow::CharCb      charCb;
+    AppWindow::FocusCb     focusCb;
 };
 
 @interface GritView : NSOpenGLView {
@@ -129,6 +130,14 @@ struct MacState {
     st_->bufferW = (int)backing.width;
     st_->bufferH = (int)backing.height;
     if (st_->resizeCb) st_->resizeCb(st_->bufferW, st_->bufferH, st_->scale);
+}
+- (void)windowDidBecomeKey:(NSNotification*)n {
+    (void)n;
+    if (st_->focusCb) st_->focusCb(true);
+}
+- (void)windowDidResignKey:(NSNotification*)n {
+    (void)n;
+    if (st_->focusCb) st_->focusCb(false);
 }
 @end
 
@@ -439,9 +448,14 @@ void AppWindow::OnMouseMove(MouseMoveCb cb)    { if (impl_->mac) impl_->mac->mou
 void AppWindow::OnScrollEvent(ScrollCb cb)     { if (impl_->mac) impl_->mac->scrollCb    = std::move(cb); }
 void AppWindow::OnKeyEvent(KeyCb cb)           { if (impl_->mac) impl_->mac->keyCb       = std::move(cb); }
 void AppWindow::OnCharEvent(CharCb cb)         { if (impl_->mac) impl_->mac->charCb      = std::move(cb); }
+void AppWindow::OnFocusChange(FocusCb cb)      { if (impl_->mac) impl_->mac->focusCb    = std::move(cb); }
 
 void AppWindow::SetFontManager(const FontManager*) {
     // macOS uses NSWindow's native titlebar — no CSD, no custom title draw.
+}
+
+bool AppWindow::NeedsRedraw() const {
+    return false;
 }
 
 void AppWindow::SetClipboard(const std::string& text) {

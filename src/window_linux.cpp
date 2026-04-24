@@ -23,6 +23,7 @@
 #include "window.h"
 #include "csd.h"
 #include "keysyms.h"
+#include "debug_log.h"
 
 #ifdef HAVE_WAYLAND
 #include <wayland-client.h>
@@ -111,6 +112,11 @@ struct WlState {
     bool dirty = true;
     bool frame_pending = false;
     bool keyboard_focus = false;
+    // Set right before we call xdg_toplevel_move/resize. The compositor
+    // starts a server-side grab for those, which fires a transient
+    // wl_keyboard.leave immediately and a matching enter when the grab ends.
+    // We suppress that pair so CSD doesn't dim and input focus doesn't blip.
+    bool in_server_grab = false;
 
     // Pointer state (logical coords)
     double px = 0, py = 0;
@@ -137,6 +143,7 @@ struct WlState {
     // CSD
     bool use_csd = false;
     bool floating = true;          // tiled/maximized/fullscreen disables shadow+corners
+    bool activated = true;         // XDG_TOPLEVEL_STATE_ACTIVATED — drives backdrop dim
     uint32_t current_edge = 0;     // hover edge under pointer (0 = none)
     CsdCompositor* csd = nullptr;
 
@@ -162,6 +169,7 @@ struct WlState {
     AppWindow::ScrollCb    scrollCb;
     AppWindow::KeyCb       keyCb;
     AppWindow::CharCb      charCb;
+    AppWindow::FocusCb     focusCb;
 };
 
 static double wl_monotonic() {
@@ -285,7 +293,7 @@ static void toplevel_handle_configure(void* data, xdg_toplevel*,
     if (w > 0) st->pending_width = w;
     if (h > 0) st->pending_height = h;
 
-    bool tiled = false, maximized = false, fullscreen = false;
+    bool tiled = false, maximized = false, fullscreen = false, activated = false;
     if (states) {
         uint32_t* s;
         for (s = (uint32_t*)states->data;
@@ -293,6 +301,7 @@ static void toplevel_handle_configure(void* data, xdg_toplevel*,
             switch (*s) {
             case XDG_TOPLEVEL_STATE_MAXIMIZED:    maximized = true; break;
             case XDG_TOPLEVEL_STATE_FULLSCREEN:   fullscreen = true; break;
+            case XDG_TOPLEVEL_STATE_ACTIVATED:    activated = true; break;
             case XDG_TOPLEVEL_STATE_TILED_LEFT:
             case XDG_TOPLEVEL_STATE_TILED_RIGHT:
             case XDG_TOPLEVEL_STATE_TILED_TOP:
@@ -306,6 +315,11 @@ static void toplevel_handle_configure(void* data, xdg_toplevel*,
         // Buffer geometry changes with shadow; force re-commit.
         st->applied_buffer_w = 0;
         st->applied_buffer_h = 0;
+        st->dirty = true;
+    }
+    if (st->activated != activated) {
+        st->activated = activated;
+        if (st->csd) st->csd->SetActive(activated);
         st->dirty = true;
     }
 }
@@ -441,11 +455,13 @@ static void pointer_handle_button(void* data, wl_pointer*, uint32_t serial,
                 ? st->csd->ResizeEdge((int)st->px, (int)st->py, st->width, st->height)
                 : 0;
             if (edge != 0 && st->toplevel) {
+                st->in_server_grab = true;
                 xdg_toplevel_resize(st->toplevel, st->seat, serial, edge);
                 st->left_down = false;   // resize grab takes over the press
                 return;
             }
             if (st->csd->InTitlebar((int)st->px, (int)st->py)) {
+                st->in_server_grab = true;
                 xdg_toplevel_move(st->toplevel, st->seat, serial);
                 st->left_down = false;
                 return;
@@ -526,11 +542,13 @@ static void touch_handle_down(void* data, wl_touch*, uint32_t serial,
             ? st->csd->ResizeEdge((int)st->px, (int)st->py, st->width, st->height)
             : 0;
         if (edge != 0 && st->toplevel) {
+            st->in_server_grab = true;
             xdg_toplevel_resize(st->toplevel, st->seat, serial, edge);
             st->touch_id = -1;
             return;
         }
         if (st->csd->InTitlebar((int)st->px, (int)st->py)) {
+            st->in_server_grab = true;
             xdg_toplevel_move(st->toplevel, st->seat, serial);
             st->touch_id = -1;
             return;
@@ -628,12 +646,27 @@ static int wl_translate_sym(xkb_keysym_t sym) {
 
 static void keyboard_handle_enter(void* data, wl_keyboard*, uint32_t,
                                   wl_surface*, wl_array*) {
-    static_cast<WlState*>(data)->keyboard_focus = true;
+    auto* st = static_cast<WlState*>(data);
+    st->keyboard_focus = true;
+    // Matching enter for a server grab we started (xdg_toplevel_move/resize):
+    // state never actually changed, so clear the flag and skip notifications.
+    if (st->in_server_grab) { st->in_server_grab = false; return; }
+    // Tiling compositors (e.g. Hyprland) don't always re-send xdg_toplevel
+    // configure on pure focus changes, so xdg_toplevel.activated isn't a
+    // reliable signal. Drive CSD active-state from keyboard focus instead —
+    // this fires every time the window gains/loses keyboard focus.
+    if (st->csd) { st->csd->SetActive(true); st->dirty = true; }
+    if (st->focusCb) st->focusCb(true);
 }
 static void keyboard_handle_leave(void* data, wl_keyboard*, uint32_t, wl_surface*) {
     auto* st = static_cast<WlState*>(data);
     st->keyboard_focus = false;
     st->repeat_key = 0;
+    // Server-grab transient (we just called xdg_toplevel_move/resize):
+    // ignore this leave — the matching enter will clear the flag.
+    if (st->in_server_grab) return;
+    if (st->csd) { st->csd->SetActive(false); st->dirty = true; }
+    if (st->focusCb) st->focusCb(false);
 }
 static void keyboard_handle_key(void* data, wl_keyboard*, uint32_t serial,
                                 uint32_t, uint32_t key, uint32_t state) {
@@ -1006,6 +1039,7 @@ struct X11State {
     AppWindow::ScrollCb    scrollCb;
     AppWindow::KeyCb       keyCb;
     AppWindow::CharCb      charCb;
+    AppWindow::FocusCb     focusCb;
 };
 
 static int x11_translate_keysym(KeySym sym) {
@@ -1133,8 +1167,18 @@ static void x11_pump_event(X11State* st, XEvent& e) {
         break;
     }
     case Expose: st->dirty = true; break;
-    case FocusIn: st->keyboard_focus = true; if (st->xic) XSetICFocus(st->xic); break;
-    case FocusOut: st->keyboard_focus = false; if (st->xic) XUnsetICFocus(st->xic); break;
+    case FocusIn:
+        st->keyboard_focus = true;
+        if (st->xic) XSetICFocus(st->xic);
+        if (st->focusCb) st->focusCb(true);
+        st->dirty = true;
+        break;
+    case FocusOut:
+        st->keyboard_focus = false;
+        if (st->xic) XUnsetICFocus(st->xic);
+        if (st->focusCb) st->focusCb(false);
+        st->dirty = true;
+        break;
     case ClientMessage: {
         if ((Atom)e.xclient.data.l[0] == st->wmDelete) {
             st->shouldClose = true;
@@ -1749,6 +1793,14 @@ void AppWindow::OnCharEvent(CharCb cb) {
     if (impl_->x11) impl_->x11->charCb = std::move(cb);
 #endif
 }
+void AppWindow::OnFocusChange(FocusCb cb) {
+#ifdef HAVE_WAYLAND
+    if (impl_->wl) impl_->wl->focusCb = std::move(cb);
+#endif
+#ifdef HAVE_X11
+    if (impl_->x11) impl_->x11->focusCb = std::move(cb);
+#endif
+}
 
 void AppWindow::SetFontManager(const FontManager* fm) {
 #ifdef HAVE_WAYLAND
@@ -1759,6 +1811,13 @@ void AppWindow::SetFontManager(const FontManager* fm) {
 #else
     (void)fm;
 #endif
+}
+
+bool AppWindow::NeedsRedraw() const {
+#ifdef HAVE_WAYLAND
+    if (impl_->wl && impl_->wl->csd && impl_->wl->csd->IsAnimating()) return true;
+#endif
+    return false;
 }
 
 void AppWindow::SetClipboard(const std::string& text) {

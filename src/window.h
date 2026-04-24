@@ -67,6 +67,7 @@ public:
     using ScrollCb = std::function<void(float)>;
     using KeyCb = std::function<void(int key, int mods, bool pressed)>;
     using CharCb = std::function<void(uint32_t codepoint)>;
+    using FocusCb = std::function<void(bool focused)>;
 
     void OnResize(ResizeCb cb);
     void OnMouseButton(MouseBtnCb cb);
@@ -74,6 +75,7 @@ public:
     void OnScrollEvent(ScrollCb cb);
     void OnKeyEvent(KeyCb cb);
     void OnCharEvent(CharCb cb);
+    void OnFocusChange(FocusCb cb);
 
     void SetClipboard(const std::string& text);
     std::string GetClipboard();
@@ -81,6 +83,11 @@ public:
     // Provide the app's FontManager so CSD can render the titlebar title.
     // No-op when CSD isn't active (X11/macOS).
     void SetFontManager(const FontManager* fm);
+
+    // True when the window has internal animation in flight that needs a
+    // follow-up frame (e.g. CSD activate/backdrop colour transition). The app
+    // loop should keep polling/rendering while this returns true.
+    bool NeedsRedraw() const;
 
     // Platform-specific handle (void* to avoid exposing platform types)
     void* NativeHandle() const;

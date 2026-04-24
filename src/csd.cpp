@@ -28,6 +28,7 @@
 #include <cmath>
 #include <cstring>
 #include <algorithm>
+#include <ctime>
 #include <vector>
 
 // -- tiny shader helpers ----------------------------------------------------
@@ -89,6 +90,7 @@ out vec4 fragColor;
 uniform float uHover;
 uniform float uPressed;
 uniform vec3  uBarColor;
+uniform float uDim;       // 1.0 = active, 0.5 = backdrop (libadwaita opacity 0.5)
 void main() {
     vec2 p = vUV * 2.0 - 1.0;
     float r = length(p);
@@ -109,7 +111,11 @@ void main() {
     bg          = mix(bg, press, uPressed);
     vec3 disc_c = mix(bg, vec3(1.0), xmask);
     vec3 col    = mix(uBarColor, disc_c, disc);
-    fragColor   = vec4(col, 1.0);
+    // Backdrop dim: blend the whole button toward bar color so the close icon
+    // fades into the chrome, matching libadwaita's `filter: opacity(0.5)`
+    // on the windowhandle subtree.
+    col = mix(uBarColor, col, uDim);
+    fragColor = vec4(col, 1.0);
 }
 )";
 
@@ -167,10 +173,37 @@ void main() {
 }
 )";
 
-static constexpr float TITLEBAR_R = 0.13f;
-static constexpr float TITLEBAR_G = 0.14f;
-static constexpr float TITLEBAR_B = 0.18f;
+// libadwaita dark, straight from the libadwaita-1.so binary defaults:
+//   headerbar_bg_color       = #2e2e32  (active titlebar)
+//   headerbar_backdrop_color = window_bg_color = #222226  (inactive titlebar)
+// Plus headerbar:backdrop > windowhandle { filter: opacity(0.5) }, which we
+// reproduce by lerping title/close icon color toward the bar color.
+static constexpr float TITLEBAR_ACTIVE_R   = 0x2e / 255.0f;
+static constexpr float TITLEBAR_ACTIVE_G   = 0x2e / 255.0f;
+static constexpr float TITLEBAR_ACTIVE_B   = 0x32 / 255.0f;
+static constexpr float TITLEBAR_BACKDROP_R = 0x22 / 255.0f;
+static constexpr float TITLEBAR_BACKDROP_G = 0x22 / 255.0f;
+static constexpr float TITLEBAR_BACKDROP_B = 0x26 / 255.0f;
 static constexpr float SHADOW_SIGMA = 14.0f;
+
+// Animation durations. libadwaita's CSS uses 200ms ease-out for the backdrop
+// transition. We make the activate path snappier (user preference): coming
+// back to focus should feel instant-ish.
+static constexpr double ACTIVATE_DUR_SEC   = 0.05;
+static constexpr double DEACTIVATE_DUR_SEC = 0.20;
+
+static double mono_sec_now() {
+    timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return ts.tv_sec + ts.tv_nsec / 1e9;
+}
+
+// Cubic ease-out, matches GTK's default cubic-bezier(0,0,0.2,1) closely enough
+// to read the same.
+static float ease_out_cubic(float t) {
+    float u = 1.0f - t;
+    return 1.0f - u * u * u;
+}
 
 // Title text — bold lowercase, centered in the titlebar.
 static constexpr const char* kTitleText = "gritcode";
@@ -211,6 +244,7 @@ bool CsdCompositor::CompileShaders() {
     uCloseHover_    = glGetUniformLocation(closeProg_, "uHover");
     uClosePressed_  = glGetUniformLocation(closeProg_, "uPressed");
     uCloseBarColor_ = glGetUniformLocation(closeProg_, "uBarColor");
+    uCloseDim_      = glGetUniformLocation(closeProg_, "uDim");
 
     composeProg_ = link_program(kComposeVS, kComposeFS);
     if (!composeProg_) return false;
@@ -341,8 +375,14 @@ void CsdCompositor::DrawTitle(int mainW, int mainH, int scale) {
     glUseProgram(titleProg_);
     glUniform4f(uTRect_, (float)cx, (float)cy, (float)quadW, (float)quadH);
     glUniform2f(uTScreen_, (float)mainW, (float)mainH);
-    glUniform3f(uTBarColor_, TITLEBAR_R, TITLEBAR_G, TITLEBAR_B);
-    glUniform3f(uTTextColor_, 0.82f, 0.84f, 0.90f);
+    glUniform3f(uTBarColor_, curBarR_, curBarG_, curBarB_);
+    // Dim title text toward the bar color by (1 - curIconAmt_); at full
+    // backdrop (curIconAmt_ = 0.5), text reads at half its active intensity
+    // over the new (already-darker) bar — same effect as opacity(0.5).
+    float tr = curBarR_ + (0.82f - curBarR_) * curIconAmt_;
+    float tg = curBarG_ + (0.84f - curBarG_) * curIconAmt_;
+    float tb = curBarB_ + (0.90f - curBarB_) * curIconAmt_;
+    glUniform3f(uTTextColor_, tr, tg, tb);
     glActiveTexture(GL_TEXTURE0);
     glBindTexture(GL_TEXTURE_2D, titleTex_);
     glUniform1i(uTTex_, 0);
@@ -398,7 +438,8 @@ void CsdCompositor::DrawCloseButton(int mainW, int mainH, int scale) {
     glUniform2f(uCloseScreen_, (float)mainW, (float)mainH);
     glUniform1f(uCloseHover_, closeHoverAmt_);
     glUniform1f(uClosePressed_, closePressed_ ? 1.0f : 0.0f);
-    glUniform3f(uCloseBarColor_, TITLEBAR_R, TITLEBAR_G, TITLEBAR_B);
+    glUniform3f(uCloseBarColor_, curBarR_, curBarG_, curBarB_);
+    glUniform1f(uCloseDim_, curIconAmt_);
     glBindVertexArray(closeVao_);
     glDrawArrays(GL_TRIANGLES, 0, 6);
     glBindVertexArray(0);
@@ -424,13 +465,33 @@ void CsdCompositor::EndFrame(int windowW, int windowH, int scale, bool floating)
     if (target > closeHoverAmt_) closeHoverAmt_ = std::min(target, closeHoverAmt_ + speed);
     else                         closeHoverAmt_ = std::max(target, closeHoverAmt_ - speed);
 
+    // Animate active/backdrop with real-time dt so the duration is independent
+    // of frame rate. Activate path is faster than deactivate.
+    {
+        double now = mono_sec_now();
+        double dt  = lastFrameMonoSec_ > 0 ? std::min(now - lastFrameMonoSec_, 0.1) : 0.0;
+        lastFrameMonoSec_ = now;
+        float t = activeTarget_ ? 1.0f : 0.0f;
+        if (activeAmt_ != t) {
+            double dur = activeTarget_ ? ACTIVATE_DUR_SEC : DEACTIVATE_DUR_SEC;
+            float step = dt > 0 ? (float)(dt / dur) : 1.0f;
+            if (t > activeAmt_) activeAmt_ = std::min(t, activeAmt_ + step);
+            else                activeAmt_ = std::max(t, activeAmt_ - step);
+        }
+    }
+    float ae = ease_out_cubic(std::clamp(activeAmt_, 0.0f, 1.0f));
+    curBarR_ = TITLEBAR_BACKDROP_R + (TITLEBAR_ACTIVE_R - TITLEBAR_BACKDROP_R) * ae;
+    curBarG_ = TITLEBAR_BACKDROP_G + (TITLEBAR_ACTIVE_G - TITLEBAR_BACKDROP_G) * ae;
+    curBarB_ = TITLEBAR_BACKDROP_B + (TITLEBAR_ACTIVE_B - TITLEBAR_BACKDROP_B) * ae;
+    curIconAmt_ = 0.5f + 0.5f * ae;   // 0.5 at backdrop, 1.0 at active
+
     // ---- Pass 2: assemble window-sized mainFbo -----------------------------
     EnsureFbo(&mainFbo_, &mainTex_, &mainFboW_, &mainFboH_, winPxW, winPxH);
 
     glBindFramebuffer(GL_FRAMEBUFFER, mainFbo_);
     glViewport(0, 0, winPxW, winPxH);
     glDisable(GL_SCISSOR_TEST);
-    glClearColor(TITLEBAR_R, TITLEBAR_G, TITLEBAR_B, 1.0f);
+    glClearColor(curBarR_, curBarG_, curBarB_, 1.0f);
     glClear(GL_COLOR_BUFFER_BIT);
 
     // Blit content into the bottom region of mainFbo. GL y-up: the titlebar
@@ -473,6 +534,20 @@ void CsdCompositor::EndFrame(int windowW, int windowH, int scale, bool floating)
 
     // Leave blending in the state the app expects for its normal draw loop.
     glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+}
+
+void CsdCompositor::SetActive(bool active) {
+    if (active == activeTarget_) return;
+    activeTarget_ = active;
+    // Re-arm the dt clock so the first animation step uses real elapsed time
+    // since this call rather than since the last frame (which may have been
+    // long ago if the window was idle).
+    lastFrameMonoSec_ = mono_sec_now();
+}
+
+bool CsdCompositor::IsAnimating() const {
+    float t = activeTarget_ ? 1.0f : 0.0f;
+    return activeAmt_ != t;
 }
 
 bool CsdCompositor::InCloseButton(int x, int y, int windowW) const {

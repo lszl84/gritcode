@@ -242,8 +242,8 @@ std::string TextInput::GetSelectedText() const {
 }
 
 bool TextInput::OnMouseDown(float x, float y, FontManager& fm) {
-    focused = PointInRect(x, y, bounds);
-    if (!focused) return false;
+    if (!PointInRect(x, y, bounds)) return false;
+    focused = true;
 
     double now = GetMonotonicTime();
     if (now - lastClickTime_ < 0.4) clickCount_++;

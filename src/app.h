@@ -94,6 +94,23 @@ private:
         apiKeyInput_.focused = false;
         messageInput_.focused = false;
     }
+    // Window-level focus tracking. The compositor may briefly send a
+    // keyboard leave+enter pair during xdg_toplevel_move (titlebar drag
+    // grab) — we debounce so the message-box outline doesn't flash.
+    bool windowFocused_ = true;
+    uint64_t focusCbGen_ = 0;
+    // One-shot: the click that raised the window from unfocused→focused also
+    // fires OnMouseDown; if it lands in the scroll view we'd immediately
+    // unfocus the message input the focus-gained handler just focused. This
+    // flag lets that first click keep the message input focused. Cleared on
+    // the next mousedown regardless of target.
+    bool redirectNextClickToInput_ = false;
+
+    // Where the current mouse drag originated — mousemove is routed to the
+    // same widget regardless of keyboard focus, so selecting text in the
+    // transcript works even while the message input holds focus.
+    enum class DragTarget { None, ScrollView, MessageInput, ApiKeyInput };
+    DragTarget dragTarget_ = DragTarget::None;
     Label statusLabel_;
     Label versionLabel_;
 

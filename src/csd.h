@@ -47,6 +47,13 @@ public:
     void SetClosePressed(bool pressed) { closePressed_ = pressed; }
     bool CloseHover() const            { return closeHover_; }
 
+    // Window focus state. Drives the libadwaita-style backdrop dimming on the
+    // titlebar background, the title text, and the close button. Activation
+    // animates back faster (100ms) than deactivation (200ms ease-out), matching
+    // libadwaita's :backdrop transition feel.
+    void SetActive(bool active);
+    bool IsAnimating() const;
+
     static constexpr int TITLEBAR_H     = 40;
     static constexpr int SHADOW_EXTENT  = 32;   // logical px of shadow on each side
     static constexpr int CORNER_RADIUS  = 12;   // logical px, only while floating
@@ -66,7 +73,7 @@ private:
     // Close button shader.
     GLuint closeProg_ = 0, closeVao_ = 0, closeVbo_ = 0;
     GLint  uCloseRect_ = -1, uCloseScreen_ = -1, uCloseHover_ = -1,
-           uClosePressed_ = -1, uCloseBarColor_ = -1;
+           uClosePressed_ = -1, uCloseBarColor_ = -1, uCloseDim_ = -1;
 
     // Shadow + rounded-corner compose shader.
     GLuint composeProg_ = 0, quadVao_ = 0, quadVbo_ = 0;
@@ -83,6 +90,20 @@ private:
     float closeHoverAmt_ = 0.0f;
     bool  closeHover_ = false;
     bool  closePressed_ = false;
+
+    // Active/backdrop state. activeAmt_ lerps 0..1 (1 = fully active) at a
+    // rate that depends on whether we're activating or deactivating.
+    float  activeAmt_         = 1.0f;
+    bool   activeTarget_      = true;
+    double lastFrameMonoSec_  = 0.0;
+
+    // Live (per-frame) titlebar background colour and icon/text dim factor.
+    // Computed in EndFrame() from activeAmt_, then read by DrawTitle and
+    // DrawCloseButton so they stay in sync with the animated bar.
+    float curBarR_   = 0.0f;
+    float curBarG_   = 0.0f;
+    float curBarB_   = 0.0f;
+    float curIconAmt_ = 1.0f;  // 1.0 = full intensity, 0.5 = backdrop dim
 
     bool CompileShaders();
     void EnsureFbo(GLuint* fbo, GLuint* tex, int* curW, int* curH, int w, int h);

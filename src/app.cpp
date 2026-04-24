@@ -748,6 +748,47 @@ bool App::Init(bool sessionChooser) {
     window_.OnCharEvent([&](uint32_t cp) {
         OnChar(cp);
     });
+    window_.OnFocusChange([&](bool focused) {
+        // Drop input focus on deactivate so the blinking cursor + bright focus
+        // border don't keep drawing in a clearly-inactive window (libadwaita
+        // apps behave the same way). On reactivate, jump focus back to the
+        // message box — if the API key dialog is open, that one wins instead.
+        //
+        // Debounce: the Wayland compositor sends a transient keyboard
+        // leave+enter pair during xdg_toplevel_move (clicking the titlebar
+        // starts a move grab). Applying those immediately makes the focus
+        // border flash. Apply focus=true instantly; defer focus=false by
+        // ~60ms and cancel it if a focus=true arrives within that window.
+        focusCbGen_++;
+        uint64_t gen = focusCbGen_;
+        if (focused) {
+            if (windowFocused_) {
+                MarkDirty();
+                return;
+            }
+            windowFocused_ = true;
+            if (apiKeyEditing_) {
+                apiKeyInput_.focused = true;
+                messageInput_.focused = false;
+            } else {
+                messageInput_.focused = true;
+                apiKeyInput_.focused = false;
+            }
+            redirectNextClickToInput_ = true;
+            MarkDirty();
+        } else {
+            if (!windowFocused_) return;
+            std::thread([this, gen]() {
+                std::this_thread::sleep_for(std::chrono::milliseconds(60));
+                events_.Push([this, gen]() {
+                    if (gen != focusCbGen_) return;
+                    windowFocused_ = false;
+                    UnfocusAllInputs();
+                    MarkDirty();
+                });
+            }).detach();
+        }
+    });
 
     LayoutWidgets();
 
@@ -838,6 +879,13 @@ void App::StartConnect() {
     std::thread([this]() {
         std::string savedKey = keychain::LoadApiKey();
         events_.Push([this, savedKey]() {
+            // Claude (ACP) doesn't go through the Zen HTTP layer — the
+            // restore event already called OnProviderChanged("claude"),
+            // which set activeProvider_ and populated the model dropdown.
+            // Connect() would turn around and call
+            // PopulateModelsFromRegistry("claude"), which errors out and
+            // empties the dropdown.
+            if (activeProvider_ == "claude") return;
             if (!savedKey.empty()) {
                 AppendSystem("Connecting with saved API key...");
                 Connect(savedKey);
@@ -3031,6 +3079,12 @@ void App::CancelInFlight() {
 // ============================================================================
 
 void App::OnMouseDown(float x, float y, bool shift) {
+    // One-shot: if the window just gained focus, this mousedown is the click
+    // that raised it. Keep the message input focused even if it lands in the
+    // scroll view — otherwise the first click into the transcript after an
+    // alt-tab would unfocus the box the focus-gained handler just focused.
+    bool focusGainRedirect = redirectNextClickToInput_;
+    redirectNextClickToInput_ = false;
     if (chooserMode_) {
         float s = window_.Scale();
         float lh = scrollView_.Fonts().LineHeight(FontStyle::Regular);
@@ -3099,6 +3153,8 @@ void App::OnMouseDown(float x, float y, bool shift) {
             for (auto* other : inputs)
                 if (other != inp) other->focused = false;
             if (inp == &messageInput_) scrollView_.ClearSelection();
+            dragTarget_ = (inp == &apiKeyInput_) ? DragTarget::ApiKeyInput
+                                                 : DragTarget::MessageInput;
             MarkDirty();
             return;
         }
@@ -3109,7 +3165,11 @@ void App::OnMouseDown(float x, float y, bool shift) {
     float viewH = window_.Height() - (barHeight_ + inputHeight_ + chromeTopPad_) * s;
     if (y < viewH) {
         scrollView_.OnMouseDown(x, y, shift);
-        UnfocusAllInputs();
+        dragTarget_ = DragTarget::ScrollView;
+        if (!focusGainRedirect) {
+            messageInput_.focused = false;
+            apiKeyInput_.focused = false;
+        }
         MarkDirty();
     }
 }
@@ -3119,6 +3179,7 @@ void App::OnMouseUp(float x, float y) {
     if (apiKeyEditing_) { apiKeyAccept_.OnMouseUp(x, y); apiKeyCancel_.OnMouseUp(x, y); }
     else apiKeyButton_.OnMouseUp(x, y);
     scrollView_.OnMouseUp(x, y);
+    dragTarget_ = DragTarget::None;
     MarkDirty();
 }
 
@@ -3136,10 +3197,17 @@ void App::OnMouseMove(float x, float y, bool leftDown) {
         if (newHov != chooserHovered_) { chooserHovered_ = newHov; MarkDirty(); }
         return;
     }
-    // Mouse drag in text input
-    auto* focused = FocusedInput();
-    if (leftDown && focused) {
-        focused->OnMouseDrag(x, y, scrollView_.Fonts());
+    // Route drag to the widget the drag started on — not to whichever input
+    // happens to be focused. Otherwise clicking in the transcript would start
+    // a message-input selection instead of selecting text in the transcript.
+    if (leftDown && dragTarget_ != DragTarget::None) {
+        if (dragTarget_ == DragTarget::MessageInput) {
+            messageInput_.OnMouseDrag(x, y, scrollView_.Fonts());
+        } else if (dragTarget_ == DragTarget::ApiKeyInput) {
+            apiKeyInput_.OnMouseDrag(x, y, scrollView_.Fonts());
+        } else if (dragTarget_ == DragTarget::ScrollView) {
+            scrollView_.OnMouseMove(x, y, leftDown);
+        }
         MarkDirty();
         return;
     }
@@ -3378,7 +3446,7 @@ void App::Run() {
 
     while (!window_.ShouldClose()) {
         bool needsAnim = scrollView_.HasActiveThinking() || waitingDotFrame_ >= 0;
-        if (!dirty_ && events_.Empty() && !scrollView_.NeedsRedraw()) {
+        if (!dirty_ && events_.Empty() && !scrollView_.NeedsRedraw() && !window_.NeedsRedraw()) {
             if (needsAnim)
                 window_.WaitEventsTimeout(0.1);
             else
@@ -3426,7 +3494,7 @@ void App::Run() {
             MarkDirty();
         }
 
-        if (!dirty_ && !scrollView_.NeedsRedraw()) continue;
+        if (!dirty_ && !scrollView_.NeedsRedraw() && !window_.NeedsRedraw()) continue;
         dirty_ = false;
         scrollView_.ClearDirty();
 
