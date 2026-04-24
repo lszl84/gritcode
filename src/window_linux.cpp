@@ -143,9 +143,13 @@ struct WlState {
     // CSD
     bool use_csd = false;
     bool floating = true;          // tiled/maximized/fullscreen disables shadow+corners
+    bool maximized = false;        // tracked separately for double-click-to-toggle
     bool activated = true;         // XDG_TOPLEVEL_STATE_ACTIVATED — drives backdrop dim
     uint32_t current_edge = 0;     // hover edge under pointer (0 = none)
     CsdCompositor* csd = nullptr;
+    // Double-click-to-maximize on titlebar
+    double last_titlebar_press = 0;
+    double last_titlebar_x = -1e9, last_titlebar_y = -1e9;
 
     // Active touch point (we track only the first finger for simple
     // single-touch tap/drag — matches how wl_pointer is wired).
@@ -311,6 +315,7 @@ static void toplevel_handle_configure(void* data, xdg_toplevel*,
     }
     bool was_floating = st->floating;
     st->floating = !(tiled || maximized || fullscreen);
+    st->maximized = maximized;
     if (was_floating != st->floating) {
         // Buffer geometry changes with shadow; force re-commit.
         st->applied_buffer_w = 0;
@@ -461,6 +466,21 @@ static void pointer_handle_button(void* data, wl_pointer*, uint32_t serial,
                 return;
             }
             if (st->csd->InTitlebar((int)st->px, (int)st->py)) {
+                double now = wl_monotonic();
+                double dt = now - st->last_titlebar_press;
+                double ddx = st->px - st->last_titlebar_x;
+                double ddy = st->py - st->last_titlebar_y;
+                bool double_click = dt < 0.4 && (ddx*ddx + ddy*ddy) < 25.0;
+                if (double_click) {
+                    if (st->maximized) xdg_toplevel_unset_maximized(st->toplevel);
+                    else               xdg_toplevel_set_maximized(st->toplevel);
+                    st->last_titlebar_press = 0;
+                    st->left_down = false;
+                    return;
+                }
+                st->last_titlebar_press = now;
+                st->last_titlebar_x = st->px;
+                st->last_titlebar_y = st->py;
                 st->in_server_grab = true;
                 xdg_toplevel_move(st->toplevel, st->seat, serial);
                 st->left_down = false;
