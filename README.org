@@ -17,6 +17,7 @@ GPU-rendered AI coding harness built in C++ with OpenGL, HarfBuzz, and FreeType.
 - *Edge-drag resize, touch input, compositor-paced rendering* on Wayland; XIM UTF-8 text input and clipboard round-trip on X11
 - *Multi-provider* -- [[https://opencode.ai/zen][OpenCode]] Zen (pay-as-you-go), OpenCode Go (quality coding models, low monthly price), and Claude ACP (requires [[https://docs.anthropic.com/en/docs/claude-code/overview][Claude Code CLI]])
 - *Tool use* -- bash, read_file, list_directory with background execution
+- *Message queue* -- add follow-up messages while the agent is working; chips stack above the input with per-item dismissal, and an idle review mode (Continue / Clear) if you Esc mid-turn with items still queued
 - *Secure API key storage* -- system keychain (libsecret on Linux, Keychain on macOS)
 - *Session persistence* -- per working directory, automatic restore
 - *Real context compaction* -- summary LLM call replaces old history in place; no rolling re-compaction
@@ -173,14 +174,12 @@ How each provider sees it:
   auto-memory reflex. No user-side MCP config changes required; your own
   =claude mcp add= entries continue to work alongside it.
 
-Measured token efficiency on a "how did we implement CSD in tt" question
-(same model, same fresh cwd, with vs. without history access):
+Measured token efficiency on a "how did we implement CSD in tt" question,
+same fresh cwd, same model, with vs. without history access:
 
-| model          | with history | without (code-read only) | delta        |
-|----------------+--------------+--------------------------+--------------|
-| Claude opus-4.7 | ~1.7 kB / 1 search + 1 fetch | —                        | —            |
-| kimi-k2.5       | ~8.5 kB / 2 searches + 2 fetches | —                        | —            |
-| minimax-m2.5    | ~50 kB / 1 search + 1 fetch + verification read | ~101 kB / 4 file reads   | *2× fewer tokens, 2× faster* |
+| model        | with history                                      | without (code-read only) | delta                        |
+|--------------+---------------------------------------------------+--------------------------+------------------------------|
+| minimax-m2.5 | ~50 kB / 1 search + 1 fetch + 1 verification read | ~101 kB / 4 file reads   | *2× fewer tokens, 2× faster* |
 
 First-time backfill of existing sessions:
 
