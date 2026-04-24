@@ -34,11 +34,13 @@ public:
     struct Hit {
         std::string cwd;
         std::string role;
-        std::string text;
+        std::string text;         // snippet (Search) or full turn text (Fetch)
         std::string session_id;
         int turn_index = 0;
         std::string timestamp;
-        double score = 0;  // BM25 score (lower = better)
+        double score = 0;         // BM25 score (lower = better); 0 for Fetch rows
+        int full_chars = 0;       // byte size of the full turn text — lets the
+                                  // agent decide whether a Fetch is worth it
     };
 
     MemoryDB() = default;
@@ -83,12 +85,30 @@ public:
                             int limit,
                             const std::string& exclude_session_id);
 
+    // Return a window of consecutive turns around a given (session_id,
+    // turn_index). Full turn text is returned (no snippetting) — this is the
+    // "zoom in on a specific match" surface. `before` and `after` are each
+    // clamped to [0, 10].
+    std::vector<Hit> Fetch(const std::string& session_id,
+                           int turn_index,
+                           int before,
+                           int after);
+
     // Default db path: $XDG_DATA_HOME/gritcode/memory.db (or
     // ~/.local/share/gritcode/memory.db).
     static std::string DefaultPath();
 
     // Default sessions directory we walk during --reindex.
     static std::string SessionsDir();
+
+    // Compact search output: snippet only, with session_id/turn_index/full_chars
+    // so the agent can follow up with grit_history_fetch. Total output bounded far
+    // below the MCP response limit.
+    static std::string FormatSearchHits(const std::vector<Hit>& hits);
+
+    // Full-text window output (from Fetch). Per-hit cap + total cap so even a
+    // window of fat tool turns stays under the MCP response limit.
+    static std::string FormatFetchHits(const std::vector<Hit>& hits);
 
 private:
     sqlite3* db_ = nullptr;

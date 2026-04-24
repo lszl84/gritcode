@@ -31,15 +31,25 @@ using json = nlohmann::json;
 // recommended fallback behavior.
 static constexpr const char* kMcpProtocolVersion = "2025-03-26";
 
-static json ToolDef() {
+static json SearchToolDef() {
     return {
-        {"name", "memory_search"},
+        {"name", "grit_history_search"},
         {"description",
-         "Search past gritcode conversations across all your projects. "
-         "Use when the user references prior work in this or another project "
-         "(\"last time\", \"in <project>\", \"how did we fix\"). "
-         "Query: 2-5 keywords. Returns up to 5 verbatim turns with "
-         "{project, timestamp, role, text}."},
+         "Search the transcripts of past gritcode conversations across every "
+         "project the user has worked on. This is the AUTHORITATIVE source of "
+         "prior-conversation recall in gritcode — use it first whenever the "
+         "user references any past work (\"last time\", \"once again\", \"we "
+         "had\", \"how did we\", \"in <project>\", \"that thing from <name>\"). "
+         "Do NOT try to list any memory directory under ~/.claude — that is "
+         "unrelated and unused here. "
+         "Query budget: typically 1-3 searches per user question. Start with "
+         "ONE broad keyword query; only run more if the first returned strong "
+         "hits that suggest specific follow-ups. If a search returns no "
+         "clearly relevant hits, STOP and answer from what you have (or ask "
+         "the user) — do not fire speculative variant queries. "
+         "Query: 2-5 keywords. Returns short snippets (~20-token window) with "
+         "session_id, turn_index, and full_chars size. Follow up with "
+         "grit_history_fetch to read the full turn + surrounding context."},
         {"inputSchema", {
             {"type", "object"},
             {"properties", {
@@ -58,19 +68,40 @@ static json ToolDef() {
     };
 }
 
-static std::string FormatHits(const std::vector<MemoryDB::Hit>& hits) {
-    if (hits.empty()) return "No matches.";
-    std::string out;
-    out += "Found " + std::to_string(hits.size()) + " match(es):\n\n";
-    for (size_t i = 0; i < hits.size(); i++) {
-        const auto& h = hits[i];
-        out += "### [" + std::to_string(i + 1) + "] " + h.cwd +
-               " (" + h.role + ", " + h.timestamp + ")\n";
-        out += h.text;
-        if (!out.empty() && out.back() != '\n') out += '\n';
-        out += "\n";
-    }
-    return out;
+static json FetchToolDef() {
+    return {
+        {"name", "grit_history_fetch"},
+        {"description",
+         "Read the full text of a specific past turn plus a window of surrounding "
+         "turns. Use after grit_history_search when a snippet looks relevant and you "
+         "need the surrounding conversation. session_id + turn_index come "
+         "directly from a grit_history_search hit. Default window is 2 turns before "
+         "+ 2 after (5 total)."},
+        {"inputSchema", {
+            {"type", "object"},
+            {"properties", {
+                {"session_id", {
+                    {"type", "string"},
+                    {"description", "Opaque session id from grit_history_search result."}
+                }},
+                {"turn_index", {
+                    {"type", "integer"},
+                    {"description", "Turn index from grit_history_search result."}
+                }},
+                {"before", {
+                    {"type", "integer"},
+                    {"description", "How many prior turns to include (default 2, max 10)."},
+                    {"default", 2}
+                }},
+                {"after", {
+                    {"type", "integer"},
+                    {"description", "How many following turns to include (default 2, max 10)."},
+                    {"default", 2}
+                }}
+            }},
+            {"required", json::array({"session_id", "turn_index"})}
+        }}
+    };
 }
 
 static json MakeResult(const json& id, const json& result) {
@@ -117,14 +148,14 @@ int RunMcpStdioServer() {
                     {"tools", {{"listChanged", false}}}
                 }},
                 {"serverInfo", {
-                    {"name", "grit-memory"},
+                    {"name", "grit-history"},
                     {"version", "0.1.0"}
                 }}
             };
             std::cout << MakeResult(id, result).dump() << "\n";
 
         } else if (method == "tools/list") {
-            json result = {{"tools", json::array({ToolDef()})}};
+            json result = {{"tools", json::array({SearchToolDef(), FetchToolDef()})}};
             std::cout << MakeResult(id, result).dump() << "\n";
 
         } else if (method == "tools/call") {
@@ -132,31 +163,43 @@ int RunMcpStdioServer() {
             std::string name = params.value("name", "");
             json args = params.value("arguments", json::object());
 
-            if (name != "memory_search") {
-                std::cout << MakeError(id, -32601, "unknown tool: " + name).dump() << "\n";
-                continue;
-            }
-
-            std::string query = args.value("query", "");
-            int limit = args.value("limit", 5);
-            if (limit < 1) limit = 1;
-            if (limit > 20) limit = 20;
-
             std::string text;
+            bool ok = true;
+
             if (!memory.IsOpen()) {
                 text = "Memory index is not available.";
-            } else if (query.empty()) {
-                text = "Error: 'query' is required.";
+            } else if (name == "grit_history_search") {
+                std::string query = args.value("query", "");
+                int limit = args.value("limit", 5);
+                if (limit < 1) limit = 1;
+                if (limit > 20) limit = 20;
+                if (query.empty()) {
+                    text = "Error: 'query' is required.";
+                } else {
+                    auto hits = memory.Search(query, limit, "");
+                    text = MemoryDB::FormatSearchHits(hits);
+                }
+            } else if (name == "grit_history_fetch") {
+                std::string sid = args.value("session_id", "");
+                int ti = args.value("turn_index", -1);
+                int before = args.value("before", 2);
+                int after  = args.value("after", 2);
+                if (sid.empty() || ti < 0) {
+                    text = "Error: 'session_id' and 'turn_index' are required.";
+                } else {
+                    auto hits = memory.Fetch(sid, ti, before, after);
+                    text = MemoryDB::FormatFetchHits(hits);
+                }
             } else {
-                auto hits = memory.Search(query, limit, "");
-                text = FormatHits(hits);
+                std::cout << MakeError(id, -32601, "unknown tool: " + name).dump() << "\n";
+                continue;
             }
 
             json result = {
                 {"content", json::array({
                     {{"type", "text"}, {"text", text}}
                 })},
-                {"isError", false}
+                {"isError", !ok}
             };
             std::cout << MakeResult(id, result).dump() << "\n";
 

@@ -20,7 +20,7 @@ GPU-rendered AI coding harness built in C++ with OpenGL, HarfBuzz, and FreeType.
 - *Secure API key storage* -- system keychain (libsecret on Linux, Keychain on macOS)
 - *Session persistence* -- per working directory, automatic restore
 - *Real context compaction* -- summary LLM call replaces old history in place; no rolling re-compaction
-- *Cross-project memory* -- SQLite FTS5 index over every saved session; =memory_search= tool surfaces prior conversations by keyword. Works on Zen and Claude ACP alike (ACP via a per-spawn stdio MCP server injected through =--mcp-config=).
+- *Cross-project memory* -- SQLite FTS5 index over every saved session; =grit_history_search= and =grit_history_fetch= tools surface prior conversations by keyword, returning match snippets plus windowed fetches of the surrounding turns. Works on Zen and Claude ACP alike (ACP via a per-spawn stdio MCP server injected through =--mcp-config= + =--append-system-prompt=).
 - *Markdown rendering* -- bold, italic, code blocks, headings, blockquotes, lists
 
 ** Is this production ready?
@@ -143,7 +143,7 @@ On Linux/BSD we deliberately prefer the system =sqlite3= package over bundling t
 | =csd.cpp=               | Client-side decorations: rounded corners, shadow, titlebar |
 | =curl_http.cpp=         | Async HTTP with SSE streaming                             |
 | =mcp_server.cpp=        | TCP JSON-RPC server for test automation (*Debug only*)    |
-| =mcp_stdio.cpp=         | Stdio MCP server (=grit --mcp-stdio=) exposing =memory_search= to Claude ACP |
+| =mcp_stdio.cpp=         | Stdio MCP server (=grit --mcp-stdio=) exposing =grit_history_*= to Claude ACP |
 | =memory.cpp=            | SQLite FTS5 index + search for cross-project memory       |
 | =session.cpp=           | Per-CWD session persistence                               |
 | =keychain.cpp=          | libsecret / Keychain API key storage                      |
@@ -152,14 +152,35 @@ On Linux/BSD we deliberately prefer the system =sqlite3= package over bundling t
 
 Gritcode indexes every turn of every session into a SQLite FTS5 database at
 =$XDG_DATA_HOME/gritcode/memory.db= (or =~/.local/share/gritcode/memory.db=).
-The =memory_search= tool is available to the agent on every provider.
+Two tools are exposed to the agent on every provider:
 
-- *Zen* -- built-in tool in gritcode's own tool surface; called like =bash= or =read_file=.
+- =grit_history_search(query)= -- FTS5 BM25 ranking, returns up to 5 hits with a
+  ~32-token snippet around the match plus =session_id=, =turn_index=, =cwd=, =timestamp=.
+- =grit_history_fetch(session_id, turn_index, before?, after?)= -- fetches a
+  window of surrounding turns for any hit the agent wants to read in full.
+  Per-turn text is capped at 1,500 chars and the total response at 20 kB so a
+  fat turn can't blow up the context window.
+
+How each provider sees it:
+
+- *Zen / OpenCode Go* -- built-in tool in gritcode's own tool surface; called
+  like =bash= or =read_file=.
 - *Claude ACP* -- gritcode spawns =claude= with =--mcp-config <path>= pointing
   at a per-user JSON file at =$XDG_CACHE_HOME/gritcode/claude-mcp.json= that
-  registers =grit --mcp-stdio= as a stdio MCP server named =grit-memory=.
-  No user-side MCP config changes required; your own =claude mcp add= entries
-  continue to work alongside it.
+  registers =grit --mcp-stdio= as a stdio MCP server named =grit-history=, plus
+  an =--append-system-prompt= line that tells Claude to prefer
+  =grit_history_search= over its built-in =~/.claude/projects/<cwd>/memory/=
+  auto-memory reflex. No user-side MCP config changes required; your own
+  =claude mcp add= entries continue to work alongside it.
+
+Measured token efficiency on a "how did we implement CSD in tt" question
+(same model, same fresh cwd, with vs. without history access):
+
+| model          | with history | without (code-read only) | delta        |
+|----------------+--------------+--------------------------+--------------|
+| Claude opus-4.7 | ~1.7 kB / 1 search + 1 fetch | —                        | —            |
+| kimi-k2.5       | ~8.5 kB / 2 searches + 2 fetches | —                        | —            |
+| minimax-m2.5    | ~50 kB / 1 search + 1 fetch + verification read | ~101 kB / 4 file reads   | *2× fewer tokens, 2× faster* |
 
 First-time backfill of existing sessions:
 

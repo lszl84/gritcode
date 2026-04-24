@@ -95,7 +95,7 @@ int main(int argc, char* argv[]) {
         if (strcmp(argv[i], "--session-chooser") == 0) {
             sessionChooser = true;
         } else if (strcmp(argv[i], "--mcp-stdio") == 0) {
-            // Stdio MCP server mode: serve memory_search over JSON-RPC on
+            // Stdio MCP server mode: serve grit_history_search over JSON-RPC on
             // stdin/stdout. No GUI, no window, no side effects. Spawned by
             // Claude CLI via --mcp-config for cross-project memory recall
             // during ACP sessions.
@@ -111,7 +111,7 @@ int main(int argc, char* argv[]) {
                         "Options:\n"
                         "  --session-chooser    Show the session chooser UI at startup\n"
                         "  --reindex            Rebuild the memory index from session history on disk\n"
-                        "  --mcp-stdio          Run as a stdio MCP server exposing memory_search\n"
+                        "  --mcp-stdio          Run as a stdio MCP server exposing grit_history_search\n"
                         "  --help, -h           Show this help\n");
             return 0;
         }

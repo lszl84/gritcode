@@ -212,6 +212,84 @@ bool MemoryDB::RebuildSession(const std::string& session_id,
     return true;
 }
 
+// Per-hit and total caps for Fetch output. Claude's MCP client spills anything
+// over ~25k tokens (~87k chars) to a file, so keep well under that.
+static constexpr size_t kMaxFetchHitChars = 4000;
+static constexpr size_t kMaxFetchTotalChars = 20000;
+
+// Search snippets are already small (FTS5 snippet() capped at ~20 tokens each),
+// but we still guard against a runaway limit request from the caller.
+static constexpr size_t kMaxSearchTotalChars = 8000;
+
+static std::string TruncateUtf8(const std::string& s, size_t max_bytes) {
+    if (s.size() <= max_bytes) return s;
+    // Back up to a UTF-8 code-point boundary so we don't emit a half-glyph.
+    size_t cut = max_bytes;
+    while (cut > 0 && (static_cast<unsigned char>(s[cut]) & 0xC0) == 0x80) --cut;
+    return s.substr(0, cut) + "\n... [truncated " +
+           std::to_string(s.size() - cut) + " more chars]";
+}
+
+std::string MemoryDB::FormatSearchHits(const std::vector<Hit>& hits) {
+    if (hits.empty()) return "No matches found.";
+    std::string out;
+    out.reserve(2048);
+    out += "Found " + std::to_string(hits.size()) +
+           " match(es). To see full turn + surrounding context, call "
+           "grit_history_fetch with the session_id and turn_index from a hit.\n\n";
+
+    size_t shown = 0;
+    for (size_t i = 0; i < hits.size(); i++) {
+        const auto& h = hits[i];
+        std::string entry;
+        entry += "### [" + std::to_string(i + 1) + "] " + h.cwd +
+                 " (" + h.role + ", " + h.timestamp + ")\n";
+        entry += "session_id: " + h.session_id +
+                 "  turn_index: " + std::to_string(h.turn_index) +
+                 "  full_chars: " + std::to_string(h.full_chars) + "\n";
+        // Snippets come from FTS5 snippet() — [term] highlights the matches.
+        entry += h.text;
+        if (!entry.empty() && entry.back() != '\n') entry += '\n';
+        entry += '\n';
+
+        if (out.size() + entry.size() > kMaxSearchTotalChars) {
+            out += "... [" + std::to_string(hits.size() - shown) +
+                   " more result(s) omitted; refine query or lower `limit`]\n";
+            break;
+        }
+        out += entry;
+        ++shown;
+    }
+    return out;
+}
+
+std::string MemoryDB::FormatFetchHits(const std::vector<Hit>& hits) {
+    if (hits.empty()) return "No turns found for that (session_id, turn_index).";
+    std::string out;
+    out.reserve(4096);
+    out += "Returned " + std::to_string(hits.size()) + " turn(s):\n\n";
+
+    size_t shown = 0;
+    for (size_t i = 0; i < hits.size(); i++) {
+        const auto& h = hits[i];
+        std::string entry;
+        entry += "### turn " + std::to_string(h.turn_index) +
+                 " (" + h.role + ", " + h.timestamp + ")\n";
+        entry += TruncateUtf8(h.text, kMaxFetchHitChars);
+        if (!entry.empty() && entry.back() != '\n') entry += '\n';
+        entry += '\n';
+
+        if (out.size() + entry.size() > kMaxFetchTotalChars) {
+            out += "... [" + std::to_string(hits.size() - shown) +
+                   " more turn(s) omitted to fit size limit; narrow before/after]\n";
+            break;
+        }
+        out += entry;
+        ++shown;
+    }
+    return out;
+}
+
 std::vector<MemoryDB::Hit> MemoryDB::Search(const std::string& query,
                                             int limit,
                                             const std::string& exclude_session_id) {
@@ -219,9 +297,16 @@ std::vector<MemoryDB::Hit> MemoryDB::Search(const std::string& query,
     std::lock_guard<std::mutex> lk(mu_);
     if (!db_ || query.empty()) return out;
 
+    // snippet(turns, 1, '[', ']', '…', 20): column 1 = text; 20-token window
+    // centered on the best match. Matches wrapped in [brackets] so the agent
+    // can see what actually matched. length(text) exposes the full turn size
+    // so the agent can decide whether grit_history_fetch is worth it.
     std::string sql =
-        "SELECT cwd, role, text, session_id, turn_index, timestamp, "
-        "       bm25(turns) AS score "
+        "SELECT cwd, role, "
+        "       snippet(turns, 1, '[', ']', '…', 20) AS snip, "
+        "       session_id, turn_index, timestamp, "
+        "       bm25(turns) AS score, "
+        "       length(text) AS full_chars "
         "FROM turns "
         "WHERE turns MATCH ? ";
     if (!exclude_session_id.empty()) sql += "AND session_id != ? ";
@@ -247,11 +332,63 @@ std::vector<MemoryDB::Hit> MemoryDB::Search(const std::string& query,
         };
         h.cwd        = sv(0);
         h.role       = sv(1);
-        h.text       = sv(2);
+        h.text       = sv(2);  // snippet
         h.session_id = sv(3);
         h.turn_index = sqlite3_column_int(stmt, 4);
         h.timestamp  = sv(5);
         h.score      = sqlite3_column_double(stmt, 6);
+        h.full_chars = sqlite3_column_int(stmt, 7);
+        out.push_back(std::move(h));
+    }
+    sqlite3_finalize(stmt);
+    return out;
+}
+
+std::vector<MemoryDB::Hit> MemoryDB::Fetch(const std::string& session_id,
+                                           int turn_index,
+                                           int before,
+                                           int after) {
+    std::vector<Hit> out;
+    std::lock_guard<std::mutex> lk(mu_);
+    if (!db_ || session_id.empty()) return out;
+
+    if (before < 0) before = 0;
+    if (after  < 0) after  = 0;
+    if (before > 10) before = 10;
+    if (after  > 10) after  = 10;
+
+    int lo = turn_index - before;
+    int hi = turn_index + after;
+    if (lo < 0) lo = 0;
+
+    const char* sql =
+        "SELECT cwd, role, text, session_id, turn_index, timestamp, length(text) "
+        "FROM turns "
+        "WHERE session_id = ? AND turn_index >= ? AND turn_index <= ? "
+        "ORDER BY turn_index ASC";
+    sqlite3_stmt* stmt = nullptr;
+    int rc = sqlite3_prepare_v2(db_, sql, -1, &stmt, nullptr);
+    if (rc != SQLITE_OK) {
+        DLOG("MemoryDB Fetch prepare failed: %s", sqlite3_errmsg(db_));
+        return out;
+    }
+    sqlite3_bind_text(stmt, 1, session_id.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_int (stmt, 2, lo);
+    sqlite3_bind_int (stmt, 3, hi);
+
+    while (sqlite3_step(stmt) == SQLITE_ROW) {
+        Hit h;
+        auto sv = [&](int col) {
+            const unsigned char* p = sqlite3_column_text(stmt, col);
+            return p ? std::string(reinterpret_cast<const char*>(p)) : std::string();
+        };
+        h.cwd        = sv(0);
+        h.role       = sv(1);
+        h.text       = sv(2);  // full turn text
+        h.session_id = sv(3);
+        h.turn_index = sqlite3_column_int(stmt, 4);
+        h.timestamp  = sv(5);
+        h.full_chars = sqlite3_column_int(stmt, 6);
         out.push_back(std::move(h));
     }
     sqlite3_finalize(stmt);

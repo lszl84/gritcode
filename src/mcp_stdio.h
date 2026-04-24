@@ -17,7 +17,7 @@
 #pragma once
 
 // Run grit as a stdio MCP server (JSON-RPC over stdin/stdout, newline-delimited)
-// exposing just the memory_search tool. Intended to be spawned as a child
+// exposing just the grit_history_search tool. Intended to be spawned as a child
 // process by an MCP-aware agent client (Claude CLI via --mcp-config, etc).
 //
 // Blocks on stdin; returns when the peer closes stdin or sends an unknown
