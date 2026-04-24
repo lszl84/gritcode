@@ -3,7 +3,7 @@
 
 [[https://gritcode.ai][gritcode.ai]]
 
-GPU-rendered AI coding harness built in C++ with OpenGL, HarfBuzz, and FreeType.
+GPU-rendered AI coding harness built in C++ with OpenGL, HarfBuzz, and FreeType. No GLFW — windowing, input, and clipboard go straight to Wayland, X11, and Cocoa.
 
 ⚠️ *Warning:* Gritcode does not have a permission system. AI agents can execute any command on your machine. Press *Escape* to cancel a running request at any time.
 
@@ -12,12 +12,15 @@ GPU-rendered AI coding harness built in C++ with OpenGL, HarfBuzz, and FreeType.
 - *GPU-rendered UI* -- OpenGL 3.3 batched quads, SDF rounded rects, 0% idle CPU
 - *HarfBuzz text shaping* -- proper Arabic RTL, ligatures, contextual forms, diacritics
 - *Emoji support* -- FontConfig fallback, ZWJ sequences, bitmap scaling
+- *Native windowing* -- direct Wayland (xdg-shell + xdg-decoration), X11 (EGL + XIM), and Cocoa (NSWindow + NSOpenGLView). No GLFW.
+- *Client-side decorations* -- rounded corners and drop shadow on GNOME and other CSD-only compositors, drawn by an SDF shader compose pass
+- *Edge-drag resize, touch input, compositor-paced rendering* on Wayland; XIM UTF-8 text input and clipboard round-trip on X11
 - *Multi-provider* -- [[https://opencode.ai/zen][OpenCode]] Zen (pay-as-you-go), OpenCode Go (quality coding models, low monthly price), and Claude ACP (requires [[https://docs.anthropic.com/en/docs/claude-code/overview][Claude Code CLI]])
 - *Tool use* -- bash, read_file, list_directory with background execution
 - *Secure API key storage* -- system keychain (libsecret on Linux, Keychain on macOS)
 - *Session persistence* -- per working directory, automatic restore
+- *Real context compaction* -- summary LLM call replaces old history in place; no rolling re-compaction
 - *Markdown rendering* -- bold, italic, code blocks, headings, blockquotes, lists
-- *~4,900 lines of C++* -- entire codebase
 
 ** Is this production ready?
 
@@ -34,8 +37,7 @@ sudo apt install libfreetype-dev libharfbuzz-dev libfontconfig-dev \
   libcurl4-openssl-dev libsecret-1-dev cmake ninja-build \
   libopengl-dev libegl-dev \
   libwayland-dev wayland-protocols libxkbcommon-dev \
-  libx11-xcb-dev libxext-dev libxcursor-dev libxrandr-dev \
-  libxinerama-dev libxi-dev libxfixes-dev
+  libx11-dev libxext-dev
 
 git clone https://github.com/lszl84/gritcode.git
 cd gritcode
@@ -46,15 +48,15 @@ cmake --install build
 grit
 #+end_src
 
-GLFW 3.4 is built from source (with Wayland + X11 support) to avoid the
-system =libglfw3= which is X11-only and forces XWayland on GNOME/Zorin.
+At least one of Wayland or X11 must be present; CMake probes both and builds
+whichever backend it finds. No =libglfw3= dependency — =window_linux.cpp= talks
+to =xdg-shell= / =xdg-decoration= and the X server directly.
 
 *** Linux (Arch)
 
 #+begin_src bash
 sudo pacman -S freetype2 harfbuzz fontconfig curl libsecret cmake ninja \
-  mesa libxcursor libxrandr libxinerama libxi libxfixes \
-  libxkbcommon wayland wayland-protocols
+  mesa libxkbcommon wayland wayland-protocols libx11 libxext
 
 git clone https://github.com/lszl84/gritcode.git
 cd gritcode
@@ -72,8 +74,7 @@ sudo dnf install freetype-devel harfbuzz-devel fontconfig-devel \
   libcurl-devel libsecret-devel cmake ninja-build \
   mesa-libGL-devel mesa-libEGL-devel \
   wayland-devel wayland-protocols libxkbcommon-devel \
-  libX11-devel libXext-devel libXcursor-devel libXrandr-devel \
-  libXinerama-devel libXi-devel libXfixes-devel
+  libX11-devel libXext-devel
 
 git clone https://github.com/lszl84/gritcode.git
 cd gritcode
@@ -84,10 +85,6 @@ cmake --install build
 grit
 #+end_src
 
-GLFW 3.4 is built from source (with Wayland + X11 support) to avoid the
-system =libglfw3= which is X11-only on many distros and forces XWayland on
-GNOME-based desktops.
-
 *** FreeBSD / GhostBSD
 
 #+begin_src bash
@@ -95,8 +92,9 @@ GNOME-based desktops.
 sudo pkg install -g 'GhostBSD*-dev-*'
 
 # FreeBSD/GhostBSD: install build dependencies
-sudo pkg install cmake git pkgconf glfw freetype2 harfbuzz fontconfig \
-  curl libsecret cmark
+sudo pkg install cmake git pkgconf freetype2 harfbuzz fontconfig \
+  curl libsecret cmark wayland wayland-protocols libxkbcommon \
+  libX11 libXext
 
 git clone https://github.com/lszl84/gritcode.git
 cd gritcode
@@ -125,29 +123,32 @@ cmake --build build
 open build/grit.app
 #+end_src
 
-On macOS, GLFW, FreeType, HarfBuzz, and curl are fetched and built from source automatically by CMake.
+On macOS, FreeType, HarfBuzz, and curl are fetched and built from source automatically by CMake. The window backend (=window_macos.mm=) is a thin Cocoa wrapper around =NSWindow= + =NSOpenGLView= — no GLFW dependency.
 
 ** Architecture
 
-| File              | Purpose                                     |
-|-------------------+---------------------------------------------|
-| =app.cpp=         | Main app, providers, streaming, tool use    |
-| =gl_renderer.cpp= | OpenGL batched renderer, SDF shapes         |
-| =font.cpp=        | HarfBuzz shaping, FreeType raster, fallback |
-| =scroll_view.cpp= | Block layout, word wrap, selection, caret   |
-| =markdown_renderer.cpp= | cmark AST to styled blocks             |
-| =widgets.cpp=     | TextInput, ComboBox, Button (custom)        |
-| =glfw_window.cpp= | GLFW setup, input handling, main loop       |
-| =curl_http.cpp=   | Async HTTP with SSE streaming               |
-| =session.cpp=     | Per-CWD session persistence                 |
-| =keychain.cpp=    | libsecret / Keychain API key storage        |
+| File                    | Purpose                                                   |
+|-------------------------+-----------------------------------------------------------|
+| =app.cpp=               | Main app, providers, streaming, tool use, compaction      |
+| =gl_renderer.cpp=       | OpenGL batched renderer, SDF shapes                       |
+| =font.cpp=              | HarfBuzz shaping, FreeType raster, fallback               |
+| =scroll_view.cpp=       | Block layout, word wrap, selection, caret                 |
+| =markdown_renderer.cpp= | cmark AST to styled blocks                                |
+| =widgets.cpp=           | TextInput, ComboBox, Button (custom)                      |
+| =window_linux.cpp=      | Wayland (xdg-shell + xdg-decoration) and X11/EGL backend  |
+| =window_macos.mm=       | Cocoa NSWindow + NSOpenGLView backend                     |
+| =csd.cpp=               | Client-side decorations: rounded corners, shadow, titlebar |
+| =curl_http.cpp=         | Async HTTP with SSE streaming                             |
+| =mcp_server.cpp=        | MCP socket server for agent-driven automation             |
+| =session.cpp=           | Per-CWD session persistence                               |
+| =keychain.cpp=          | libsecret / Keychain API key storage                      |
 
 ** Requirements
 
 - Linux (Wayland or X11), macOS, or FreeBSD/GhostBSD
 - CMake 3.24+, Ninja (or Make), C++23 compiler
-- Linux: freetype2, harfbuzz, fontconfig, libcurl, libsecret-1, OpenGL/EGL (libopengl-dev + libegl-dev on Debian, mesa on Arch, mesa-libGL-devel + mesa-libEGL-devel on Fedora), wayland-protocols, libxkbcommon, libx11-xcb-dev, libxext-dev
-- FreeBSD/GhostBSD: glfw, freetype2, harfbuzz, fontconfig, curl, libsecret, cmark (all via =pkg install=)
+- Linux: freetype2, harfbuzz, fontconfig, libcurl, libsecret-1, OpenGL + EGL (libopengl-dev + libegl-dev on Debian, mesa on Arch, mesa-libGL-devel + mesa-libEGL-devel on Fedora), at least one of: Wayland stack (wayland-client, wayland-egl, wayland-cursor, wayland-protocols, libxkbcommon) or X11 stack (libX11, libXext)
+- FreeBSD/GhostBSD: freetype2, harfbuzz, fontconfig, curl, libsecret, cmark, wayland + protocols + libxkbcommon and/or libX11 + libXext (via =pkg install=)
 - macOS: Xcode command line tools (dependencies fetched automatically)
 
 ** Contributing
