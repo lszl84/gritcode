@@ -1026,10 +1026,12 @@ struct X11State {
     Atom wmProtocols = 0, wmDelete = 0, wmNetSyncReq = 0, wmNetSyncCounter = 0;
     Atom atomClipboard = 0, atomUtf8 = 0, atomTargets = 0, atomPrimary = 0;
 
-    // XSync (smooth resize)
+    // XSync (smooth resize, _NET_WM_SYNC_REQUEST extended protocol)
     bool haveSync = false;
+    bool pendingSync = false;     // sync_request received, awaiting next frame
+    bool inFrame = false;         // counter has been bumped to odd this frame
     XSyncCounter basicCounter = 0, extendedCounter = 0;
-    XSyncValue currentSyncValue = {};
+    XSyncValue currentCounterValue = {};
 
     // EGL
     EGLDisplay egl_display = EGL_NO_DISPLAY;
@@ -1243,7 +1245,15 @@ static void x11_pump_event(X11State* st, XEvent& e) {
         } else if ((Atom)e.xclient.data.l[0] == st->wmNetSyncReq && st->haveSync) {
             XSyncValue v;
             XSyncIntsToValue(&v, e.xclient.data.l[2], e.xclient.data.l[3]);
-            st->currentSyncValue = v;
+            // Normalize to even (frame-complete state) per extended sync protocol.
+            if (XSyncValueLow32(v) & 1) {
+                XSyncValue one; XSyncIntToValue(&one, 1);
+                int overflow = 0;
+                XSyncValueAdd(&v, v, one, &overflow);
+            }
+            st->currentCounterValue = v;
+            st->pendingSync = true;
+            st->inFrame = false;
         }
         break;
     }
@@ -1503,8 +1513,9 @@ try_x11:
 
         XSetWindowAttributes swa = {};
         swa.colormap = cmap;
-        swa.background_pixel = 0;
+        swa.background_pixmap = None;
         swa.border_pixel = 0;
+        swa.bit_gravity = NorthWestGravity;
         swa.event_mask = StructureNotifyMask | ExposureMask |
                          ButtonPressMask | ButtonReleaseMask |
                          PointerMotionMask |
@@ -1512,7 +1523,7 @@ try_x11:
                          FocusChangeMask;
         st->window = XCreateWindow(st->display, RootWindow(st->display, st->screen),
                                    0, 0, st->width, st->height, 0, depth, InputOutput, visual,
-                                   CWColormap | CWEventMask | CWBackPixel | CWBorderPixel,
+                                   CWColormap | CWEventMask | CWBackPixmap | CWBorderPixel | CWBitGravity,
                                    &swa);
         if (vi) XFree(vi);
 
@@ -1721,6 +1732,19 @@ AppWindow::ContentFrame AppWindow::BeginContentFrame() {
 #endif
 #ifdef HAVE_X11
     if (impl_->x11) {
+        // Extended _NET_WM_SYNC_REQUEST: bump counter to odd before painting
+        // so the compositor can see "frame in progress" and hold the prior
+        // frame at the prior geometry.
+        if (impl_->x11->haveSync && impl_->x11->pendingSync && !impl_->x11->inFrame) {
+            XSyncValue one; XSyncIntToValue(&one, 1);
+            int overflow = 0;
+            XSyncValueAdd(&impl_->x11->currentCounterValue,
+                          impl_->x11->currentCounterValue, one, &overflow);
+            XSyncSetCounter(impl_->x11->display,
+                            impl_->x11->extendedCounter,
+                            impl_->x11->currentCounterValue);
+            impl_->x11->inFrame = true;
+        }
         glBindFramebuffer(GL_FRAMEBUFFER, 0);
         glViewport(0, 0, impl_->x11->width, impl_->x11->height);
         int s = (int)impl_->x11->scale;
@@ -1739,6 +1763,23 @@ void AppWindow::EndContentFrame() {
     if (impl_->x11) {
         eglSwapBuffers(impl_->x11->egl_display, impl_->x11->egl_surface);
         impl_->x11->dirty = false;
+        // Extended _NET_WM_SYNC_REQUEST: bump counter back to even and update
+        // both counters so basic-protocol WMs are also satisfied. Compositor
+        // can now atomically swap to the new geometry.
+        if (impl_->x11->haveSync && impl_->x11->inFrame) {
+            XSyncValue one; XSyncIntToValue(&one, 1);
+            int overflow = 0;
+            XSyncValueAdd(&impl_->x11->currentCounterValue,
+                          impl_->x11->currentCounterValue, one, &overflow);
+            XSyncSetCounter(impl_->x11->display,
+                            impl_->x11->extendedCounter,
+                            impl_->x11->currentCounterValue);
+            XSyncSetCounter(impl_->x11->display,
+                            impl_->x11->basicCounter,
+                            impl_->x11->currentCounterValue);
+            impl_->x11->inFrame = false;
+            impl_->x11->pendingSync = false;
+        }
     }
 #endif
 }
