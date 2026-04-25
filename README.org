@@ -75,7 +75,7 @@ grit
 sudo dnf install freetype-devel harfbuzz-devel fontconfig-devel \
   libcurl-devel libsecret-devel sqlite-devel cmake ninja-build pkgconf-pkg-config \
   libglvnd-devel mesa-libGL-devel mesa-libEGL-devel \
-  wayland-devel wayland-protocols libxkbcommon-devel \
+  wayland-devel wayland-protocols-devel libxkbcommon-devel \
   libX11-devel libXext-devel
 
 git clone https://github.com/lszl84/gritcode.git
