@@ -58,7 +58,7 @@ to =xdg-shell= / =xdg-decoration= and the X server directly.
 
 #+begin_src bash
 sudo pacman -S freetype2 harfbuzz fontconfig curl libsecret sqlite cmake ninja \
-  mesa libxkbcommon wayland wayland-protocols libx11 libxext
+  pkgconf mesa libxkbcommon wayland wayland-protocols libx11 libxext
 
 git clone https://github.com/lszl84/gritcode.git
 cd gritcode
@@ -73,8 +73,8 @@ grit
 
 #+begin_src bash
 sudo dnf install freetype-devel harfbuzz-devel fontconfig-devel \
-  libcurl-devel libsecret-devel sqlite-devel cmake ninja-build \
-  mesa-libGL-devel mesa-libEGL-devel \
+  libcurl-devel libsecret-devel sqlite-devel cmake ninja-build pkgconf-pkg-config \
+  libglvnd-devel mesa-libGL-devel mesa-libEGL-devel \
   wayland-devel wayland-protocols libxkbcommon-devel \
   libX11-devel libXext-devel
 
