@@ -24,7 +24,7 @@ struct ChatMessage {
     std::string content;
     std::vector<nlohmann::json> toolCalls;
     std::string toolCallId;
-    std::string reasoningContent;  // Thinking/reasoning text from models like Kimi K2.5
+    std::string reasoningContent{};  // Thinking/reasoning text from models like Kimi K2.5
     // True when this message replaces a prior head of history that was
     // summarized to fit the context window. Marker prevents the compactor
     // from picking this message as a split point and walking back through it.
