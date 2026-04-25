@@ -38,6 +38,7 @@
 #include <X11/Xlib.h>
 #include <X11/Xutil.h>
 #include <X11/Xatom.h>
+#include <X11/Xresource.h>
 #include <X11/keysym.h>
 #include <X11/extensions/sync.h>
 #endif
@@ -1076,6 +1077,43 @@ static int x11_mods_from_state(unsigned int state) {
     return m;
 }
 
+// Resolve a HiDPI scale factor from environment + X resources. Ladder:
+//   1. GDK_SCALE        (integer, GTK convention)
+//   2. QT_SCALE_FACTOR  (float, Qt convention; rounded to nearest int)
+//   3. Xft.dpi          (X resource; scale = round(dpi/96), clamped to [1,4])
+// Defaults to 1 when nothing is set. We always round to an integer so glyph
+// rendering stays crisp; fractional scaling produces blurry text.
+static int x11_resolve_scale(Display* display) {
+    if (const char* s = getenv("GDK_SCALE")) {
+        int n = atoi(s);
+        if (n >= 1 && n <= 4) return n;
+    }
+    if (const char* s = getenv("QT_SCALE_FACTOR")) {
+        double f = atof(s);
+        int n = (int)(f + 0.5);
+        if (n >= 1 && n <= 4) return n;
+    }
+    char* res = XResourceManagerString(display);
+    if (res && *res) {
+        XrmInitialize();
+        XrmDatabase db = XrmGetStringDatabase(res);
+        if (db) {
+            char* type = nullptr;
+            XrmValue val = {};
+            if (XrmGetResource(db, "Xft.dpi", "Xft.Dpi", &type, &val) && val.addr) {
+                double dpi = atof(val.addr);
+                XrmDestroyDatabase(db);
+                int n = (int)((dpi / 96.0) + 0.5);
+                if (n < 1) n = 1;
+                if (n > 4) n = 4;
+                return n;
+            }
+            XrmDestroyDatabase(db);
+        }
+    }
+    return 1;
+}
+
 static bool x11_init_egl(X11State* st) {
     st->egl_display = eglGetDisplay((EGLNativeDisplayType)st->display);
     if (st->egl_display == EGL_NO_DISPLAY) return false;
@@ -1442,11 +1480,14 @@ try_x11:
 #ifdef HAVE_X11
     {
         auto* st = new X11State();
-        st->width = width; st->height = height;
 
         st->display = XOpenDisplay(nullptr);
         if (!st->display) { delete st; return false; }
         st->screen = DefaultScreen(st->display);
+
+        st->scale = (float)x11_resolve_scale(st->display);
+        st->width  = width  * (int)st->scale;
+        st->height = height * (int)st->scale;
 
         if (!x11_init_egl(st)) { XCloseDisplay(st->display); delete st; return false; }
 
@@ -1470,7 +1511,7 @@ try_x11:
                          KeyPressMask | KeyReleaseMask |
                          FocusChangeMask;
         st->window = XCreateWindow(st->display, RootWindow(st->display, st->screen),
-                                   0, 0, width, height, 0, depth, InputOutput, visual,
+                                   0, 0, st->width, st->height, 0, depth, InputOutput, visual,
                                    CWColormap | CWEventMask | CWBackPixel | CWBorderPixel,
                                    &swa);
         if (vi) XFree(vi);
@@ -1480,7 +1521,8 @@ try_x11:
         XSetClassHint(st->display, st->window, &classHint);
         XSizeHints hints = {};
         hints.flags = PMinSize;
-        hints.min_width = 480; hints.min_height = 360;
+        hints.min_width = 480 * (int)st->scale;
+        hints.min_height = 360 * (int)st->scale;
         XSetWMNormalHints(st->display, st->window, &hints);
 
         st->wmProtocols = XInternAtom(st->display, "WM_PROTOCOLS", False);
@@ -1681,8 +1723,9 @@ AppWindow::ContentFrame AppWindow::BeginContentFrame() {
     if (impl_->x11) {
         glBindFramebuffer(GL_FRAMEBUFFER, 0);
         glViewport(0, 0, impl_->x11->width, impl_->x11->height);
+        int s = (int)impl_->x11->scale;
         return {impl_->x11->width, impl_->x11->height,
-                impl_->x11->width, impl_->x11->height, 0};
+                impl_->x11->width / s, impl_->x11->height / s, 0};
     }
 #endif
     return {0, 0, 0, 0, 0};
@@ -1746,7 +1789,7 @@ int AppWindow::LogicalW() const {
     if (impl_->wl) return impl_->wl->width;
 #endif
 #ifdef HAVE_X11
-    if (impl_->x11) return impl_->x11->width;
+    if (impl_->x11) return impl_->x11->width / (int)impl_->x11->scale;
 #endif
     return 0;
 }
@@ -1758,7 +1801,7 @@ int AppWindow::LogicalH() const {
     }
 #endif
 #ifdef HAVE_X11
-    if (impl_->x11) return impl_->x11->height;
+    if (impl_->x11) return impl_->x11->height / (int)impl_->x11->scale;
 #endif
     return 0;
 }
