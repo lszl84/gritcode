@@ -31,7 +31,7 @@ void Label::Paint(GLRenderer& r, FontManager& fm) const {
         float tw = run.totalWidth;
         x = bounds.x + bounds.w - tw;
     }
-    float y = bounds.y + (bounds.h - fm.LineHeight(style)) / 2;
+    float y = bounds.y + (bounds.h - fm.VisibleHeight(style)) / 2;
     r.DrawShapedRun(fm, run, x, y, fm.Ascent(style), color);
 }
 
@@ -49,7 +49,7 @@ void Button::Paint(GLRenderer& r, FontManager& fm) const {
         Color tc = enabled ? textColor : disabledText;
         auto run = fm.Shape(text, style);
         float tx = bounds.x + (bounds.w - run.totalWidth) / 2;
-        float ty = bounds.y + (bounds.h - fm.LineHeight(style)) / 2;
+        float ty = bounds.y + (bounds.h - fm.VisibleHeight(style)) / 2;
         r.DrawShapedRun(fm, run, tx, ty, fm.Ascent(style), tc);
     }
 }
@@ -158,7 +158,8 @@ void TextInput::Paint(GLRenderer& r, FontManager& fm) const {
     r.DrawRoundedRect(bounds.x - 1, bounds.y - 1, bounds.w + 2, bounds.h + 2, radius + 1, bc);
     r.DrawRoundedRect(bounds.x, bounds.y, bounds.w, bounds.h, radius, bgColor);
 
-    float ty = bounds.y + (bounds.h - fm.LineHeight(style)) / 2;
+    float visH = fm.VisibleHeight(style);
+    float ty = bounds.y + (bounds.h - visH) / 2;
     float textX = bounds.x + pad - scrollX;
 
     // Clip text to input bounds
@@ -180,7 +181,7 @@ void TextInput::Paint(GLRenderer& r, FontManager& fm) const {
             x0 = std::max(x0, bounds.x + pad);
             x1 = std::min(x1, bounds.x + bounds.w - pad);
             if (x1 > x0)
-                r.DrawRect(x0, ty, x1 - x0, fm.LineHeight(style), {0.2f, 0.4f, 0.8f, 0.5f});
+                r.DrawRect(x0, ty, x1 - x0, visH, {0.2f, 0.4f, 0.8f, 0.5f});
         }
 
         // Text (shifted by scrollX)
@@ -196,8 +197,8 @@ void TextInput::Paint(GLRenderer& r, FontManager& fm) const {
                 int cpIdx = CodepointCount(display, std::min(cursorPos, (int)display.size()));
                 float cx = textX + fm.MeasureWidth(display.substr(0, ByteOffsetForCodepoint(display, cpIdx)), style);
                 if (cx >= bounds.x + pad - 1 && cx <= bounds.x + bounds.w - pad + 1) {
-                    float cursorH = fm.LineHeight(style) * 0.8f;
-                    float cursorY = ty + fm.LineHeight(style) * 0.1f;
+                    float cursorH = visH * 0.9f;
+                    float cursorY = ty + visH * 0.05f;
                     r.DrawRect(cx, cursorY, 1.5f, cursorH, cursorColor);
                 }
             }
@@ -519,7 +520,7 @@ void Dropdown::Paint(GLRenderer& r, FontManager& fm) const {
 
     auto run = fm.Shape(display, style);
     float tx = bounds.x + 8;
-    float ty = bounds.y + (bounds.h - fm.LineHeight(style)) / 2;
+    float ty = bounds.y + (bounds.h - fm.VisibleHeight(style)) / 2;
     r.DrawShapedRun(fm, run, tx, ty, fm.Ascent(style), textColor);
 
     // Dropdown arrow
@@ -577,7 +578,7 @@ void Dropdown::PaintPopup(GLRenderer& r, FontManager& fm) const {
             r.DrawRoundedRect(pillX, pillY, pillW, pillH, pillW / 2, selColor);
         }
         auto irun = fm.Shape(items[i].label, style);
-        float ity = iy + (itemH - fm.LineHeight(style)) / 2;
+        float ity = iy + (itemH - fm.VisibleHeight(style)) / 2;
         r.DrawShapedRun(fm, irun, pr.x + 14, ity, fm.Ascent(style), textColor);
     }
 

@@ -56,6 +56,8 @@ public:
 
     float LineHeight(FontStyle style) const;
     float Ascent(FontStyle style) const;
+    float Descent(FontStyle style) const;
+    float VisibleHeight(FontStyle style) const;  // ascent + descent (no linegap)
     float SpaceWidth(FontStyle style) const;
     float MeasureWidth(const std::string& text, FontStyle style, bool rtl = false) const;
 

@@ -1356,7 +1356,7 @@ void App::PaintQueueChips() {
 
         renderer_.PushClip(x + hPad, y, cw - textRightPad, chipH);
         auto run = fm.Shape(hit.label, FontStyle::Regular);
-        float ty = y + (chipH - fm.LineHeight(FontStyle::Regular)) / 2;
+        float ty = y + (chipH - fm.VisibleHeight(FontStyle::Regular)) / 2;
         renderer_.DrawShapedRun(fm, run, x + hPad, ty, fm.Ascent(FontStyle::Regular), chipText);
         renderer_.PopClip();
 
@@ -1366,10 +1366,10 @@ void App::PaintQueueChips() {
 
         auto xrun = fm.Shape("\xc3\x97", FontStyle::Regular);
         float xw = xrun.totalWidth;
-        float xLineH = fm.LineHeight(FontStyle::Regular);
+        float xVisH = fm.VisibleHeight(FontStyle::Regular);
         float xAscent = fm.Ascent(FontStyle::Regular);
         float xx = cxIcon + (closeSize - xw) / 2.0f;
-        float xy = cyIcon + (closeSize - xLineH) / 2.0f;
+        float xy = cyIcon + (closeSize - xVisH) / 2.0f;
         renderer_.DrawShapedRun(fm, xrun, xx, xy, xAscent, closeIcon);
     }
 }

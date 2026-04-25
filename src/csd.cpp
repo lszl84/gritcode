@@ -319,9 +319,13 @@ void CsdCompositor::BuildTitleTexture() {
 
     ShapedRun run = titleFont_->Shape(title_.c_str(), FontStyle::Bold);
     float ascent = titleFont_->Ascent(FontStyle::Bold);
-    float lineH  = titleFont_->LineHeight(FontStyle::Bold);
+    // Bitmap is sized to the visible glyph extent (ascent + descent), not the
+    // line box. Otherwise fonts with non-zero linegap (DejaVu, Cantarell)
+    // produce a tall bitmap with glyphs hugging the top, which then centers
+    // visibly above the titlebar midpoint.
+    float visH = titleFont_->VisibleHeight(FontStyle::Bold);
 
-    int bmpH = (int)std::ceil(lineH) + 2;
+    int bmpH = (int)std::ceil(visH) + 2;
     int bmpW = (int)std::ceil(run.totalWidth) + 6;
     if (bmpW < 1 || bmpH < 1) return;
 

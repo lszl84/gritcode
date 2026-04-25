@@ -383,6 +383,17 @@ float FontManager::Ascent(FontStyle style) const {
     return (idx >= 0 && idx < (int)faces_.size()) ? faces_[idx].ascent : 16;
 }
 
+float FontManager::Descent(FontStyle style) const {
+    int idx = FaceIndex(style);
+    return (idx >= 0 && idx < (int)faces_.size()) ? faces_[idx].descent : 4;
+}
+
+float FontManager::VisibleHeight(FontStyle style) const {
+    int idx = FaceIndex(style);
+    if (idx < 0 || idx >= (int)faces_.size()) return 20;
+    return faces_[idx].ascent + faces_[idx].descent;
+}
+
 float FontManager::SpaceWidth(FontStyle style) const {
     int idx = FaceIndex(style);
     return (idx >= 0 && idx < (int)faces_.size()) ? faces_[idx].spaceWidth : 6;
