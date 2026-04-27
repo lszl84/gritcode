@@ -31,6 +31,9 @@
 #include <wayland-cursor.h>
 #include "xdg-shell-client-protocol.h"
 #include "xdg-decoration-unstable-v1-client-protocol.h"
+#ifdef GRIT_HAVE_CURSOR_SHAPE_V1
+#include "cursor-shape-v1-client-protocol.h"
+#endif
 #include <xkbcommon/xkbcommon.h>
 #endif
 
@@ -85,10 +88,18 @@ struct WlState {
     wl_keyboard* keyboard = nullptr;
     wl_touch*    touch = nullptr;
 
-    // Cursor
+    // Cursor — primary path is wp_cursor_shape_v1 (compositor renders cursor
+    // at its own configured size/scale/theme). Legacy theme path used as a
+    // fallback when the compositor doesn't advertise the protocol.
     wl_cursor_theme* cursor_theme = nullptr;
     wl_surface*      cursor_surface = nullptr;
     uint32_t         last_enter_serial = 0;
+    int              cursor_size_logical = 24;
+    int              cursor_theme_scale = 0;  // scale the theme is currently loaded at
+#ifdef GRIT_HAVE_CURSOR_SHAPE_V1
+    wp_cursor_shape_manager_v1* cursor_shape_mgr = nullptr;
+    wp_cursor_shape_device_v1*  cursor_shape_dev = nullptr;
+#endif
 
     // Surfaces
     wl_surface*   surface = nullptr;
@@ -205,9 +216,65 @@ static const char* wl_cursor_legacy_alias(const char* name) {
     return nullptr;
 }
 
+static void wl_load_cursor_theme(WlState* st) {
+    if (!st->shm) return;
+    if (st->cursor_theme_scale == st->scale && st->cursor_theme) return;
+    if (st->cursor_theme) wl_cursor_theme_destroy(st->cursor_theme);
+    const char* theme = getenv("XCURSOR_THEME");
+    st->cursor_theme = wl_cursor_theme_load(theme,
+                                            st->cursor_size_logical * st->scale,
+                                            st->shm);
+    st->cursor_theme_scale = st->scale;
+    st->current_cursor = nullptr;  // force re-apply on next wl_set_cursor
+}
+
+#ifdef GRIT_HAVE_CURSOR_SHAPE_V1
+// Map our internal cursor name (mix of CSS and legacy X11) to the
+// wp_cursor_shape_v1 shape enum. Returns 0 if there is no equivalent.
+static uint32_t wl_cursor_name_to_shape(const char* name) {
+    struct M { const char* name; uint32_t shape; };
+    static const M MAP[] = {
+        { "default",     WP_CURSOR_SHAPE_DEVICE_V1_SHAPE_DEFAULT   },
+        { "left_ptr",    WP_CURSOR_SHAPE_DEVICE_V1_SHAPE_DEFAULT   },
+        { "pointer",     WP_CURSOR_SHAPE_DEVICE_V1_SHAPE_POINTER   },
+        { "hand",        WP_CURSOR_SHAPE_DEVICE_V1_SHAPE_POINTER   },
+        { "hand2",       WP_CURSOR_SHAPE_DEVICE_V1_SHAPE_POINTER   },
+        { "text",        WP_CURSOR_SHAPE_DEVICE_V1_SHAPE_TEXT      },
+        { "xterm",       WP_CURSOR_SHAPE_DEVICE_V1_SHAPE_TEXT      },
+        { "n-resize",    WP_CURSOR_SHAPE_DEVICE_V1_SHAPE_N_RESIZE  },
+        { "s-resize",    WP_CURSOR_SHAPE_DEVICE_V1_SHAPE_S_RESIZE  },
+        { "e-resize",    WP_CURSOR_SHAPE_DEVICE_V1_SHAPE_E_RESIZE  },
+        { "w-resize",    WP_CURSOR_SHAPE_DEVICE_V1_SHAPE_W_RESIZE  },
+        { "ne-resize",   WP_CURSOR_SHAPE_DEVICE_V1_SHAPE_NE_RESIZE },
+        { "nw-resize",   WP_CURSOR_SHAPE_DEVICE_V1_SHAPE_NW_RESIZE },
+        { "se-resize",   WP_CURSOR_SHAPE_DEVICE_V1_SHAPE_SE_RESIZE },
+        { "sw-resize",   WP_CURSOR_SHAPE_DEVICE_V1_SHAPE_SW_RESIZE },
+    };
+    for (const auto& m : MAP) if (!strcmp(name, m.name)) return m.shape;
+    return 0;
+}
+#endif
+
 static void wl_set_cursor(WlState* st, const char* name) {
-    if (!st->pointer || !st->cursor_theme || !st->cursor_surface) return;
+    if (!st->pointer) return;
     if (st->current_cursor && !strcmp(st->current_cursor, name)) return;
+
+#ifdef GRIT_HAVE_CURSOR_SHAPE_V1
+    // Preferred path: let the compositor render the cursor at its own
+    // configured size/theme/scale. No SHM, no theme load, no scale tracking.
+    if (st->cursor_shape_dev) {
+        if (uint32_t shape = wl_cursor_name_to_shape(name)) {
+            wp_cursor_shape_device_v1_set_shape(st->cursor_shape_dev,
+                                                st->last_enter_serial, shape);
+            st->current_cursor = name;
+            return;
+        }
+    }
+#endif
+
+    // Fallback: legacy wl_cursor_theme path for compositors without
+    // wp_cursor_shape_v1 (rare — Weston, very old Mutter).
+    if (!st->cursor_theme || !st->cursor_surface) return;
     wl_cursor* cur = wl_cursor_theme_get_cursor(st->cursor_theme, name);
     if (!cur) {
         if (const char* alt = wl_cursor_legacy_alias(name))
@@ -368,6 +435,11 @@ static void surface_handle_preferred_buffer_scale(void* data, wl_surface*, int32
     st->scale = factor;
     if (st->surface) wl_surface_set_buffer_scale(st->surface, factor);
     st->applied_buffer_w = 0;  // force resize on next commit
+#ifdef GRIT_HAVE_CURSOR_SHAPE_V1
+    // wp_cursor_shape_v1 path: compositor handles cursor scaling itself.
+    if (!st->cursor_shape_dev)
+#endif
+        wl_load_cursor_theme(st);  // reload at new scale; theme bitmaps are scale-baked
     st->dirty = true;
 }
 static void surface_handle_preferred_buffer_transform(void*, wl_surface*, uint32_t) {}
@@ -763,7 +835,20 @@ static void seat_handle_capabilities(void* data, wl_seat* seat, uint32_t caps) {
     if ((caps & WL_SEAT_CAPABILITY_POINTER) && !st->pointer) {
         st->pointer = wl_seat_get_pointer(seat);
         wl_pointer_add_listener(st->pointer, &pointer_lst, st);
+#ifdef GRIT_HAVE_CURSOR_SHAPE_V1
+        if (st->cursor_shape_mgr && !st->cursor_shape_dev) {
+            st->cursor_shape_dev =
+                wp_cursor_shape_manager_v1_get_pointer(st->cursor_shape_mgr,
+                                                       st->pointer);
+        }
+#endif
     } else if (!(caps & WL_SEAT_CAPABILITY_POINTER) && st->pointer) {
+#ifdef GRIT_HAVE_CURSOR_SHAPE_V1
+        if (st->cursor_shape_dev) {
+            wp_cursor_shape_device_v1_destroy(st->cursor_shape_dev);
+            st->cursor_shape_dev = nullptr;
+        }
+#endif
         wl_pointer_release(st->pointer); st->pointer = nullptr;
     }
     if ((caps & WL_SEAT_CAPABILITY_KEYBOARD) && !st->keyboard) {
@@ -887,6 +972,12 @@ static void registry_handle_global(void* data, wl_registry* reg, uint32_t id,
     else if (!strcmp(iface, wl_data_device_manager_interface.name))
         st->data_device_mgr = (wl_data_device_manager*)wl_registry_bind(reg, id,
                                                                         &wl_data_device_manager_interface, 3);
+#ifdef GRIT_HAVE_CURSOR_SHAPE_V1
+    else if (!strcmp(iface, wp_cursor_shape_manager_v1_interface.name))
+        st->cursor_shape_mgr = (wp_cursor_shape_manager_v1*)wl_registry_bind(reg, id,
+                                                                              &wp_cursor_shape_manager_v1_interface,
+                                                                              ver < 1 ? ver : 1);
+#endif
 }
 static void registry_handle_global_remove(void*, wl_registry*, uint32_t) {}
 static const wl_registry_listener registry_lst = {
@@ -1371,6 +1462,10 @@ AppWindow::~AppWindow() {
         if (st->touch) wl_touch_release(st->touch);
         if (st->cursor_surface) wl_surface_destroy(st->cursor_surface);
         if (st->cursor_theme) wl_cursor_theme_destroy(st->cursor_theme);
+#ifdef GRIT_HAVE_CURSOR_SHAPE_V1
+        if (st->cursor_shape_dev) wp_cursor_shape_device_v1_destroy(st->cursor_shape_dev);
+        if (st->cursor_shape_mgr) wp_cursor_shape_manager_v1_destroy(st->cursor_shape_mgr);
+#endif
         if (st->egl_surface != EGL_NO_SURFACE) {
             eglMakeCurrent(st->egl_display, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT);
             eglDestroySurface(st->egl_display, st->egl_surface);
@@ -1464,14 +1559,25 @@ bool AppWindow::Init(int width, int height, const char* title) {
             }
         }
 
-        // Cursor theme
-        const char* size_s = getenv("XCURSOR_SIZE");
-        int cursor_size = size_s ? atoi(size_s) : 24;
-        if (cursor_size <= 0) cursor_size = 24;
-        const char* theme = getenv("XCURSOR_THEME");
-        if (st->shm) {
-            st->cursor_theme = wl_cursor_theme_load(theme, cursor_size * st->scale, st->shm);
-            if (st->compositor) st->cursor_surface = wl_compositor_create_surface(st->compositor);
+        // Cursor: prefer wp_cursor_shape_v1 (compositor renders at its own
+        // configured size/theme/scale). Only fall back to the legacy SHM theme
+        // path if the compositor doesn't advertise the protocol.
+        bool need_cursor_theme_fallback = true;
+#ifdef GRIT_HAVE_CURSOR_SHAPE_V1
+        if (st->cursor_shape_mgr) need_cursor_theme_fallback = false;
+#endif
+        if (need_cursor_theme_fallback) {
+            // libxcursor / freedesktop convention: 24 when nothing else is set.
+            // GSettings/XSettings/QT_CURSOR_SIZE handling is left to the
+            // compositor's wp_cursor_shape_v1 path; this is just a sane default
+            // for the rare compositor that lacks the protocol.
+            const char* size_s = getenv("XCURSOR_SIZE");
+            st->cursor_size_logical = size_s ? atoi(size_s) : 24;
+            if (st->cursor_size_logical <= 0) st->cursor_size_logical = 24;
+            if (st->shm) {
+                wl_load_cursor_theme(st);
+                if (st->compositor) st->cursor_surface = wl_compositor_create_surface(st->compositor);
+            }
         }
 
         // Clipboard data device

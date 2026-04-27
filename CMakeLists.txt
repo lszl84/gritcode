@@ -94,6 +94,16 @@ if(LINUX OR CMAKE_SYSTEM_NAME MATCHES "FreeBSD")
 
             grit_wayland_proto(stable/xdg-shell/xdg-shell.xml xdg-shell)
             grit_wayland_proto(unstable/xdg-decoration/xdg-decoration-unstable-v1.xml xdg-decoration-unstable-v1)
+            # cursor-shape-v1 lets the compositor render the cursor at its own
+            # configured size/theme/scale — fixes "tiny cursor" on labwc/sway.
+            # Its private-code references zwp_tablet_tool_v2_interface (for the
+            # unused get_tablet_tool_v2 request), so we link tablet-v2 too.
+            if(EXISTS ${WAYLAND_PROTOCOLS_DIR}/staging/cursor-shape/cursor-shape-v1.xml AND
+               EXISTS ${WAYLAND_PROTOCOLS_DIR}/stable/tablet/tablet-v2.xml)
+                grit_wayland_proto(staging/cursor-shape/cursor-shape-v1.xml cursor-shape-v1)
+                grit_wayland_proto(stable/tablet/tablet-v2.xml tablet-v2)
+                add_compile_definitions(GRIT_HAVE_CURSOR_SHAPE_V1)
+            endif()
         endif()
     endif()
 
