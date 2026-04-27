@@ -261,8 +261,8 @@ void GLRenderer::DrawGlyph(const GlyphInfo& gi, float x, float y,
                             const Color& c, float ascent) {
     if (gi.width == 0 || gi.height == 0 || !fm_) return;
 
-    float gx = x + gi.bearingX;
-    float gy = y + ascent - gi.bearingY;
+    float gx = std::round(x + gi.bearingX);
+    float gy = std::round(y + ascent - gi.bearingY);
 
     float atlasW = (float)fm_->AtlasWidth();
     float atlasH = (float)fm_->AtlasHeight();

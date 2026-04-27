@@ -195,7 +195,7 @@ void TextInput::Paint(GLRenderer& r, FontManager& fm) const {
             float blink = std::fmod(cursorBlink, 1.0f);
             if (blink < 0.5f) {
                 int cpIdx = CodepointCount(display, std::min(cursorPos, (int)display.size()));
-                float cx = textX + fm.MeasureWidth(display.substr(0, ByteOffsetForCodepoint(display, cpIdx)), style);
+                float cx = std::round(textX + fm.MeasureWidth(display.substr(0, ByteOffsetForCodepoint(display, cpIdx)), style));
                 if (cx >= bounds.x + pad - 1 && cx <= bounds.x + bounds.w - pad + 1) {
                     float cursorH = visH * 0.9f;
                     float cursorY = ty + visH * 0.05f;
