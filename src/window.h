@@ -68,6 +68,7 @@ public:
     using KeyCb = std::function<void(int key, int mods, bool pressed)>;
     using CharCb = std::function<void(uint32_t codepoint)>;
     using FocusCb = std::function<void(bool focused)>;
+    using ScaleCb = std::function<void(float scale)>;
 
     void OnResize(ResizeCb cb);
     void OnMouseButton(MouseBtnCb cb);
@@ -76,6 +77,7 @@ public:
     void OnKeyEvent(KeyCb cb);
     void OnCharEvent(CharCb cb);
     void OnFocusChange(FocusCb cb);
+    void OnScaleChange(ScaleCb cb);
 
     void SetClipboard(const std::string& text);
     std::string GetClipboard();

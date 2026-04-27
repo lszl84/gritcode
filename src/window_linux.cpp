@@ -186,6 +186,7 @@ struct WlState {
     AppWindow::KeyCb       keyCb;
     AppWindow::CharCb      charCb;
     AppWindow::FocusCb     focusCb;
+    AppWindow::ScaleCb     scaleCb;
 };
 
 static double wl_monotonic() {
@@ -440,6 +441,7 @@ static void surface_handle_preferred_buffer_scale(void* data, wl_surface*, int32
     if (!st->cursor_shape_dev)
 #endif
         wl_load_cursor_theme(st);  // reload at new scale; theme bitmaps are scale-baked
+    if (st->scaleCb) st->scaleCb((float)factor);
     st->dirty = true;
 }
 static void surface_handle_preferred_buffer_transform(void*, wl_surface*, uint32_t) {}
@@ -1154,6 +1156,7 @@ struct X11State {
     AppWindow::KeyCb       keyCb;
     AppWindow::CharCb      charCb;
     AppWindow::FocusCb     focusCb;
+    AppWindow::ScaleCb     scaleCb;
 };
 
 static int x11_translate_keysym(KeySym sym) {
@@ -2016,6 +2019,14 @@ void AppWindow::OnFocusChange(FocusCb cb) {
 #endif
 #ifdef HAVE_X11
     if (impl_->x11) impl_->x11->focusCb = std::move(cb);
+#endif
+}
+void AppWindow::OnScaleChange(ScaleCb cb) {
+#ifdef HAVE_WAYLAND
+    if (impl_->wl) impl_->wl->scaleCb = std::move(cb);
+#endif
+#ifdef HAVE_X11
+    if (impl_->x11) impl_->x11->scaleCb = std::move(cb);
 #endif
 }
 

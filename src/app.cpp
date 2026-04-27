@@ -859,20 +859,28 @@ bool App::Init(bool sessionChooser) {
     versionLabel_.rightAlign = true;
 
     // Window callbacks
-    float currentScale = window_.Scale();
-    window_.OnResize([&, currentScale](int w, int h, float scale) mutable {
+    window_.OnResize([&](int w, int h, float scale) {
         // LayoutWidgets updates chipRowHeight_ (which depends on queue state),
         // so call it first and then derive viewH from the freshly-computed
         // chrome size.
         LayoutWidgets();
         int viewH = h - (int)((barHeight_ + inputHeight_ + chromeTopPad_) * scale) - (int)chipRowHeight_;
         if (viewH < 1) viewH = 1;
-        if (scale != currentScale) {
-            currentScale = scale;
-            scrollView_.Init(w, viewH, scale);
-        } else {
-            scrollView_.OnResize(w, viewH);
-        }
+        scrollView_.OnResize(w, viewH);
+        MarkDirty();
+    });
+    // Scale changes (HiDPI: monitor swap, compositor sending preferred_buffer_scale
+    // after the initial render) need a font-atlas re-rasterization, which is what
+    // ScrollView::Init does. Without this the first frame paints with fonts baked
+    // at the wrong scale and only normalizes when the user triggers a manual
+    // resize — confusing on HiDPI launch.
+    window_.OnScaleChange([&](float scale) {
+        LayoutWidgets();
+        int w = window_.Width();
+        int h = window_.Height();
+        int viewH = h - (int)((barHeight_ + inputHeight_ + chromeTopPad_) * scale) - (int)chipRowHeight_;
+        if (viewH < 1) viewH = 1;
+        scrollView_.Init(w, viewH, scale);
         MarkDirty();
     });
     window_.OnMouseButton([&](float x, float y, bool pressed, bool shift) {

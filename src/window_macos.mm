@@ -91,6 +91,7 @@ struct MacState {
     AppWindow::KeyCb       keyCb;
     AppWindow::CharCb      charCb;
     AppWindow::FocusCb     focusCb;
+    AppWindow::ScaleCb     scaleCb;
 };
 
 @interface GritView : NSOpenGLView {
@@ -449,6 +450,7 @@ void AppWindow::OnScrollEvent(ScrollCb cb)     { if (impl_->mac) impl_->mac->scr
 void AppWindow::OnKeyEvent(KeyCb cb)           { if (impl_->mac) impl_->mac->keyCb       = std::move(cb); }
 void AppWindow::OnCharEvent(CharCb cb)         { if (impl_->mac) impl_->mac->charCb      = std::move(cb); }
 void AppWindow::OnFocusChange(FocusCb cb)      { if (impl_->mac) impl_->mac->focusCb    = std::move(cb); }
+void AppWindow::OnScaleChange(ScaleCb cb)      { if (impl_->mac) impl_->mac->scaleCb    = std::move(cb); }
 
 void AppWindow::SetFontManager(const FontManager*) {
     // macOS uses NSWindow's native titlebar — no CSD, no custom title draw.
