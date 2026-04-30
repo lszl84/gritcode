@@ -560,16 +560,16 @@ void Dropdown::PaintPopup(GLRenderer& r, FontManager& fm) const {
     float radius = 14;
 
     WidgetRect pr = PopupRect();
-    r.DrawRoundedRect(pr.x, pr.y, pr.w, pr.h, radius, popupBg);
 
-    // Clip rendering to the popup bounds so scrolled items don't leak
-    r.PushClip(pr.x, pr.y, pr.w, pr.h);
+    // Everything (body, hover bgs, items, scrollbar) draws inside one rounded
+    // stencil clip — corner geometry is the stencil's job, not per-row.
+    r.PushClipRounded(pr.x, pr.y, pr.w, pr.h, radius);
+    r.DrawRect(pr.x, pr.y, pr.w, pr.h, popupBg);
 
     float itemH = ItemHeight();
     int last = (int)items.size() - 1;
     Color selColor{0.39f, 0.71f, 1.0f};
 
-    // Compute which items are visible
     int firstVisible = (int)(scrollOffset / itemH);
     int lastVisible = firstVisible + (int)(pr.h / itemH) + 2;  // +2 for partial rows
     firstVisible = std::max(0, firstVisible);
@@ -579,28 +579,7 @@ void Dropdown::PaintPopup(GLRenderer& r, FontManager& fm) const {
         float iy = pr.y + i * itemH - scrollOffset;
 
         if (i == hoveredItem) {
-            // Round the hover bg's corners to match the popup's curve when the
-            // visible portion of the row touches the popup edge. Trick: draw a
-            // rounded rect tall enough to push the corners we DON'T want past
-            // the row scissor, so only the corners on the touching edge show.
-            float visTop = std::max(iy, (float)pr.y);
-            float visBot = std::min(iy + itemH, (float)(pr.y + pr.h));
-            float visH = visBot - visTop;
-            bool touchesTop = (visTop <= pr.y + 0.5f);
-            bool touchesBot = (visBot >= pr.y + pr.h - 0.5f);
-            if (touchesTop && touchesBot) {
-                r.DrawRoundedRect(pr.x, visTop, pr.w, visH, radius, popupHover);
-            } else if (touchesTop) {
-                r.PushClip(pr.x, visTop, pr.w, visH);
-                r.DrawRoundedRect(pr.x, visTop, pr.w, visH + radius, radius, popupHover);
-                r.PopClip();
-            } else if (touchesBot) {
-                r.PushClip(pr.x, visTop, pr.w, visH);
-                r.DrawRoundedRect(pr.x, visTop - radius, pr.w, visH + radius, radius, popupHover);
-                r.PopClip();
-            } else {
-                r.DrawRect(pr.x, visTop, pr.w, visH, popupHover);
-            }
+            r.DrawRect(pr.x, iy, pr.w, itemH, popupHover);
         }
         if (i == selectedIndex) {
             float pillW = 4;
@@ -632,17 +611,13 @@ void Dropdown::PaintPopup(GLRenderer& r, FontManager& fm) const {
         }
     }
 
-    r.PopClip();
-
-    // Scrollbar indicator. Inset from the rounded corners so the thumb doesn't
-    // poke past the curve at scroll extremes.
     if (TotalPopupHeight() > VisiblePopupHeight()) {
-        float trackTop = pr.y + radius;
-        float trackH = pr.h - 2 * radius;
-        float thumbH = std::max(20.0f, trackH * (pr.h / TotalPopupHeight()));
-        float thumbY = trackTop + (scrollOffset / MaxScroll()) * (trackH - thumbH);
+        float thumbH = std::max(20.0f, pr.h * (pr.h / TotalPopupHeight()));
+        float thumbY = pr.y + (scrollOffset / MaxScroll()) * (pr.h - thumbH);
         r.DrawRect(pr.x + pr.w - 4, thumbY, 3, thumbH, {0.4f, 0.4f, 0.4f, 0.6f});
     }
+
+    r.PopClipRounded();
 }
 
 bool Dropdown::OnMouseDown(float x, float y) {

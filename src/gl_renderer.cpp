@@ -56,18 +56,16 @@ float roundedRectSDF(vec2 p, vec2 halfSize, float radius) {
 }
 
 void main() {
-    if (vUseTex > 1.5 || vUseTex < -1.5) {
-        // Rounded rect SDF mode.
-        // Positive useTex (>= 2.0): fill INSIDE the rounded shape (radius = useTex - 2.0).
-        // Negative useTex (<= -2.0): fill OUTSIDE the rounded shape (radius = -useTex - 2.0).
-        // The negative form is a corner mask: a quad over a rect produces opaque
-        // fill only in the four corner regions outside the rounded curve.
-        float radius = abs(vUseTex) - 2.0;
+    if (vUseTex > 1.5) {
+        // Rounded rect SDF mode (radius = useTex - 2.0).
+        float radius = vUseTex - 2.0;
         vec2 halfSize = vRectSize * 0.5;
         vec2 p = vUV - halfSize;
         float d = roundedRectSDF(p, halfSize, radius);
-        float inside = 1.0 - smoothstep(-0.5, 0.5, d);
-        float aa = (vUseTex < 0.0) ? (1.0 - inside) : inside;
+        float aa = 1.0 - smoothstep(-0.5, 0.5, d);
+        // Discard fully outside the curve so stencil writes get a clean binary
+        // mask (and we skip a few fragment ops elsewhere).
+        if (aa < 0.01) discard;
         fragColor = vec4(vColor.rgb, vColor.a * aa);
     } else if (vUseTex > 0.5) {
         // Glyph texture mode
@@ -174,7 +172,9 @@ void GLRenderer::BeginFrame(int viewportW, int viewportH, const FontManager& fm)
 #else
     glClearColor(0.14f, 0.10f, 0.10f, 1.0f);  // Reddish tint in debug
 #endif
-    glClear(GL_COLOR_BUFFER_BIT);
+    glClearStencil(0);
+    glStencilMask(0xFF);
+    glClear(GL_COLOR_BUFFER_BIT | GL_STENCIL_BUFFER_BIT);
 
     UpdateAtlasTexture();
 }
@@ -253,21 +253,6 @@ void GLRenderer::DrawRoundedRect(float x, float y, float w, float h, float radiu
     Vertex v{};
     v.r = c.r; v.g = c.g; v.b = c.b; v.a = c.a;
     v.useTex = 2.0f + radius;
-    v.rectW = w; v.rectH = h;
-
-    v.x=x;   v.y=y;   v.u=0; v.v=0; batch_.push_back(v);
-    v.x=x+w; v.y=y;   v.u=w; v.v=0; batch_.push_back(v);
-    v.x=x+w; v.y=y+h; v.u=w; v.v=h; batch_.push_back(v);
-    v.x=x;   v.y=y;   v.u=0; v.v=0; batch_.push_back(v);
-    v.x=x+w; v.y=y+h; v.u=w; v.v=h; batch_.push_back(v);
-    v.x=x;   v.y=y+h; v.u=0; v.v=h; batch_.push_back(v);
-}
-
-void GLRenderer::DrawAntiRoundedRect(float x, float y, float w, float h, float radius, const Color& c) {
-    if (radius < 0.5f) return;  // Nothing to mask out
-    Vertex v{};
-    v.r = c.r; v.g = c.g; v.b = c.b; v.a = c.a;
-    v.useTex = -(2.0f + radius);
     v.rectW = w; v.rectH = h;
 
     v.x=x;   v.y=y;   v.u=0; v.v=0; batch_.push_back(v);
@@ -370,6 +355,62 @@ void GLRenderer::PopClip() {
     } else {
         const ClipRect& top = clipStack_.back();
         glScissor(top.x, top.y, top.w, top.h);
+    }
+}
+
+void GLRenderer::PushClipRounded(float x, float y, float w, float h, float r) {
+    UpdateAtlasTexture();
+    FlushBatch();
+
+    int oldDepth = (int)roundedStack_.size();
+    int newDepth = oldDepth + 1;
+
+    if (oldDepth == 0) glEnable(GL_STENCIL_TEST);
+
+    // Increment stencil where the rounded shape covers AND we're already inside
+    // any outer rounded clip (stencil == oldDepth). Color writes off so this is
+    // a pure mask pass. The fragment shader's `discard` for fully-outside
+    // pixels gives us a clean binary mask.
+    glStencilMask(0xFF);
+    glStencilFunc(GL_EQUAL, oldDepth, 0xFF);
+    glStencilOp(GL_KEEP, GL_KEEP, GL_INCR);
+    glColorMask(GL_FALSE, GL_FALSE, GL_FALSE, GL_FALSE);
+    DrawRoundedRect(x, y, w, h, r, {1, 1, 1, 1});
+    FlushBatch();
+
+    glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
+    glStencilFunc(GL_EQUAL, newDepth, 0xFF);
+    glStencilOp(GL_KEEP, GL_KEEP, GL_KEEP);
+
+    roundedStack_.push_back({x, y, w, h, r});
+}
+
+void GLRenderer::PopClipRounded() {
+    UpdateAtlasTexture();
+    FlushBatch();
+    if (roundedStack_.empty()) return;
+
+    int oldDepth = (int)roundedStack_.size();
+    int newDepth = oldDepth - 1;
+    RoundedClipRect top = roundedStack_.back();
+
+    // Decrement the same pixels we incremented so the stencil ends up exactly
+    // as it was before the matching Push.
+    glStencilMask(0xFF);
+    glStencilFunc(GL_EQUAL, oldDepth, 0xFF);
+    glStencilOp(GL_KEEP, GL_KEEP, GL_DECR);
+    glColorMask(GL_FALSE, GL_FALSE, GL_FALSE, GL_FALSE);
+    DrawRoundedRect(top.x, top.y, top.w, top.h, top.r, {1, 1, 1, 1});
+    FlushBatch();
+
+    glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
+    roundedStack_.pop_back();
+
+    if (newDepth == 0) {
+        glDisable(GL_STENCIL_TEST);
+    } else {
+        glStencilFunc(GL_EQUAL, newDepth, 0xFF);
+        glStencilOp(GL_KEEP, GL_KEEP, GL_KEEP);
     }
 }
 

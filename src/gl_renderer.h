@@ -38,11 +38,6 @@ public:
 
     void DrawRect(float x, float y, float w, float h, const Color& c);
     void DrawRoundedRect(float x, float y, float w, float h, float r, const Color& c);
-    // Inverse of DrawRoundedRect: fills the four corner regions OUTSIDE the
-    // rounded curve with the given color, leaving the rounded interior
-    // transparent. Use as a corner mask after drawing arbitrary content into
-    // a rect, to restore the rounded outline without per-content rounding.
-    void DrawAntiRoundedRect(float x, float y, float w, float h, float r, const Color& c);
     // Horizontal gradient: per-vertex colors, smoothly interpolated by GL.
     void DrawGradientRectH(float x, float y, float w, float h,
                            const Color& left, const Color& right);
@@ -56,6 +51,12 @@ public:
     // disabling scissor, which would leak content past the outer clip).
     void PushClip(float x, float y, float w, float h);
     void PopClip();
+
+    // Rounded clip via the stencil buffer. Subsequent draws are masked to the
+    // rounded shape until the matching PopClipRounded. Composes with the
+    // rectangular clip (both apply). Nests via INCR/DECR.
+    void PushClipRounded(float x, float y, float w, float h, float r);
+    void PopClipRounded();
 
 private:
     GLuint program_ = 0;
@@ -71,13 +72,16 @@ private:
         float x, y;       // position
         float u, v;       // texcoord / local coords for SDF
         float r, g, b, a; // color
-        float useTex;     // 0=solid, 1=textured, 2+=rounded rect (value-2 = radius), -(2+r)=anti-rounded mask
+        float useTex;     // 0=solid, 1=textured, 2+=rounded rect (value-2 = radius)
         float rectW, rectH; // rect size for SDF rounded rect mode
     };
     std::vector<Vertex> batch_;
 
     struct ClipRect { int x, y, w, h; };  // GL-space (bottom-left origin)
     std::vector<ClipRect> clipStack_;
+
+    struct RoundedClipRect { float x, y, w, h, r; };
+    std::vector<RoundedClipRect> roundedStack_;
 
     void PushQuad(float x0, float y0, float x1, float y1,
                   float u0, float v0, float u1, float v1,
