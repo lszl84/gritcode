@@ -41,6 +41,7 @@ public:
     Color color{0.6f, 0.6f, 0.6f};
     FontStyle style = FontStyle::Regular;
     bool rightAlign = false;
+    bool visible = true;
 
     void Paint(GLRenderer& r, FontManager& fm) const;
 };
@@ -67,7 +68,7 @@ public:
     void Paint(GLRenderer& r, FontManager& fm) const;
     bool OnMouseDown(float x, float y);
     bool OnMouseUp(float x, float y);
-    void OnMouseMove(float x, float y);
+    bool OnMouseMove(float x, float y);  // returns true if hover state changed
 };
 
 // ============================================================================
@@ -140,6 +141,7 @@ public:
     float scrollOffset = 0;       // vertical scroll in pixels
     float autoScrollSpeed = 0;    // pixels/sec when hovering near edge
     float autoScrollAccum = 0;    // accumulated sub-pixel scroll
+    float minPopupWidth = 220;    // popup never shrinks below this; bar can
 
     static constexpr float kEdgeZone = 24.0f;  // px from popup edge to trigger auto-scroll
 
@@ -149,7 +151,7 @@ public:
     void PaintPopup(GLRenderer& r, FontManager& fm) const;  // Draw on top of everything
     bool OnMouseDown(float x, float y);
     bool OnMouseUp(float x, float y);
-    void OnMouseMove(float x, float y);
+    bool OnMouseMove(float x, float y);  // returns true if hover state changed
     void OnScroll(float dy);  // mouse wheel inside popup
     void Update(float dt);  // tick auto-scroll
     void Close() { open = false; hoveredItem = -1; scrollOffset = 0; autoScrollSpeed = 0; }

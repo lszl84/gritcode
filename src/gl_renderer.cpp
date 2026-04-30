@@ -15,6 +15,7 @@
 // along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 #include "gl_renderer.h"
+#include <algorithm>
 #include <cstdio>
 #include <cstring>
 #include <cmath>
@@ -257,6 +258,25 @@ void GLRenderer::DrawRoundedRect(float x, float y, float w, float h, float radiu
     v.x=x;   v.y=y+h; v.u=0; v.v=h; batch_.push_back(v);
 }
 
+void GLRenderer::DrawGradientRectH(float x, float y, float w, float h,
+                                    const Color& left, const Color& right) {
+    Vertex v{};
+    v.useTex = 0.0f;
+    v.u = 0; v.v = 0;
+
+    auto setColor = [&](const Color& c) { v.r = c.r; v.g = c.g; v.b = c.b; v.a = c.a; };
+
+    // Triangle 1: top-left, top-right, bottom-right
+    setColor(left);  v.x = x;     v.y = y;     batch_.push_back(v);
+    setColor(right); v.x = x + w; v.y = y;     batch_.push_back(v);
+    setColor(right); v.x = x + w; v.y = y + h; batch_.push_back(v);
+
+    // Triangle 2: top-left, bottom-right, bottom-left
+    setColor(left);  v.x = x;     v.y = y;     batch_.push_back(v);
+    setColor(right); v.x = x + w; v.y = y + h; batch_.push_back(v);
+    setColor(left);  v.x = x;     v.y = y + h; batch_.push_back(v);
+}
+
 void GLRenderer::DrawGlyph(const GlyphInfo& gi, float x, float y,
                             const Color& c, float ascent) {
     if (gi.width == 0 || gi.height == 0 || !fm_) return;
@@ -297,15 +317,40 @@ void GLRenderer::DrawTriRight(float cx, float cy, float size, const Color& c) {
 void GLRenderer::PushClip(float x, float y, float w, float h) {
     UpdateAtlasTexture();  // Sync atlas before flushing
     FlushBatch();
+
+    // GL scissor is in bottom-left origin; our coords are top-left.
+    int sx = (int)x;
+    int sy = vpH_ - (int)(y + h);
+    int sw = (int)w;
+    int sh = (int)h;
+
+    // Intersect with the current clip so nested pushes shrink, never widen.
+    if (!clipStack_.empty()) {
+        const ClipRect& top = clipStack_.back();
+        int x0 = std::max(sx, top.x);
+        int y0 = std::max(sy, top.y);
+        int x1 = std::min(sx + sw, top.x + top.w);
+        int y1 = std::min(sy + sh, top.y + top.h);
+        sx = x0; sy = y0;
+        sw = std::max(0, x1 - x0);
+        sh = std::max(0, y1 - y0);
+    }
+
+    clipStack_.push_back({sx, sy, sw, sh});
     glEnable(GL_SCISSOR_TEST);
-    // GL scissor is in bottom-left origin, our coords are top-left
-    glScissor((int)x, vpH_ - (int)(y + h), (int)w, (int)h);
+    glScissor(sx, sy, sw, sh);
 }
 
 void GLRenderer::PopClip() {
     UpdateAtlasTexture();
     FlushBatch();
-    glDisable(GL_SCISSOR_TEST);
+    if (!clipStack_.empty()) clipStack_.pop_back();
+    if (clipStack_.empty()) {
+        glDisable(GL_SCISSOR_TEST);
+    } else {
+        const ClipRect& top = clipStack_.back();
+        glScissor(top.x, top.y, top.w, top.h);
+    }
 }
 
 void GLRenderer::DrawTriDown(float cx, float cy, float size, const Color& c) {

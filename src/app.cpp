@@ -1192,31 +1192,98 @@ void App::LayoutWidgets() {
         clearQueueButton_.bounds = {startX + contW + gap, inputY + 5, clearW, inp - 10};
     }
 
-    float bx = 8;
-    workspaceDropdown_.bounds = {bx, barY + 5, 200 * s, bar - 10}; bx += 205 * s;
-    providerDropdown_.bounds = {bx, barY + 5, 140 * s, bar - 10}; bx += 145 * s;
-    modelDropdown_.bounds = {bx, barY + 5, 150 * s, bar - 10}; bx += 155 * s;
-    statusLabel_.bounds = {bx, barY + 5, 180 * s, bar - 10}; bx += 185 * s;
+    // Bottom bar — responsive. Three dropdowns are always visible. As width
+    // shrinks, hide labels/buttons in priority order: version → status → API
+    // key. If even the dropdowns at full size don't fit, shrink them
+    // proportionally (same idea as the message input above).
+    const float leftPad = 8.0f;
+    const float rightPad = 8.0f;
+    const float gap = 5.0f * s;
+    const float groupGap = 16.0f * s;
+    float wsW = 200 * s;
+    float provW = 140 * s;
+    float modW = 150 * s;
+    const float statusW = 180 * s;
+    const float versionW = 120 * s;
+    const float apiBtnW = 100 * s;
+    const float apiInpW = 220 * s;
+    const float keyBtnW = 40 * s;
 
-    // Right-edge of the bottom bar matches sendButton right edge above (w - 8).
-    float rightEdge = w - 8;
     bool showApiKey = (activeProvider_ == "zen" || activeProvider_ == "opencode-go");
-    if (showApiKey && apiKeyEditing_) {
+    bool editingApiKey = showApiKey && apiKeyEditing_;
+    bool wantApiBtn = showApiKey && !editingApiKey;
+
+    auto totalWidth = [&](float dropW, bool stat, bool ver, bool apiBtn) {
+        float t = leftPad + dropW;
+        if (stat) t += gap + statusW;
+        float right = 0;
+        if (editingApiKey) {
+            right = apiInpW + keyBtnW * 2 + 8 * s;
+            if (ver) right += versionW + 10 * s;
+        } else {
+            if (apiBtn) right += apiBtnW;
+            if (ver) right += (right > 0 ? 10 * s : 0) + versionW;
+        }
+        if (right > 0) t += groupGap + right;
+        return t + rightPad;
+    };
+
+    float dropdownsW = wsW + provW + modW + 2 * gap;
+    bool showStatus = true;
+    bool showVersion = true;
+    bool showApiKeyBtn = wantApiBtn;
+    if (totalWidth(dropdownsW, showStatus, showVersion, showApiKeyBtn) > w) showVersion = false;
+    if (totalWidth(dropdownsW, showStatus, showVersion, showApiKeyBtn) > w) showStatus = false;
+    if (!editingApiKey &&
+        totalWidth(dropdownsW, showStatus, showVersion, showApiKeyBtn) > w) showApiKeyBtn = false;
+
+    if (totalWidth(dropdownsW, showStatus, showVersion, showApiKeyBtn) > w) {
+        // Even bare-bones doesn't fit — shrink the three dropdowns to share
+        // whatever's left after reserving space for the API-key edit row
+        // (the only right-side group we can't hide).
+        float reservedRight = editingApiKey
+            ? groupGap + apiInpW + keyBtnW * 2 + 8 * s
+            : 0;
+        float availForDropdowns = w - leftPad - rightPad - reservedRight - 2 * gap;
+        if (availForDropdowns < 0) availForDropdowns = 0;
+        const float origTotal = 200.0f + 140.0f + 150.0f;
+        wsW = availForDropdowns * (200.0f / origTotal);
+        provW = availForDropdowns * (140.0f / origTotal);
+        modW = availForDropdowns * (150.0f / origTotal);
+    }
+
+    float bx = leftPad;
+    workspaceDropdown_.bounds = {bx, barY + 5, wsW, bar - 10}; bx += wsW + gap;
+    providerDropdown_.bounds = {bx, barY + 5, provW, bar - 10}; bx += provW + gap;
+    modelDropdown_.bounds = {bx, barY + 5, modW, bar - 10}; bx += modW + gap;
+
+    statusLabel_.visible = showStatus;
+    if (showStatus) {
+        statusLabel_.bounds = {bx, barY + 5, statusW, bar - 10};
+    }
+
+    float rightEdge = w - rightPad;
+    if (editingApiKey) {
         apiKeyButton_.visible = false;
-        float btnW = 40 * s;
-        float inputW = 220 * s;
-        float totalW = inputW + btnW * 2 + 8;
-        float startX = rightEdge - totalW;
-        apiKeyInput_.bounds = {startX, barY + 5, inputW, bar - 10};
-        apiKeyAccept_.bounds = {startX + inputW + 4, barY + 5, btnW, bar - 10};
-        apiKeyCancel_.bounds = {startX + inputW + btnW + 8, barY + 5, btnW, bar - 10};
-        versionLabel_.bounds = {startX - 130 * s, barY + 5, 120 * s, bar - 10};
+        float editStart = rightEdge - (apiInpW + keyBtnW * 2 + 8 * s);
+        apiKeyInput_.bounds = {editStart, barY + 5, apiInpW, bar - 10};
+        apiKeyAccept_.bounds = {editStart + apiInpW + 4, barY + 5, keyBtnW, bar - 10};
+        apiKeyCancel_.bounds = {editStart + apiInpW + keyBtnW + 8, barY + 5, keyBtnW, bar - 10};
+        versionLabel_.visible = showVersion;
+        if (showVersion) {
+            versionLabel_.bounds = {editStart - versionW - 10 * s, barY + 5, versionW, bar - 10};
+        }
     } else {
-        float apiW = 100 * s;
-        apiKeyButton_.bounds = {rightEdge - apiW, barY + 5, apiW, bar - 10};
-        apiKeyButton_.visible = showApiKey;
-        float vlX = showApiKey ? rightEdge - apiW - 130 * s : rightEdge - 130 * s;
-        versionLabel_.bounds = {vlX, barY + 5, 120 * s, bar - 10};
+        apiKeyButton_.visible = showApiKeyBtn;
+        float vlx = rightEdge;
+        if (showApiKeyBtn) {
+            apiKeyButton_.bounds = {rightEdge - apiBtnW, barY + 5, apiBtnW, bar - 10};
+            vlx = rightEdge - apiBtnW - 10 * s;
+        }
+        versionLabel_.visible = showVersion;
+        if (showVersion) {
+            versionLabel_.bounds = {vlx - versionW, barY + 5, versionW, bar - 10};
+        }
     }
 }
 
@@ -3601,7 +3668,15 @@ void App::OnMouseDown(float x, float y, bool shift) {
             MarkDirty();
             return;
         }
+        bool clickedOwnBar = PointInRect(x, y, openDd->bounds);
         openDd->Close();
+        // Clicking the bar of an already-open dropdown should toggle it
+        // closed. Without this early return the for-loop below would
+        // immediately re-open it on the same click.
+        if (clickedOwnBar) {
+            MarkDirty();
+            return;
+        }
     }
     for (auto* d : dds) {
         if (PointInRect(x, y, d->bounds)) {
@@ -3711,21 +3786,29 @@ void App::OnMouseMove(float x, float y, bool leftDown) {
         return;
     }
 
-    sendButton_.OnMouseMove(x, y);
-    if (apiKeyEditing_) { apiKeyAccept_.OnMouseMove(x, y); apiKeyCancel_.OnMouseMove(x, y); }
-    else apiKeyButton_.OnMouseMove(x, y);
-    continueQueueButton_.OnMouseMove(x, y);
-    clearQueueButton_.OnMouseMove(x, y);
-    workspaceDropdown_.OnMouseMove(x, y);
-    providerDropdown_.OnMouseMove(x, y);
-    modelDropdown_.OnMouseMove(x, y);
+    // Only mark dirty when a widget's hover state actually changes — otherwise
+    // every pointer-motion event would force a redraw and peg a CPU core.
+    // ScrollView manages its own needsRedraw_ which the main loop checks.
+    bool changed = false;
+    changed |= sendButton_.OnMouseMove(x, y);
+    if (apiKeyEditing_) {
+        changed |= apiKeyAccept_.OnMouseMove(x, y);
+        changed |= apiKeyCancel_.OnMouseMove(x, y);
+    } else {
+        changed |= apiKeyButton_.OnMouseMove(x, y);
+    }
+    changed |= continueQueueButton_.OnMouseMove(x, y);
+    changed |= clearQueueButton_.OnMouseMove(x, y);
+    changed |= workspaceDropdown_.OnMouseMove(x, y);
+    changed |= providerDropdown_.OnMouseMove(x, y);
+    changed |= modelDropdown_.OnMouseMove(x, y);
 
     float s = window_.Scale();
     float viewH = window_.Height() - (barHeight_ + inputHeight_ + chromeTopPad_) * s - chipRowHeight_;
     if (y < viewH) {
         scrollView_.OnMouseMove(x, y, leftDown);
     }
-    MarkDirty();
+    if (changed) MarkDirty();
 }
 
 void App::OnScroll(float delta) {
@@ -3969,9 +4052,9 @@ void App::Run() {
                 apiKeyInput_.Update(dt, scrollView_.Fonts());
             scrollView_.Update(dt);
             // Auto-scroll open dropdowns when hovering near edges
-            if (modelDropdown_.open) { modelDropdown_.Update(dt); MarkDirty(); }
-            if (providerDropdown_.open) { providerDropdown_.Update(dt); MarkDirty(); }
-            if (workspaceDropdown_.open) { workspaceDropdown_.Update(dt); MarkDirty(); }
+            if (modelDropdown_.open && modelDropdown_.autoScrollSpeed != 0) { modelDropdown_.Update(dt); MarkDirty(); }
+            if (providerDropdown_.open && providerDropdown_.autoScrollSpeed != 0) { providerDropdown_.Update(dt); MarkDirty(); }
+            if (workspaceDropdown_.open && workspaceDropdown_.autoScrollSpeed != 0) { workspaceDropdown_.Update(dt); MarkDirty(); }
         }
 
         bool showDots = requestInProgress_

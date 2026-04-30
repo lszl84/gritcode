@@ -24,7 +24,7 @@
 // ============================================================================
 
 void Label::Paint(GLRenderer& r, FontManager& fm) const {
-    if (text.empty()) return;
+    if (!visible || text.empty()) return;
     auto run = fm.Shape(text, style);
     float x = bounds.x;
     if (rightAlign) {
@@ -69,9 +69,15 @@ bool Button::OnMouseUp(float x, float y) {
     return false;
 }
 
-void Button::OnMouseMove(float x, float y) {
-    if (!visible || !enabled) return;
-    hovered = PointInRect(x, y, bounds);
+bool Button::OnMouseMove(float x, float y) {
+    if (!visible || !enabled) {
+        if (hovered) { hovered = false; return true; }
+        return false;
+    }
+    bool h = PointInRect(x, y, bounds);
+    if (h == hovered) return false;
+    hovered = h;
+    return true;
 }
 
 // ============================================================================
@@ -498,7 +504,8 @@ float Dropdown::MaxScroll() const {
 }
 
 WidgetRect Dropdown::PopupRect() const {
-    return {bounds.x, bounds.y - VisiblePopupHeight(), bounds.w, VisiblePopupHeight()};
+    float w = std::max(bounds.w, minPopupWidth);
+    return {bounds.x, bounds.y - VisiblePopupHeight(), w, VisiblePopupHeight()};
 }
 
 void Dropdown::Update(float dt) {
@@ -514,19 +521,35 @@ void Dropdown::Paint(GLRenderer& r, FontManager& fm) const {
     Color bg = open ? hoverColor : hovered ? hoverColor : bgColor;
     r.DrawRoundedRect(bounds.x, bounds.y, bounds.w, bounds.h, radius, bg);
 
-    // Selected text
-    std::string display = SelectedLabel();
-    if (display.empty()) display = "Select...";
-
-    auto run = fm.Shape(display, style);
-    float tx = bounds.x + 8;
-    float ty = bounds.y + (bounds.h - fm.VisibleHeight(style)) / 2;
-    r.DrawShapedRun(fm, run, tx, ty, fm.Ascent(style), textColor);
-
-    // Dropdown arrow
+    // Dropdown arrow geometry — text must not overlap it.
     float triSize = fm.LineHeight(style) * 0.3f;
     float triX = bounds.x + bounds.w - 12;
     float triY = bounds.y + bounds.h / 2;
+
+    std::string display = SelectedLabel();
+    if (display.empty()) display = "Select...";
+
+    float textLeft = bounds.x + 8;
+    float textRight = triX - triSize - 4;  // leave a small gap before the arrow
+    float textW = textRight - textLeft;
+
+    if (textW > 0) {
+        auto run = fm.Shape(display, style);
+        float ty = bounds.y + (bounds.h - fm.VisibleHeight(style)) / 2;
+
+        r.PushClip(textLeft, bounds.y, textW, bounds.h);
+        r.DrawShapedRun(fm, run, textLeft, ty, fm.Ascent(style), textColor);
+        r.PopClip();
+
+        // When the label doesn't fit, fade the right edge into the bar's bg
+        // so the truncation reads as "more text" rather than chopped glyphs.
+        if (run.totalWidth > textW) {
+            float fadeW = std::min(18.0f, textW);
+            Color bgT = bg; bgT.a = 0;
+            r.DrawGradientRectH(textRight - fadeW, bounds.y, fadeW, bounds.h, bgT, bg);
+        }
+    }
+
     r.DrawTriDown(triX, triY, triSize, textColor);
 }
 
@@ -579,7 +602,25 @@ void Dropdown::PaintPopup(GLRenderer& r, FontManager& fm) const {
         }
         auto irun = fm.Shape(items[i].label, style);
         float ity = iy + (itemH - fm.VisibleHeight(style)) / 2;
-        r.DrawShapedRun(fm, irun, pr.x + 14, ity, fm.Ascent(style), textColor);
+
+        bool scrollable = TotalPopupHeight() > VisiblePopupHeight();
+        float scrollbarRoom = scrollable ? 12 : 8;
+        float itemTextLeft = pr.x + 14;
+        float itemTextRight = pr.x + pr.w - scrollbarRoom;
+        float itemTextW = itemTextRight - itemTextLeft;
+
+        if (itemTextW > 0) {
+            r.PushClip(itemTextLeft, iy, itemTextW, itemH);
+            r.DrawShapedRun(fm, irun, itemTextLeft, ity, fm.Ascent(style), textColor);
+            r.PopClip();
+
+            if (irun.totalWidth > itemTextW) {
+                Color rowBg = (i == hoveredItem) ? popupHover : popupBg;
+                Color bgT = rowBg; bgT.a = 0;
+                float fadeW = std::min(18.0f, itemTextW);
+                r.DrawGradientRectH(itemTextRight - fadeW, iy, fadeW, itemH, bgT, rowBg);
+            }
+        }
     }
 
     r.PopClip();
@@ -631,7 +672,10 @@ bool Dropdown::OnMouseDown(float x, float y) {
 
 bool Dropdown::OnMouseUp(float, float) { return false; }
 
-void Dropdown::OnMouseMove(float x, float y) {
+bool Dropdown::OnMouseMove(float x, float y) {
+    bool oldHovered = hovered;
+    int oldHoveredItem = hoveredItem;
+
     hovered = PointInRect(x, y, bounds);
     if (open) {
         WidgetRect pr = PopupRect();
@@ -639,7 +683,9 @@ void Dropdown::OnMouseMove(float x, float y) {
             hoveredItem = (int)((y - pr.y + scrollOffset) / ItemHeight());
             if (hoveredItem >= (int)items.size()) hoveredItem = -1;
 
-            // Auto-scroll when hovering near the top/bottom edge
+            // Auto-scroll when hovering near the top/bottom edge.
+            // autoScrollSpeed changes don't need to mark dirty here — the
+            // per-frame Update() loop redraws while autoScrollSpeed != 0.
             float distFromTop = y - pr.y;
             float distFromBottom = (pr.y + pr.h) - y;
             if (distFromTop < kEdgeZone && scrollOffset > 0) {
@@ -654,6 +700,7 @@ void Dropdown::OnMouseMove(float x, float y) {
             autoScrollSpeed = 0;
         }
     }
+    return hovered != oldHovered || hoveredItem != oldHoveredItem;
 }
 
 void Dropdown::OnScroll(float dy) {
