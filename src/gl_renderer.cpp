@@ -56,13 +56,18 @@ float roundedRectSDF(vec2 p, vec2 halfSize, float radius) {
 }
 
 void main() {
-    if (vUseTex > 1.5) {
-        // Rounded rect SDF mode: useTex = 2.0 + radius
-        float radius = vUseTex - 2.0;
+    if (vUseTex > 1.5 || vUseTex < -1.5) {
+        // Rounded rect SDF mode.
+        // Positive useTex (>= 2.0): fill INSIDE the rounded shape (radius = useTex - 2.0).
+        // Negative useTex (<= -2.0): fill OUTSIDE the rounded shape (radius = -useTex - 2.0).
+        // The negative form is a corner mask: a quad over a rect produces opaque
+        // fill only in the four corner regions outside the rounded curve.
+        float radius = abs(vUseTex) - 2.0;
         vec2 halfSize = vRectSize * 0.5;
         vec2 p = vUV - halfSize;
         float d = roundedRectSDF(p, halfSize, radius);
-        float aa = 1.0 - smoothstep(-0.5, 0.5, d);
+        float inside = 1.0 - smoothstep(-0.5, 0.5, d);
+        float aa = (vUseTex < 0.0) ? (1.0 - inside) : inside;
         fragColor = vec4(vColor.rgb, vColor.a * aa);
     } else if (vUseTex > 0.5) {
         // Glyph texture mode
@@ -248,6 +253,21 @@ void GLRenderer::DrawRoundedRect(float x, float y, float w, float h, float radiu
     Vertex v{};
     v.r = c.r; v.g = c.g; v.b = c.b; v.a = c.a;
     v.useTex = 2.0f + radius;
+    v.rectW = w; v.rectH = h;
+
+    v.x=x;   v.y=y;   v.u=0; v.v=0; batch_.push_back(v);
+    v.x=x+w; v.y=y;   v.u=w; v.v=0; batch_.push_back(v);
+    v.x=x+w; v.y=y+h; v.u=w; v.v=h; batch_.push_back(v);
+    v.x=x;   v.y=y;   v.u=0; v.v=0; batch_.push_back(v);
+    v.x=x+w; v.y=y+h; v.u=w; v.v=h; batch_.push_back(v);
+    v.x=x;   v.y=y+h; v.u=0; v.v=h; batch_.push_back(v);
+}
+
+void GLRenderer::DrawAntiRoundedRect(float x, float y, float w, float h, float radius, const Color& c) {
+    if (radius < 0.5f) return;  // Nothing to mask out
+    Vertex v{};
+    v.r = c.r; v.g = c.g; v.b = c.b; v.a = c.a;
+    v.useTex = -(2.0f + radius);
     v.rectW = w; v.rectH = h;
 
     v.x=x;   v.y=y;   v.u=0; v.v=0; batch_.push_back(v);

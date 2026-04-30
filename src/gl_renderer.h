@@ -38,6 +38,11 @@ public:
 
     void DrawRect(float x, float y, float w, float h, const Color& c);
     void DrawRoundedRect(float x, float y, float w, float h, float r, const Color& c);
+    // Inverse of DrawRoundedRect: fills the four corner regions OUTSIDE the
+    // rounded curve with the given color, leaving the rounded interior
+    // transparent. Use as a corner mask after drawing arbitrary content into
+    // a rect, to restore the rounded outline without per-content rounding.
+    void DrawAntiRoundedRect(float x, float y, float w, float h, float r, const Color& c);
     // Horizontal gradient: per-vertex colors, smoothly interpolated by GL.
     void DrawGradientRectH(float x, float y, float w, float h,
                            const Color& left, const Color& right);
@@ -66,7 +71,7 @@ private:
         float x, y;       // position
         float u, v;       // texcoord / local coords for SDF
         float r, g, b, a; // color
-        float useTex;     // 0=solid, 1=textured, 2+=rounded rect (value-2 = radius)
+        float useTex;     // 0=solid, 1=textured, 2+=rounded rect (value-2 = radius), -(2+r)=anti-rounded mask
         float rectW, rectH; // rect size for SDF rounded rect mode
     };
     std::vector<Vertex> batch_;
