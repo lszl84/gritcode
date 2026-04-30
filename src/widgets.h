@@ -18,6 +18,7 @@
 #include "types.h"
 #include "font.h"
 #include "gl_renderer.h"
+#include <algorithm>
 #include <string>
 #include <vector>
 #include <functional>
@@ -165,7 +166,8 @@ public:
             ? items[selectedIndex].label : "";
     }
 
-    float ItemHeight() const { return 32; }
+    mutable float itemHeight_ = 32;  // cached from font metrics during Paint
+    float ItemHeight() const { return itemHeight_; }
     float MaxVisibleItems() const { return 12; }
     float VisiblePopupHeight() const;
     float TotalPopupHeight() const { return items.size() * ItemHeight(); }

@@ -518,6 +518,8 @@ void Dropdown::Paint(GLRenderer& r, FontManager& fm) const {
     if (!enabled) return;
     float radius = 14;
 
+    itemHeight_ = std::max(22.0f, std::ceil(fm.VisibleHeight(style) * 1.1f));
+
     Color bg = open ? hoverColor : hovered ? hoverColor : bgColor;
     r.DrawRoundedRect(bounds.x, bounds.y, bounds.w, bounds.h, radius, bg);
 
