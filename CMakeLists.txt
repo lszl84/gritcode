@@ -166,4 +166,22 @@ if(UNIX AND NOT APPLE)
     install(FILES packaging/wx_gritcode.svg
         DESTINATION ${CMAKE_INSTALL_DATADIR}/icons/hicolor/scalable/apps
     )
+
+    # GTK/freedesktop icon loaders skip an icon theme directory that lacks an
+    # index.theme file. System packages (hicolor-icon-theme) ship one to
+    # /usr/share/icons/hicolor/, but a fresh per-user prefix (~/.local) won't
+    # have one, which makes our installed app icon invisible to launchers.
+    # Install our minimal index.theme only when the destination doesn't already
+    # have one, so we never clobber a system-managed file.
+    install(CODE "
+        set(_dest \"\$ENV{DESTDIR}\${CMAKE_INSTALL_PREFIX}/${CMAKE_INSTALL_DATADIR}/icons/hicolor/index.theme\")
+        if(NOT EXISTS \"\${_dest}\")
+            file(INSTALL \"${CMAKE_SOURCE_DIR}/packaging/hicolor-index.theme\"
+                DESTINATION \"\$ENV{DESTDIR}\${CMAKE_INSTALL_PREFIX}/${CMAKE_INSTALL_DATADIR}/icons/hicolor\"
+                RENAME index.theme
+            )
+        else()
+            message(STATUS \"hicolor index.theme already present at \${_dest} — skipping\")
+        endif()
+    ")
 endif()
