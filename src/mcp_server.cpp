@@ -1,27 +1,14 @@
-// Gritcode — GPU-rendered AI coding harness
-// Copyright (C) 2026 luke@devmindscape.com
-//
-// This program is free software: you can redistribute it and/or modify
-// it under the terms of the GNU General Public License as published by
-// the Free Software Foundation, either version 3 of the License, or
-// (at your option) any later version.
-//
-// This program is distributed in the hope that it will be useful,
-// but WITHOUT ANY WARRANTY; without even the implied warranty of
-// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
-// GNU General Public License for more details.
-//
-// You should have received a copy of the GNU General Public License
-// along with this program. If not, see <https://www.gnu.org/licenses/>.
-
 #include "mcp_server.h"
-#include <sys/socket.h>
-#include <netinet/in.h>
-#include <unistd.h>
-#include <cstring>
+
 #include <cstdio>
-#include <poll.h>
+#include <cstring>
 #include <fcntl.h>
+#include <netinet/in.h>
+#include <poll.h>
+#include <sys/socket.h>
+#include <unistd.h>
+
+using nlohmann::json;
 
 MCPServer::MCPServer() {}
 
@@ -44,27 +31,26 @@ void MCPServer::Stop() {
 }
 
 void MCPServer::ServerLoop() {
-    // SOCK_CLOEXEC so spawned tool subprocesses (wl-copy, etc.) don't inherit
-    // the listen fd. Without this, backgrounded helpers daemonize holding the
-    // port and block the next grit instance from binding.
 #ifdef SOCK_CLOEXEC
     serverFd_ = socket(AF_INET, SOCK_STREAM | SOCK_CLOEXEC, 0);
 #else
     serverFd_ = socket(AF_INET, SOCK_STREAM, 0);
     if (serverFd_ >= 0) fcntl(serverFd_, F_SETFD, FD_CLOEXEC);
 #endif
-    if (serverFd_ < 0) { fprintf(stderr, "MCP: socket failed\n"); return; }
+    if (serverFd_ < 0) {
+        fprintf(stderr, "MCP: socket() failed\n");
+        return;
+    }
 
     int opt = 1;
     setsockopt(serverFd_, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
 
-    // Try ports 8765-8770
     struct sockaddr_in addr{};
     addr.sin_family = AF_INET;
     addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
 
     bool bound = false;
-    for (int p = 8765; p <= 8770; p++) {
+    for (int p = 8765; p <= 8770; ++p) {
         addr.sin_port = htons(p);
         if (bind(serverFd_, (struct sockaddr*)&addr, sizeof(addr)) == 0) {
             port_ = p;
@@ -72,13 +58,15 @@ void MCPServer::ServerLoop() {
             break;
         }
     }
-    if (!bound) { fprintf(stderr, "MCP: bind failed on ports 8765-8770\n"); return; }
+    if (!bound) {
+        fprintf(stderr, "MCP: bind failed on ports 8765-8770\n");
+        return;
+    }
 
     listen(serverFd_, 2);
-    fprintf(stderr, "MCP server listening on port %d\n", port_);
+    fprintf(stderr, "MCP server listening on 127.0.0.1:%d\n", port_);
 
     while (running_) {
-        // Poll with timeout so we can check running_ flag
         struct pollfd pfd = {serverFd_, POLLIN, 0};
         int ret = poll(&pfd, 1, 500);
         if (ret <= 0) continue;
@@ -101,29 +89,27 @@ void MCPServer::ServerLoop() {
 void MCPServer::HandleClient(int clientFd) {
     std::string buffer;
     char chunk[4096];
-    int idleCount = 0;
+    int idleTicks = 0;
 
     while (running_) {
         struct pollfd pfd = {clientFd, POLLIN, 0};
         int ret = poll(&pfd, 1, 500);
         if (ret < 0) break;
         if (ret == 0) {
-            // Disconnect idle clients after 30s so other clients can connect
-            if (++idleCount > 60) break;
+            // Drop idle clients after 30s so others can connect.
+            if (++idleTicks > 60) break;
             continue;
         }
-        idleCount = 0;  // Reset on activity
+        idleTicks = 0;
 
         ssize_t n = recv(clientFd, chunk, sizeof(chunk), 0);
         if (n <= 0) break;
         buffer.append(chunk, n);
 
-        // Process complete lines (newline-delimited JSON-RPC)
         size_t pos;
         while ((pos = buffer.find('\n')) != std::string::npos) {
             std::string line = buffer.substr(0, pos);
             buffer.erase(0, pos + 1);
-
             if (line.empty()) continue;
 
             json response;
@@ -131,90 +117,93 @@ void MCPServer::HandleClient(int clientFd) {
                 auto request = json::parse(line);
                 response = HandleRequest(request);
             } catch (const std::exception& e) {
-                response = {{"error", {{"code", -32700}, {"message", std::string("Parse error: ") + e.what()}}}};
+                response = {
+                    {"jsonrpc", "2.0"},
+                    {"id", nullptr},
+                    {"error", {{"code", -32700},
+                               {"message", std::string("Parse error: ") + e.what()}}},
+                };
             }
 
-            std::string responseStr = response.dump() + "\n";
-            send(clientFd, responseStr.c_str(), responseStr.size(), MSG_NOSIGNAL);
+            std::string out = response.dump(
+                -1, ' ', false, json::error_handler_t::replace) + "\n";
+            send(clientFd, out.c_str(), out.size(), MSG_NOSIGNAL);
         }
     }
 }
 
 json MCPServer::HandleRequest(const json& request) {
     std::string method = request.value("method", "");
-    auto id = request.contains("id") ? request["id"] : json(nullptr);
+    json id = request.contains("id") ? request["id"] : json(nullptr);
     json params = request.value("params", json::object());
 
-    json result;
+    auto okResult = [&](json r) {
+        return json{{"jsonrpc", "2.0"}, {"id", id}, {"result", std::move(r)}};
+    };
+    auto err = [&](int code, const std::string& msg) {
+        return json{{"jsonrpc", "2.0"}, {"id", id},
+                    {"error", {{"code", code}, {"message", msg}}}};
+    };
+
+    std::lock_guard<std::mutex> lock(cbMutex_);
 
     if (method == "getStatus") {
-        std::lock_guard<std::mutex> lock(cbMutex_);
-        if (cb_.getStatus) result = cb_.getStatus();
-        else result = {{"error", "not ready"}};
-
-    } else if (method == "sendMessage") {
-        std::string msg = params.value("message", "");
-        if (msg.empty()) {
-            return {{"error", {{"code", -32602}, {"message", "missing 'message' param"}}}, {"id", id}};
-        }
-        std::lock_guard<std::mutex> lock(cbMutex_);
-        if (cb_.sendMessage) {
-            cb_.sendMessage(msg);
-            result = {{"sent", true}};
-        } else {
-            result = {{"error", "not ready"}};
-        }
-
-    } else if (method == "getConversation") {
-        std::lock_guard<std::mutex> lock(cbMutex_);
-        if (cb_.getConversation) result = cb_.getConversation();
-        else result = json::array();
-
-    } else if (method == "getLastAssistant") {
-        std::lock_guard<std::mutex> lock(cbMutex_);
-        if (cb_.getLastAssistant) result = cb_.getLastAssistant();
-        else result = {{"text", ""}};
-
-    } else if (method == "selectAllText") {
-        std::lock_guard<std::mutex> lock(cbMutex_);
-        if (cb_.selectAllText) result = {{"text", cb_.selectAllText()}};
-        else result = {{"text", ""}};
-
-    } else if (method == "cancelRequest") {
-        std::lock_guard<std::mutex> lock(cbMutex_);
-        if (cb_.cancelRequest) { cb_.cancelRequest(); result = {{"cancelled", true}}; }
-        else result = {{"error", "not ready"}};
-
-    } else if (method == "setWorkspace") {
-        std::string cwd = params.value("cwd", "");
-        if (cwd.empty()) {
-            return {{"error", {{"code", -32602}, {"message", "missing 'cwd' param"}}}, {"id", id}};
-        }
-        std::lock_guard<std::mutex> lock(cbMutex_);
-        if (cb_.setWorkspace) {
-            cb_.setWorkspace(cwd);
-            result = {{"set", true}};
-        } else {
-            result = {{"error", "not ready"}};
-        }
-
-    } else if (method == "setProvider") {
-        std::string provider = params.value("provider", "");
-        std::string model = params.value("model", "");
-        if (provider.empty()) {
-            return {{"error", {{"code", -32602}, {"message", "missing 'provider' param"}}}, {"id", id}};
-        }
-        std::lock_guard<std::mutex> lock(cbMutex_);
-        if (cb_.setProvider) {
-            cb_.setProvider(provider, model);
-            result = {{"set", true}};
-        } else {
-            result = {{"error", "not ready"}};
-        }
-
-    } else {
-        return {{"error", {{"code", -32601}, {"message", "unknown method: " + method}}}, {"id", id}};
+        if (!cb_.getStatus) return err(-32603, "not ready");
+        return okResult(cb_.getStatus());
     }
-
-    return {{"result", result}, {"id", id}};
+    if (method == "getConversation") {
+        if (!cb_.getConversation) return err(-32603, "not ready");
+        return okResult(cb_.getConversation());
+    }
+    if (method == "getLastAssistant") {
+        if (!cb_.getLastAssistant) return err(-32603, "not ready");
+        return okResult(cb_.getLastAssistant());
+    }
+    if (method == "sendMessage") {
+        std::string msg = params.value("message", "");
+        if (msg.empty()) return err(-32602, "missing 'message' param");
+        if (!cb_.sendMessage) return err(-32603, "not ready");
+        return okResult(cb_.sendMessage(msg));
+    }
+    if (method == "cancelRequest") {
+        if (!cb_.cancelRequest) return err(-32603, "not ready");
+        cb_.cancelRequest();
+        return okResult({{"cancelled", true}});
+    }
+    if (method == "getBlocks") {
+        if (!cb_.getBlocks) return err(-32603, "not ready");
+        return okResult(cb_.getBlocks());
+    }
+    if (method == "toggleTool") {
+        if (!cb_.toggleTool) return err(-32603, "not ready");
+        if (!params.contains("index") || !params["index"].is_number_integer())
+            return err(-32602, "missing/invalid 'index' param");
+        cb_.toggleTool(params["index"].get<int>());
+        return okResult({{"toggled", true}});
+    }
+    if (method == "listSessions") {
+        if (!cb_.listSessions) return err(-32603, "not ready");
+        return okResult(cb_.listSessions());
+    }
+    if (method == "switchSession") {
+        if (!cb_.switchSession) return err(-32603, "not ready");
+        std::string cwd = params.value("cwd", "");
+        if (cwd.empty()) return err(-32602, "missing 'cwd' param");
+        return okResult(cb_.switchSession(cwd));
+    }
+    if (method == "newSession") {
+        if (!cb_.newSession) return err(-32603, "not ready");
+        return okResult(cb_.newSession());
+    }
+    if (method == "setModel") {
+        if (!cb_.setModel) return err(-32603, "not ready");
+        if (!params.contains("index") || !params["index"].is_number_integer())
+            return err(-32602, "missing/invalid 'index' param");
+        return okResult(cb_.setModel(params["index"].get<int>()));
+    }
+    if (method == "getPreferences") {
+        if (!cb_.getPreferences) return err(-32603, "not ready");
+        return okResult(cb_.getPreferences());
+    }
+    return err(-32601, "unknown method: " + method);
 }

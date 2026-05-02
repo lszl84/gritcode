@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=Gritcode
+GenericName=AI Coding Assistant
+Comment=Native wxWidgets-based AI coding assistant
+Exec=wx_gritcode
+Icon=wx_gritcode
+Terminal=false
+Categories=Development;IDE;
+Keywords=AI;coding;assistant;chat;LLM;
+StartupWMClass=wx_gritcode

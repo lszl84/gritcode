@@ -1,52 +1,69 @@
-// Gritcode — GPU-rendered AI coding harness
-// Copyright (C) 2026 luke@devmindscape.com
-//
-// This program is free software: you can redistribute it and/or modify
-// it under the terms of the GNU General Public License as published by
-// the Free Software Foundation, either version 3 of the License, or
-// (at your option) any later version.
-//
-// This program is distributed in the hope that it will be useful,
-// but WITHOUT ANY WARRANTY; without even the implied warranty of
-// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
-// GNU General Public License for more details.
-//
-// You should have received a copy of the GNU General Public License
-// along with this program. If not, see <https://www.gnu.org/licenses/>.
-
 #pragma once
-#include <string>
-#include <functional>
-#include <thread>
 #include <atomic>
+#include <functional>
 #include <mutex>
 #include <nlohmann/json.hpp>
+#include <string>
+#include <thread>
 
-using json = nlohmann::json;
-
-// Callbacks the MCP server uses to interact with the App
+// TCP JSON-RPC server for programmatic control of a running wx_gritcode
+// instance. The server lives on a background thread; methods are dispatched
+// via callbacks the GUI registers, and the callbacks themselves marshal
+// onto the GUI thread via wxFrame::CallAfter when they need to mutate UI.
+//
+// Wire protocol: newline-delimited JSON-RPC 2.0.
+// Default port: 8765. If unavailable, falls back to 8766..8770.
 struct MCPCallbacks {
-    std::function<void(const std::string& msg)> sendMessage;
-    std::function<json()> getStatus;
-    std::function<json()> getConversation;     // Full conversation blocks text
-    std::function<json()> getLastAssistant;    // Just the last assistant response
-    std::function<void(const std::string& provider, const std::string& model)> setProvider;
-    // Trigger Select-All and return the text the scroll view would place on
-    // the clipboard. Used for end-to-end copy verification in tests.
-    std::function<std::string()> selectAllText;
-    // Trigger a workspace/session switch to the given cwd. Runs the same
-    // path the workspace dropdown does, so the "block while a request is in
-    // flight" guard applies. Used for test verification of that guard.
-    std::function<void(const std::string& cwd)> setWorkspace;
-    // Simulate the Escape key while a request is in flight. Runs the same
-    // path the keyboard handler does — bumps requestGen_, kills the tool
-    // pgid if any, and performs history hygiene. Used for test verification
-    // of the cancel path.
+    // Returns a JSON status object. Should include at least
+    // {streaming: bool, blocks: int}.
+    std::function<nlohmann::json()> getStatus;
+
+    // Returns the rendered conversation as an array of
+    // {role, type, text} objects.
+    std::function<nlohmann::json()> getConversation;
+
+    // Returns {text: <last assistant message>}.
+    std::function<nlohmann::json()> getLastAssistant;
+
+    // Inject text as if the user typed it and pressed Enter. Returns
+    // {sent: true} on success, or {sent: false, reason: "<why>"} if the
+    // message can't be processed right now (e.g. a turn is already streaming).
+    std::function<nlohmann::json(const std::string&)> sendMessage;
+
+    // Cancel the in-flight web request (if any).
     std::function<void()> cancelRequest;
+
+    // Returns a JSON array describing the rendered block list — type, sizes,
+    // and per-type previews. Used to verify rendering programmatically.
+    std::function<nlohmann::json()> getBlocks;
+
+    // Toggle a ToolCall block's expanded state by index. Index out of range or
+    // wrong type is silently ignored.
+    std::function<void(int)> toggleTool;
+
+    // Returns {sessions: [{id, cwd, lastUsed}, ...], activeCwd}.
+    std::function<nlohmann::json()> listSessions;
+
+    // Switch the active session to the given cwd (loads from disk + restores
+    // canvas, or seeds a fresh one if the cwd has no saved session yet).
+    // Returns {ok: bool, reason?: string}.
+    std::function<nlohmann::json(const std::string&)> switchSession;
+
+    // Create a fresh session for $HOME (default cwd) without prompting.
+    // Interactive new-session flow goes through the directory dialog instead.
+    std::function<nlohmann::json()> newSession;
+
+    // Set the active model by dropdown index (0=OpenCode Free, 1=DeepSeek
+    // Flash, 2=DeepSeek Pro). Persists via wxConfig. Returns {ok, modelIndex}.
+    // Test hook for driving the provider switch programmatically.
+    std::function<nlohmann::json(int)> setModel;
+
+    // Returns {modelIndex, hasDeepseekKey} — non-secret preferences snapshot
+    // useful for verifying persistence and key-presence in tests. The actual
+    // key value is never returned over MCP.
+    std::function<nlohmann::json()> getPreferences;
 };
 
-// Simple TCP-based JSON-RPC server for controlling Grit programmatically.
-// Listens on port 8765 (or next available), accepts one client at a time.
 class MCPServer {
 public:
     MCPServer();
@@ -59,7 +76,7 @@ public:
 private:
     void ServerLoop();
     void HandleClient(int clientFd);
-    json HandleRequest(const json& request);
+    nlohmann::json HandleRequest(const nlohmann::json& request);
 
     MCPCallbacks cb_;
     std::thread thread_;
