@@ -1,4 +1,5 @@
 #include "chat_frame.h"
+#include "format_u8.h"
 #include "inline_parser.h"
 #include "tools.h"
 #include "preferences.h"
@@ -106,8 +107,8 @@ wxBitmapBundle LoadThemedSvgIcon(const wxString& name, const wxSize& size,
     if (!f.IsOpened() || !f.ReadAll(&svg)) {
         return wxBitmapBundle::FromSVGFile(path, size);  // fallback
     }
-    wxString hex = wxString::Format("#%02X%02X%02X",
-                                    accent.Red(), accent.Green(), accent.Blue());
+    wxString hex = FormatU8("#{:02X}{:02X}{:02X}",
+                            accent.Red(), accent.Green(), accent.Blue());
     svg.Replace("#FFFFFF", hex, true);
     svg.Replace("#ffffff", hex, true);
     auto utf8 = svg.utf8_string();
@@ -939,8 +940,8 @@ void ChatFrame::OnWebRequestState(wxWebRequestEvent& evt) {
         auto resp = evt.GetResponse();
         if (resp.IsOk()) {
             wxString body = resp.AsString();
-            detail = wxString::Format(
-                "Authentication failed (HTTP %d). Check your API key in "
+            detail = FormatU8(
+                "Authentication failed (HTTP {}). Check your API key in "
                 "Settings.", resp.GetStatus());
             if (!body.IsEmpty() && body.length() < 400) {
                 detail += "\n\n" + body;
@@ -955,7 +956,7 @@ void ChatFrame::OnWebRequestState(wxWebRequestEvent& evt) {
     if (state == wxWebRequest::State_Completed) {
         auto resp = evt.GetResponse();
         if (resp.GetStatus() >= 400) {
-            wxString detail = wxString::Format("Error: HTTP %d", resp.GetStatus());
+            wxString detail = FormatU8("Error: HTTP {}", resp.GetStatus());
             wxString body = ExtractErrorBody();
             if (!body.IsEmpty()) detail += "\n\n" + body;
             HandleCompletion(detail);

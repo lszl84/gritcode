@@ -1,4 +1,5 @@
 #include "tools.h"
+#include "format_u8.h"
 
 #include <algorithm>
 #include <cctype>
@@ -273,7 +274,7 @@ WebGetResult WebRequestSync(const wxString& url,
 
     if (r.ok && r.httpStatus >= 400) {
         r.ok = false;
-        r.error = wxString::Format("HTTP %d", r.httpStatus);
+        r.error = FormatU8("HTTP {}", r.httpStatus);
     }
     return r;
 }
