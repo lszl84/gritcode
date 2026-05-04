@@ -3,13 +3,20 @@
 
 #include <algorithm>
 #include <cctype>
+#include <cerrno>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
+#include <ctime>
 #include <filesystem>
 #include <fstream>
 #include <sstream>
 #include <string>
 #include <system_error>
+#include <fcntl.h>
+#include <poll.h>
+#include <signal.h>
+#include <sys/wait.h>
 #include <unistd.h>
 
 #include <wx/event.h>
@@ -111,45 +118,91 @@ std::string ToolEditFile(const nlohmann::json& args) {
     return "Edited " + path;
 }
 
-std::string ToolBash(const nlohmann::json& args) {
+// fork+exec instead of popen so we can put the child in its own process group
+// and SIGTERM the whole group on Escape. popen() doesn't expose the child PID
+// and can't be interrupted from another thread. The pipe is O_CLOEXEC so the
+// child's exec'd program doesn't inherit our fd.
+std::string ToolBash(const nlohmann::json& args, ToolCancelToken* token) {
     std::string cmd = GetStringArg(args, "command");
     if (cmd.empty()) return "Error: missing 'command' argument";
+    if (token && token->cancelled.load()) return "[cancelled]";
 
-    // Write the command to a temp file and run it under `timeout`. This avoids
-    // the quoting hell of inlining arbitrary user code into a `bash -c "..."`.
-    char tmpl[] = "/tmp/wxgrit_bashXXXXXX";
-    int fd = mkstemp(tmpl);
-    if (fd < 0) return "Error: mkstemp failed";
-    if (write(fd, cmd.data(), cmd.size()) != (ssize_t)cmd.size()) {
-        close(fd);
-        unlink(tmpl);
-        return "Error: tempfile write failed";
-    }
-    close(fd);
+    int pfd[2];
+    if (pipe2(pfd, O_CLOEXEC) < 0) return "Error: pipe failed";
 
-    std::string full = "timeout 30 bash " + std::string(tmpl) + " 2>&1";
-    FILE* pipe = popen(full.c_str(), "r");
-    if (!pipe) {
-        unlink(tmpl);
-        return "Error: popen failed";
+    pid_t pid = fork();
+    if (pid < 0) {
+        close(pfd[0]); close(pfd[1]);
+        return "Error: fork failed";
     }
+    if (pid == 0) {
+        // child: become its own process group leader so the parent can signal
+        // the whole tree (timeout → bash → user command) with one kill(-pgid).
+        setpgid(0, 0);
+        dup2(pfd[1], STDOUT_FILENO);
+        dup2(pfd[1], STDERR_FILENO);
+        // pfd[0]/pfd[1] are O_CLOEXEC so they auto-close on exec.
+        execlp("timeout", "timeout", "30", "bash", "-c", cmd.c_str(),
+               (char*)nullptr);
+        _exit(127);
+    }
+
+    // Parent: race-resolve setpgid (either side wins, the other gets EACCES
+    // or succeeds idempotently). Then publish the pgid so Escape can find it.
+    setpgid(pid, pid);
+    if (token) token->activePgid.store(pid);
+    close(pfd[1]);
 
     std::string out;
-    char buf[4096];
     bool truncated = false;
-    while (fgets(buf, sizeof(buf), pipe)) {
-        if (out.size() < kMaxOutput) {
-            out.append(buf);
-            if (out.size() > kMaxOutput) {
-                out.resize(kMaxOutput);
+    bool sentTerm = false;
+    char buf[4096];
+    for (;;) {
+        if (token && token->cancelled.load() && !sentTerm) {
+            kill(-pid, SIGTERM);
+            sentTerm = true;
+        }
+        struct pollfd p{pfd[0], POLLIN, 0};
+        int pr = poll(&p, 1, 100);
+        if (pr < 0) {
+            if (errno == EINTR) continue;
+            break;
+        }
+        if (pr == 0) continue;  // timeout — loop back to recheck cancel
+        if (p.revents & (POLLIN | POLLHUP)) {
+            ssize_t n = read(pfd[0], buf, sizeof(buf));
+            if (n <= 0) break;
+            if (out.size() < kMaxOutput) {
+                out.append(buf, (size_t)n);
+                if (out.size() > kMaxOutput) {
+                    out.resize(kMaxOutput);
+                    truncated = true;
+                }
+            } else {
                 truncated = true;
             }
-        } else {
-            truncated = true;
+        } else if (p.revents & (POLLERR | POLLNVAL)) {
+            break;
         }
     }
-    int status = pclose(pipe);
-    unlink(tmpl);
+    close(pfd[0]);
+
+    int status = 0;
+    // If the child is still running after we sent SIGTERM, give it a brief
+    // grace window then SIGKILL the group so we don't leak processes.
+    if (sentTerm) {
+        for (int i = 0; i < 20; i++) {
+            if (waitpid(pid, &status, WNOHANG) != 0) goto reaped;
+            struct timespec ts{0, 25'000'000};  // 25 ms × 20 = 500 ms grace
+            nanosleep(&ts, nullptr);
+        }
+        kill(-pid, SIGKILL);
+    }
+    waitpid(pid, &status, 0);
+reaped:
+    if (token) token->activePgid.store(0);
+
+    if (token && token->cancelled.load()) return "[cancelled]";
 
     if (truncated) out += "\n[output truncated]";
     if (out.empty()) out = "(no output)";
@@ -159,6 +212,8 @@ std::string ToolBash(const nlohmann::json& args) {
         out += "\n[timed out after 30s]";
     else if (WIFEXITED(status) && WEXITSTATUS(status) != 0)
         out += "\n[exit " + std::to_string(WEXITSTATUS(status)) + "]";
+    else if (WIFSIGNALED(status))
+        out += "\n[killed by signal " + std::to_string(WTERMSIG(status)) + "]";
 
     return out;
 }
@@ -578,12 +633,14 @@ nlohmann::json GetToolDefinitions() {
     return tools;
 }
 
-std::string DispatchTool(const std::string& name, const nlohmann::json& args) {
+std::string DispatchTool(const std::string& name, const nlohmann::json& args,
+                         ToolCancelToken* token) {
+    if (token && token->cancelled.load()) return "[cancelled]";
     try {
         if (name == "read_file")     return CapOutput(ToolReadFile(args));
         if (name == "write_file")    return CapOutput(ToolWriteFile(args));
         if (name == "edit_file")     return CapOutput(ToolEditFile(args));
-        if (name == "bash")          return CapOutput(ToolBash(args));
+        if (name == "bash")          return CapOutput(ToolBash(args, token));
         if (name == "list_directory")return CapOutput(ToolListDirectory(args));
         if (name == "web_fetch")     return ToolWebFetch(args);   // already capped
         if (name == "web_search")    return ToolWebSearch(args);  // already capped

@@ -4,11 +4,13 @@
 #include <wx/textctrl.h>
 #include <wx/bmpbuttn.h>
 #include <wx/webrequest.h>
+#include <wx/thread.h>
 #include <nlohmann/json.hpp>
 #include "chat_canvas.h"
 #include "md_parser.h"
 #include "mcp_server.h"
 #include "session_store.h"
+#include "tools.h"
 #include <memory>
 #include <string>
 #include <vector>
@@ -71,9 +73,14 @@ private:
     };
     std::vector<StreamToolCall> activeToolCalls_;
 
-    // Number of tool dispatch rounds taken in the current user turn. Capped
-    // so the model can't loop forever on a single message.
+    // Number of tool dispatch rounds taken in the current user turn.
+    // Telemetry only — the loop ends when the model stops emitting tool calls.
     int toolIter_ = 0;
+
+    // Shared with the active tool worker thread, if any. Set when a batch
+    // starts in HandleCompletion, cleared in OnToolBatchDone. Escape flips
+    // `cancelled` and signals any in-flight bash subprocess via `activePgid`.
+    std::shared_ptr<ToolCancelToken> currentToolToken_;
 
     // Graceful close — see OnClose.
     bool quitRequested_ = false;
@@ -90,7 +97,12 @@ private:
 
     void OnSend(wxCommandEvent&);
     void OnInputKey(wxKeyEvent&);
+    void OnCharHook(wxKeyEvent&);
     void OnClose(wxCloseEvent&);
+
+    // Cancel whatever is currently in flight: HTTP stream, tool batch, or
+    // both. Safe to call when nothing is running. Wired to Escape.
+    void RequestCancel();
     void OnSessionChoice(wxCommandEvent&);
     void OnModelChoice(wxCommandEvent&);
     void OnSettings(wxCommandEvent&);
@@ -123,6 +135,16 @@ private:
 
     void OnWebRequestData(wxWebRequestEvent&);
     void OnWebRequestState(wxWebRequestEvent&);
+
+    // Worker-thread tool dispatch result (one entry per tool call). Populated
+    // off the GUI thread; consumed in OnToolBatchDone.
+    struct ToolBatchEntry {
+        std::string id;
+        std::string name;
+        std::string argsJson;  // raw arguments string for display
+        std::string result;
+    };
+    void OnToolBatchDone(wxThreadEvent& e);
 
     // After a non-2xx response: pull a human-readable error string out of
     // sseBuf_ (which doubles as raw-body capture under Storage_None).

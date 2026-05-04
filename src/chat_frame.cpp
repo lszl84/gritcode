@@ -12,9 +12,18 @@
 #include <wx/settings.h>
 #include <wx/stdpaths.h>
 #include <future>
+#include <memory>
 #include <sstream>
+#include <thread>
 #include <cstdlib>
+#include <signal.h>
 #include <unistd.h>
+
+// Posted from the tool-dispatch worker thread when a batch completes.
+// Payload is a shared_ptr<vector<ToolBatchEntry>> — shared_ptr so wxThreadEvent's
+// payload copy doesn't slice the move-only vector and the worker can hand off
+// ownership cheaply.
+wxDEFINE_EVENT(wxEVT_TOOL_BATCH_DONE, wxThreadEvent);
 
 namespace {
 
@@ -23,7 +32,6 @@ constexpr int ID_INPUT    = wxID_HIGHEST + 2;
 constexpr int ID_SESSION  = wxID_HIGHEST + 10;
 constexpr int ID_MODEL    = wxID_HIGHEST + 11;
 constexpr int ID_SETTINGS = wxID_HIGHEST + 12;
-constexpr int kMaxToolIters = 10;
 
 // Per-model routing config. Resolved fresh at each StartCompletion so a model
 // change during a tool-call loop applies on the next request.
@@ -206,10 +214,14 @@ ChatFrame::ChatFrame()
 
     Bind(wxEVT_BUTTON, &ChatFrame::OnSend, this, ID_SEND);
     input_->Bind(wxEVT_KEY_DOWN, &ChatFrame::OnInputKey, this);
+    // CHAR_HOOK fires at the frame before any focused child sees the key, so
+    // Escape cancels regardless of where focus is (input, canvas, dropdowns).
+    Bind(wxEVT_CHAR_HOOK, &ChatFrame::OnCharHook, this);
     Bind(wxEVT_CLOSE_WINDOW, &ChatFrame::OnClose, this);
     Bind(wxEVT_WEBREQUEST_DATA, &ChatFrame::OnWebRequestData, this);
     Bind(wxEVT_WEBREQUEST_STATE, &ChatFrame::OnWebRequestState, this);
     Bind(wxEVT_BUTTON, &ChatFrame::OnSettings, this, ID_SETTINGS);
+    Bind(wxEVT_TOOL_BATCH_DONE, &ChatFrame::OnToolBatchDone, this);
     sessionChoice_->Bind(wxEVT_CHOICE, &ChatFrame::OnSessionChoice, this);
     modelChoice_->Bind(wxEVT_CHOICE, &ChatFrame::OnModelChoice, this);
     Bind(wxEVT_SYS_COLOUR_CHANGED,
@@ -467,6 +479,36 @@ void ChatFrame::OnInputKey(wxKeyEvent& e) {
         return;
     }
     e.Skip();
+}
+
+void ChatFrame::OnCharHook(wxKeyEvent& e) {
+    if (e.GetKeyCode() == WXK_ESCAPE && streaming_) {
+        RequestCancel();
+        return;
+    }
+    e.Skip();
+}
+
+void ChatFrame::RequestCancel() {
+    // Cancel the in-flight HTTP stream if there is one. Active and
+    // Unauthorized are the states from which Cancel() is meaningful;
+    // Completed/Failed/Cancelled have already finalized.
+    if (request_.IsOk()) {
+        auto s = request_.GetState();
+        if (s == wxWebRequest::State_Active ||
+            s == wxWebRequest::State_Unauthorized) {
+            request_.Cancel();
+        }
+    }
+    // Signal the tool worker. Setting `cancelled` makes the worker bail out
+    // between tools and the bash poll loop bail mid-tool. Sending SIGTERM to
+    // the active pgid kills the bash subtree without waiting for the worker
+    // to notice — important when bash is blocked on something slow.
+    if (auto tok = currentToolToken_) {
+        tok->cancelled.store(true);
+        int pgid = tok->activePgid.load();
+        if (pgid > 0) ::kill(-pgid, SIGTERM);
+    }
 }
 
 void ChatFrame::ReloadToolbarIcons() {
@@ -1044,34 +1086,84 @@ void ChatFrame::HandleCompletion(const wxString& errorIfFailed) {
     }
     history_.push_back(std::move(assistantMsg));
 
-    // Dispatch each tool, render a block, and append the tool result message.
+    // Dispatch each tool on a worker thread so blocking I/O (bash popen,
+    // file reads, web fetches) never freezes the UI. Pre-parse arguments on
+    // the GUI thread — cheap, and lets us avoid touching nlohmann from the
+    // worker except for what DispatchTool already does internally.
+    struct ToolJob {
+        std::string id;
+        std::string name;
+        std::string argsJson;
+        nlohmann::json argsParsed;
+    };
+    auto jobs = std::make_shared<std::vector<ToolJob>>();
+    jobs->reserve(activeToolCalls_.size());
     for (const auto& tc : activeToolCalls_) {
-        nlohmann::json args = nlohmann::json::object();
+        ToolJob job;
+        job.id = tc.id;
+        job.name = tc.name;
+        job.argsJson = tc.args;
         if (!tc.args.empty()) {
             try {
-                args = nlohmann::json::parse(tc.args);
+                job.argsParsed = nlohmann::json::parse(tc.args);
             } catch (...) {
-                // Leave args as empty object; DispatchTool will report missing args.
+                job.argsParsed = nlohmann::json::object();
             }
+        } else {
+            job.argsParsed = nlohmann::json::object();
         }
+        jobs->push_back(std::move(job));
+    }
 
-        std::string result = DispatchTool(tc.name, args);
-        RenderToolBlock(tc.name, tc.args, result);
+    auto token = std::make_shared<ToolCancelToken>();
+    currentToolToken_ = token;
 
+    std::thread([this, jobs, token]() {
+        auto results = std::make_shared<std::vector<ToolBatchEntry>>();
+        results->reserve(jobs->size());
+        for (auto& job : *jobs) {
+            std::string r;
+            if (token->cancelled.load()) {
+                r = "[cancelled]";
+            } else {
+                r = DispatchTool(job.name, job.argsParsed, token.get());
+            }
+            results->push_back({std::move(job.id), std::move(job.name),
+                                std::move(job.argsJson), std::move(r)});
+        }
+        auto* ev = new wxThreadEvent(wxEVT_TOOL_BATCH_DONE);
+        ev->SetPayload(results);
+        wxQueueEvent(this, ev);
+    }).detach();
+}
+
+void ChatFrame::OnToolBatchDone(wxThreadEvent& e) {
+    auto results = e.GetPayload<std::shared_ptr<std::vector<ToolBatchEntry>>>();
+    bool wasCancelled = currentToolToken_ && currentToolToken_->cancelled.load();
+    currentToolToken_.reset();
+    if (!results) return;
+
+    for (auto& r : *results) {
+        RenderToolBlock(r.name, r.argsJson, r.result);
         history_.push_back({
             {"role", "tool"},
-            {"tool_call_id", tc.id},
-            {"name", tc.name},
-            {"content", result},
+            {"tool_call_id", r.id},
+            {"name", r.name},
+            {"content", r.result},
         });
     }
 
-    if (++toolIter_ > kMaxToolIters) {
-        RenderErrorBlock(wxString::Format(
-            "Tool iteration limit (%d) reached — stopping.", kMaxToolIters));
+    if (wasCancelled) {
+        // User hit Escape during tool execution. The assistant's tool_calls
+        // message and any tool results (real or "[cancelled]") are already in
+        // history, so the next user turn replays cleanly. Stop the loop here
+        // and surface a marker block.
+        RenderErrorBlock("Cancelled.");
         FinalizeTurn();
         return;
     }
+
+    toolIter_++;
 
     // Continue the conversation with another completion request.
     StartCompletion();
