@@ -1,5 +1,6 @@
 #include "tools.h"
 #include "format_u8.h"
+#include "streaming_web_request.h"
 
 #include <algorithm>
 #include <cctype>
@@ -18,11 +19,6 @@
 #include <signal.h>
 #include <sys/wait.h>
 #include <unistd.h>
-
-#include <wx/event.h>
-#include <wx/evtloop.h>
-#include <wx/string.h>
-#include <wx/webrequest.h>
 
 namespace {
 
@@ -255,87 +251,18 @@ std::string ToolListDirectory(const nlohmann::json& args) {
 
 // ---------------- web tools ----------------
 
-// Synchronous HTTP GET via wxWebRequest + nested event loop. Tools are
-// dispatched on the GUI thread between completion turns; running a nested
-// loop here keeps the UI responsive (paint, etc.) while we wait.
-struct WebGetResult {
-    bool ok = false;
-    int httpStatus = 0;
-    wxString contentType;
-    std::string body;   // raw bytes
-    wxString error;
-};
-
-// Generic synchronous HTTP via wxWebRequest. method=="POST" means send `body`
-// with `contentType`; otherwise GET. Extra headers are applied on top of the
-// defaults (User-Agent, Accept).
-WebGetResult WebRequestSync(const wxString& url,
-                            const wxString& method = "GET",
-                            const std::string& body = {},
-                            const wxString& contentType = "application/json",
-                            const std::vector<std::pair<wxString, wxString>>& extraHeaders = {}) {
-    WebGetResult r;
-
-    wxEvtHandler handler;
-    auto request = wxWebSession::GetDefault().CreateRequest(&handler, url);
-    if (!request.IsOk()) {
-        r.error = "wxWebRequest creation failed";
-        return r;
-    }
-    request.SetHeader("User-Agent",
+// HTTP for the web tools is a blocking call on the tool worker thread (tools
+// already run off the GUI thread, so blocking is fine and there's no nested
+// event loop to juggle). The defaults below match what a browser would send
+// so search engines and CDNs don't 403 on a missing UA.
+WebRequestSpec MakeWebSpec(const std::string& url) {
+    WebRequestSpec spec;
+    spec.url = url;
+    spec.headers.push_back({"User-Agent",
         "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
-        "(KHTML, like Gecko) Chrome/120.0 Safari/537.36 wx_gritcode");
-    request.SetHeader("Accept", "*/*");
-    for (const auto& h : extraHeaders) request.SetHeader(h.first, h.second);
-    if (method.Upper() == "POST") {
-        request.SetMethod("POST");
-        request.SetData(wxString::FromUTF8(body), contentType);
-    }
-    request.SetStorage(wxWebRequest::Storage_None);
-
-    wxEventLoop loop;
-
-    handler.Bind(wxEVT_WEBREQUEST_DATA,
-        [&r](wxWebRequestEvent& e) {
-            const char* p = static_cast<const char*>(e.GetDataBuffer());
-            size_t n = e.GetDataSize();
-            if (p && n) r.body.append(p, n);
-        });
-
-    handler.Bind(wxEVT_WEBREQUEST_STATE,
-        [&r, &loop](wxWebRequestEvent& e) {
-            switch (e.GetState()) {
-            case wxWebRequest::State_Completed:
-                r.ok = true;
-                r.httpStatus = e.GetResponse().GetStatus();
-                r.contentType = e.GetResponse().GetMimeType();
-                loop.Exit(0);
-                break;
-            case wxWebRequest::State_Failed:
-            case wxWebRequest::State_Cancelled:
-            case wxWebRequest::State_Unauthorized:
-                r.ok = false;
-                r.error = e.GetErrorDescription();
-                if (r.error.IsEmpty()) r.error = "request failed";
-                loop.Exit(1);
-                break;
-            default:
-                break;
-            }
-        });
-
-    request.Start();
-    loop.Run();
-
-    if (r.ok && r.httpStatus >= 400) {
-        r.ok = false;
-        r.error = FormatU8("HTTP {}", r.httpStatus);
-    }
-    return r;
-}
-
-WebGetResult WebGetSync(const wxString& url) {
-    return WebRequestSync(url);
+        "(KHTML, like Gecko) Chrome/120.0 Safari/537.36 wx_gritcode"});
+    spec.headers.push_back({"Accept", "*/*"});
+    return spec;
 }
 
 std::string ToLower(std::string s) {
@@ -470,13 +397,12 @@ std::string ToolWebFetch(const nlohmann::json& args) {
     if (url.empty()) return "Error: missing 'url' argument";
     if (url.find("://") == std::string::npos) url = "https://" + url;
 
-    auto r = WebGetSync(wxString::FromUTF8(url));
-    if (!r.ok) return "Error: " + r.error.ToStdString();
+    auto r = RequestSync(MakeWebSpec(url));
+    if (!r.ok) return "Error: " + r.error;
 
-    std::string ctLower = ToLower(r.contentType.ToStdString());
     std::string text;
-    if (ctLower.find("html") != std::string::npos
-        || (ctLower.empty() && r.body.find("<html") != std::string::npos))
+    if (r.contentType.find("html") != std::string::npos
+        || (r.contentType.empty() && r.body.find("<html") != std::string::npos))
         text = StripHtml(r.body);
     else
         text = r.body;
@@ -515,10 +441,13 @@ std::string ToolWebSearch(const nlohmann::json& args) {
     std::string body = req.dump(-1, ' ', false,
                                  nlohmann::json::error_handler_t::replace);
 
-    auto r = WebRequestSync(wxString::FromUTF8(url), "POST", body,
-                            "application/json",
-                            {{"Accept", "application/json, text/event-stream"}});
-    if (!r.ok) return "Error: " + r.error.ToStdString();
+    WebRequestSpec spec = MakeWebSpec(url);
+    spec.method = "POST";
+    spec.body = std::move(body);
+    spec.bodyContentType = "application/json";
+    spec.headers.push_back({"Accept", "application/json, text/event-stream"});
+    auto r = RequestSync(std::move(spec));
+    if (!r.ok) return "Error: " + r.error;
 
     // Walk SSE events, find the first `data: {...}` line and extract
     // result.content[0].text.

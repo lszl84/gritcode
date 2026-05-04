@@ -20,7 +20,7 @@ FetchContent_Declare(
 FetchContent_MakeAvailable(nlohmann_json)
 
 # ---- wxWidgets: try system first, fall back to FetchContent ----
-find_package(wxWidgets QUIET COMPONENTS net core base)
+find_package(wxWidgets QUIET COMPONENTS core base)
 
 if(NOT wxWidgets_FOUND)
     message(STATUS "wxWidgets not found in system — building from source (FetchContent)")
@@ -38,24 +38,16 @@ if(NOT wxWidgets_FOUND)
         EXCLUDE_FROM_ALL
     )
     FetchContent_MakeAvailable(wxWidgets)
-
-    # When built from source the targets are plain library names.
-    set(WX_LIBS wxcore wxnet)
-
-    # wxWidgets 3.2 built from source via CMake doesn't propagate libcurl
-    # as a transitive link dep on Linux even though wxWebRequest uses it
-    # at runtime. https://github.com/wxWidgets/wxWidgets/issues/22860
-    if(UNIX AND NOT APPLE)
-        find_package(CURL REQUIRED)
-        list(APPEND WX_LIBS CURL::libcurl)
-    endif()
+    set(WX_LIBS wxcore)
 else()
     message(STATUS "Using system wxWidgets ${wxWidgets_VERSION_STRING}")
     include(${wxWidgets_USE_FILE})
-    # System wxWidgets provides ${wxWidgets_LIBRARIES} with full paths,
-    # including transitive deps like libcurl resolved via wx-config.
     set(WX_LIBS ${wxWidgets_LIBRARIES})
 endif()
+
+# libcurl backs StreamingWebRequest. We use it directly — wxnet/wxWebRequest
+# is no longer linked.
+find_package(CURL REQUIRED)
 
 # ---- Sources ----
 set(SRCS
@@ -70,6 +62,7 @@ set(SRCS
     src/shell_env.cpp
     src/preferences.cpp
     src/settings_dialog.cpp
+    src/streaming_web_request.cpp
 )
 
 if(APPLE)
@@ -121,6 +114,7 @@ endif()
 target_link_libraries(wx_gritcode PRIVATE
     ${WX_LIBS}
     nlohmann_json::nlohmann_json
+    CURL::libcurl
 )
 
 # On GTK builds we touch GtkSettings directly to disable theme animations on

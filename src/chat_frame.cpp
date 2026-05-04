@@ -218,8 +218,6 @@ ChatFrame::ChatFrame()
     // Escape cancels regardless of where focus is (input, canvas, dropdowns).
     Bind(wxEVT_CHAR_HOOK, &ChatFrame::OnCharHook, this);
     Bind(wxEVT_CLOSE_WINDOW, &ChatFrame::OnClose, this);
-    Bind(wxEVT_WEBREQUEST_DATA, &ChatFrame::OnWebRequestData, this);
-    Bind(wxEVT_WEBREQUEST_STATE, &ChatFrame::OnWebRequestState, this);
     Bind(wxEVT_BUTTON, &ChatFrame::OnSettings, this, ID_SETTINGS);
     Bind(wxEVT_TOOL_BATCH_DONE, &ChatFrame::OnToolBatchDone, this);
     sessionChoice_->Bind(wxEVT_CHOICE, &ChatFrame::OnSessionChoice, this);
@@ -272,12 +270,6 @@ ChatFrame::ChatFrame()
                 return {{"sent", false}, {"reason", "streaming"}};
             }
             input_->SetValue(text);
-            // Defer the actual OnSend → StartCompletion → wxWebRequest::Start
-            // chain to a later event-loop iteration. This lets any pending
-            // wxWebRequest state cleanup (especially after a recent Cancel())
-            // fully drain before a new TLS connection is opened — without
-            // the deferral, libcurl-multi has been observed to reuse a
-            // freshly-closed fd in ways that scramble unrelated sockets.
             CallAfter([this]() {
                 wxCommandEvent ev(wxEVT_BUTTON, ID_SEND);
                 OnSend(ev);
@@ -286,14 +278,7 @@ ChatFrame::ChatFrame()
         });
     };
     cb.cancelRequest = [this]() {
-        CallAfter([this]() {
-            if (!request_.IsOk()) return;
-            auto s = request_.GetState();
-            if (s == wxWebRequest::State_Active ||
-                s == wxWebRequest::State_Unauthorized) {
-                request_.Cancel();
-            }
-        });
+        CallAfter([this]() { request_.Cancel(); });
     };
     cb.getBlocks = [this, guiSync]() {
         return guiSync([this]() { return BuildBlocksSnapshot(); });
@@ -377,9 +362,9 @@ ChatFrame::ChatFrame()
 
 ChatFrame::~ChatFrame() {
     mcp_.Stop();
-    if (request_.IsOk() && request_.GetState() == wxWebRequest::State_Active) {
-        request_.Cancel();
-    }
+    request_.Cancel();
+    // ~StreamingWebRequest joins the worker thread, so by the time we return
+    // no more callbacks can be posted.
 }
 
 nlohmann::json ChatFrame::BuildBlocksSnapshot() const {
@@ -461,10 +446,12 @@ nlohmann::json ChatFrame::BuildConversationSnapshot() const {
 }
 
 void ChatFrame::OnClose(wxCloseEvent& evt) {
-    if (request_.IsOk() && request_.GetState() == wxWebRequest::State_Active) {
+    if (request_.IsActive()) {
         quitRequested_ = true;
         Hide();
-        CallAfter([this]() { request_.Cancel(); });
+        request_.Cancel();
+        // The worker will deliver a final OnStreamDone via CallAfter; that
+        // path checks quitRequested_ and re-fires Close() once we're idle.
         evt.Veto();
     } else {
         PersistActive();
@@ -490,16 +477,8 @@ void ChatFrame::OnCharHook(wxKeyEvent& e) {
 }
 
 void ChatFrame::RequestCancel() {
-    // Cancel the in-flight HTTP stream if there is one. Active and
-    // Unauthorized are the states from which Cancel() is meaningful;
-    // Completed/Failed/Cancelled have already finalized.
-    if (request_.IsOk()) {
-        auto s = request_.GetState();
-        if (s == wxWebRequest::State_Active ||
-            s == wxWebRequest::State_Unauthorized) {
-            request_.Cancel();
-        }
-    }
+    // Idempotent on a finished request — Cancel just sets an atomic.
+    request_.Cancel();
     // Signal the tool worker. Setting `cancelled` makes the worker bail out
     // between tools and the bash poll loop bail mid-tool. Sending SIGTERM to
     // the active pgid kills the bash subtree without waiting for the worker
@@ -839,31 +818,31 @@ void ChatFrame::StartCompletion() {
     std::string body = req.dump(-1, ' ', false,
                                 nlohmann::json::error_handler_t::replace);
 
-    request_ = wxWebSession::GetDefault().CreateRequest(this, route.url);
-    if (!request_.IsOk()) {
-        RenderErrorBlock("wxWebRequest creation failed");
-        FinalizeTurn();
-        return;
-    }
-
-    request_.SetMethod("POST");
-    request_.SetHeader("Content-Type", "application/json");
-    request_.SetHeader("Accept", "text/event-stream");
+    WebRequestSpec spec;
+    spec.url = route.url;
+    spec.method = "POST";
+    spec.body = std::move(body);
+    spec.bodyContentType = "application/json";
+    spec.headers.push_back({"Accept", "text/event-stream"});
     if (route.needsApiKey) {
-        request_.SetHeader("Authorization", "Bearer " + apiKey);
+        spec.headers.push_back({"Authorization",
+                                "Bearer " + std::string(apiKey.utf8_string())});
     }
-    request_.SetData(wxString::FromUTF8(body), "application/json");
-    request_.SetStorage(wxWebRequest::Storage_None);
+    // Without an idle watchdog a half-closed SSE stream (server FIN with no
+    // [DONE]) would leave the request hanging forever. 60 s is generous enough
+    // to ride out a slow first token but tight enough to surface a stuck
+    // connection in a recoverable amount of time.
+    spec.idleTimeoutSeconds = 60;
 
-    request_.Start();
+    request_ = StreamingWebRequest(
+        this, std::move(spec),
+        [this](std::string_view chunk) { OnStreamData(chunk); },
+        [this](WebResponse resp) { OnStreamDone(std::move(resp)); });
 }
 
-void ChatFrame::OnWebRequestData(wxWebRequestEvent& evt) {
-    const void* buf = evt.GetDataBuffer();
-    size_t size = evt.GetDataSize();
-    if (!buf || !size) return;
-
-    sseBuf_.append(static_cast<const char*>(buf), size);
+void ChatFrame::OnStreamData(std::string_view chunk) {
+    if (chunk.empty()) return;
+    sseBuf_.append(chunk.data(), chunk.size());
 
     size_t pos;
     while ((pos = sseBuf_.find("\n\n")) != std::string::npos) {
@@ -930,28 +909,11 @@ void ChatFrame::OnWebRequestData(wxWebRequestEvent& evt) {
     }
 }
 
-void ChatFrame::OnWebRequestState(wxWebRequestEvent& evt) {
-    auto state = evt.GetState();
-
-    if (state == wxWebRequest::State_Active) return;
-
-    if (state == wxWebRequest::State_Cancelled) {
-        if (quitRequested_) {
-            Close();
-            return;
-        }
-        // streaming_=false means we already finalized this turn through
-        // another path (e.g. State_Unauthorized → Cancel()) and the Cancelled
-        // event is a tail signal from that internal cleanup. Don't double-
-        // render the "Cancelled." block on top of the real error.
-        if (!streaming_) return;
-        // User-initiated cancel: flush whatever streamed so far, render an
-        // error block, and unlock the UI. Without this the send button stays
-        // disabled and streaming_ stays true forever.
-        if (mdStream_) mdStream_->Flush();
-        mdStream_.reset();
-        RenderErrorBlock("Cancelled.");
-        FinalizeTurn();
+void ChatFrame::OnStreamDone(WebResponse resp) {
+    // The user closed the window while a stream was in flight. The Cancel
+    // already short-circuited the worker; just complete the close now.
+    if (quitRequested_) {
+        Close();
         return;
     }
 
@@ -960,52 +922,39 @@ void ChatFrame::OnWebRequestState(wxWebRequestEvent& evt) {
     if (mdStream_) mdStream_->Flush();
     mdStream_.reset();
 
-    if (state == wxWebRequest::State_Failed) {
-        // wxWebRequest reports HTTP >= 400 as State_Failed when the body is
-        // received via wxEVT_WEBREQUEST_DATA (Storage_None). The body bytes
-        // are sitting in sseBuf_ — surface them so the user sees the actual
-        // upstream error instead of an empty "(400)".
-        wxString detail = "Error: " + evt.GetErrorDescription();
+    if (!resp.ok && resp.error == "cancelled") {
+        if (!streaming_) return;
+        RenderErrorBlock("Cancelled.");
+        FinalizeTurn();
+        return;
+    }
+
+    if (resp.status == 401) {
+        wxString detail = FormatU8(
+            "Authentication failed (HTTP {}). Check your API key in Settings.",
+            resp.status);
+        wxString body = ExtractErrorBody();
+        if (!body.IsEmpty() && body.length() < 400) {
+            detail += "\n\n" + body;
+        }
+        HandleCompletion(detail);
+        return;
+    }
+
+    if (!resp.ok) {
+        wxString detail;
+        if (resp.status > 0) {
+            detail = FormatU8("Error: HTTP {}", resp.status);
+        } else {
+            detail = "Error: " + wxString::FromUTF8(resp.error);
+        }
         wxString body = ExtractErrorBody();
         if (!body.IsEmpty()) detail += "\n\n" + body;
         HandleCompletion(detail);
         return;
     }
 
-    if (state == wxWebRequest::State_Unauthorized) {
-        // wxWebRequest expects us to call SetCredentials() to retry, but for
-        // an OpenAI-style API the only meaningful response to 401 is to fail
-        // hard and tell the user to fix their key. Cancel() so the request
-        // moves to a terminal state and doesn't tie up the connection.
-        request_.Cancel();
-        wxString detail;
-        auto resp = evt.GetResponse();
-        if (resp.IsOk()) {
-            wxString body = resp.AsString();
-            detail = FormatU8(
-                "Authentication failed (HTTP {}). Check your API key in "
-                "Settings.", resp.GetStatus());
-            if (!body.IsEmpty() && body.length() < 400) {
-                detail += "\n\n" + body;
-            }
-        } else {
-            detail = "Authentication failed. Check your API key in Settings.";
-        }
-        HandleCompletion(detail);
-        return;
-    }
-
-    if (state == wxWebRequest::State_Completed) {
-        auto resp = evt.GetResponse();
-        if (resp.GetStatus() >= 400) {
-            wxString detail = FormatU8("Error: HTTP {}", resp.GetStatus());
-            wxString body = ExtractErrorBody();
-            if (!body.IsEmpty()) detail += "\n\n" + body;
-            HandleCompletion(detail);
-            return;
-        }
-        HandleCompletion(wxString());
-    }
+    HandleCompletion(wxString());
 }
 
 wxString ChatFrame::ExtractErrorBody() const {

@@ -3,13 +3,13 @@
 #include <wx/choice.h>
 #include <wx/textctrl.h>
 #include <wx/bmpbuttn.h>
-#include <wx/webrequest.h>
 #include <wx/thread.h>
 #include <nlohmann/json.hpp>
 #include "chat_canvas.h"
 #include "md_parser.h"
 #include "mcp_server.h"
 #include "session_store.h"
+#include "streaming_web_request.h"
 #include "tools.h"
 #include <memory>
 #include <string>
@@ -49,7 +49,7 @@ private:
 
     ModelChoice currentModel_ = ModelChoice::OpencodeFree;
 
-    wxWebRequest request_;
+    StreamingWebRequest request_;
     std::unique_ptr<MdStream> mdStream_;
 
     // Chat history as raw OpenAI-format messages. System prompt is the first
@@ -133,8 +133,12 @@ private:
     // stay readable when the user toggles light/dark themes.
     void ReloadToolbarIcons();
 
-    void OnWebRequestData(wxWebRequestEvent&);
-    void OnWebRequestState(wxWebRequestEvent&);
+    // Streaming HTTP callbacks (delivered on the GUI thread via CallAfter).
+    // OnStreamData appends to sseBuf_ and parses any complete SSE events.
+    // OnStreamDone fires once with the final WebResponse and runs the same
+    // post-stream finalization as the old OnWebRequestState handler did.
+    void OnStreamData(std::string_view chunk);
+    void OnStreamDone(WebResponse resp);
 
     // Worker-thread tool dispatch result (one entry per tool call). Populated
     // off the GUI thread; consumed in OnToolBatchDone.
