@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <cctype>
 #include <cerrno>
+#include <chrono>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -149,53 +150,71 @@ std::string ToolBash(const nlohmann::json& args, ToolCancelToken* token) {
     if (token) token->activePgid.store(pid);
     close(pfd[1]);
 
+    // Loop terminates on direct-child exit, NOT on pipe EOF. Bash commands
+    // that disown setsid'd grandchildren (e.g. `setsid foo &>/dev/null &
+    // disown`) leave the pipe write end open in those grandchildren forever;
+    // gating on pipe EOF would hang us in poll() indefinitely. Once the
+    // direct child exits we drain whatever's still queued and stop.
+    auto append = [&](const char* data, size_t n, std::string& out, bool& truncated) {
+        if (out.size() >= kMaxOutput) { truncated = true; return; }
+        out.append(data, n);
+        if (out.size() > kMaxOutput) { out.resize(kMaxOutput); truncated = true; }
+    };
+
     std::string out;
     bool truncated = false;
     bool sentTerm = false;
+    bool sentKill = false;
+    bool pipeEof = false;
+    int status = 0;
     char buf[4096];
+    auto killDeadline = std::chrono::steady_clock::time_point::max();
+
     for (;;) {
         if (token && token->cancelled.load() && !sentTerm) {
             kill(-pid, SIGTERM);
             sentTerm = true;
+            killDeadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(500);
         }
-        struct pollfd p{pfd[0], POLLIN, 0};
-        int pr = poll(&p, 1, 100);
-        if (pr < 0) {
-            if (errno == EINTR) continue;
-            break;
+        if (sentTerm && !sentKill && std::chrono::steady_clock::now() >= killDeadline) {
+            kill(-pid, SIGKILL);
+            sentKill = true;
         }
-        if (pr == 0) continue;  // timeout — loop back to recheck cancel
-        if (p.revents & (POLLIN | POLLHUP)) {
-            ssize_t n = read(pfd[0], buf, sizeof(buf));
-            if (n <= 0) break;
-            if (out.size() < kMaxOutput) {
-                out.append(buf, (size_t)n);
-                if (out.size() > kMaxOutput) {
-                    out.resize(kMaxOutput);
-                    truncated = true;
-                }
-            } else {
-                truncated = true;
+
+        if (!pipeEof) {
+            struct pollfd p{pfd[0], POLLIN, 0};
+            int pr = poll(&p, 1, 100);
+            if (pr < 0 && errno != EINTR) {
+                pipeEof = true;
+            } else if (pr > 0 && (p.revents & (POLLIN | POLLHUP))) {
+                ssize_t n = read(pfd[0], buf, sizeof(buf));
+                if (n > 0) append(buf, (size_t)n, out, truncated);
+                else if (n == 0) pipeEof = true;
+                else if (errno != EINTR && errno != EAGAIN) pipeEof = true;
             }
-        } else if (p.revents & (POLLERR | POLLNVAL)) {
+        } else {
+            // Pipe is dead, just wait for the child without busy-spinning.
+            struct timespec ts{0, 50'000'000};  // 50 ms
+            nanosleep(&ts, nullptr);
+        }
+
+        pid_t r = waitpid(pid, &status, WNOHANG);
+        if (r == pid) {
+            // Direct child gone. Final non-blocking drain of anything still
+            // sitting in the kernel buffer for us, then exit.
+            if (!pipeEof) {
+                int flags = fcntl(pfd[0], F_GETFL, 0);
+                fcntl(pfd[0], F_SETFL, flags | O_NONBLOCK);
+                for (;;) {
+                    ssize_t n = read(pfd[0], buf, sizeof(buf));
+                    if (n <= 0) break;
+                    append(buf, (size_t)n, out, truncated);
+                }
+            }
             break;
         }
     }
     close(pfd[0]);
-
-    int status = 0;
-    // If the child is still running after we sent SIGTERM, give it a brief
-    // grace window then SIGKILL the group so we don't leak processes.
-    if (sentTerm) {
-        for (int i = 0; i < 20; i++) {
-            if (waitpid(pid, &status, WNOHANG) != 0) goto reaped;
-            struct timespec ts{0, 25'000'000};  // 25 ms × 20 = 500 ms grace
-            nanosleep(&ts, nullptr);
-        }
-        kill(-pid, SIGKILL);
-    }
-    waitpid(pid, &status, 0);
-reaped:
     if (token) token->activePgid.store(0);
 
     if (token && token->cancelled.load()) return "[cancelled]";
