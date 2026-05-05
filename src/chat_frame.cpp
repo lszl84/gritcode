@@ -179,7 +179,9 @@ ChatFrame::ChatFrame()
     outer->Add(inputRow, 0, wxEXPAND);
     outer->Add(toolbarRow, 0, wxEXPAND | wxTOP, 4);
 
-    panel->SetSizer(outer);
+    auto* root = new wxBoxSizer(wxVERTICAL);
+    root->Add(outer, 1, wxEXPAND | wxALL, FromDIP(2));
+    panel->SetSizer(root);
 
     // Open the most recent session if one exists; otherwise seed one for the
     // default cwd so the dropdown always has at least one entry.
