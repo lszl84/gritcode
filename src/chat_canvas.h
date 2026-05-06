@@ -80,6 +80,13 @@ private:
     wxTimer animTimer_;
     double animPhase_ = 0;
 
+    // Debounce timer for resize. EVT_SIZE only restarts this timer; the actual
+    // (potentially expensive) Relayout runs once it fires, after the user
+    // stops dragging. In the meantime OnPaint reuses the cached layout — only
+    // re-centering it at the new client width — so window edges track the
+    // cursor without re-wrapping every block per frame.
+    wxTimer resizeTimer_;
+
     // Cached bounding rect of the thinking dots in canvas (unscrolled) coords,
     // updated each paint while thinking_ is on. Lets the anim tick invalidate
     // only the dots area instead of the whole canvas.
@@ -93,6 +100,7 @@ private:
     void OnMotion(wxMouseEvent& e);
     void OnKeyDown(wxKeyEvent& e);
     void OnAnimTick(wxTimerEvent& e);
+    void OnResizeSettle(wxTimerEvent& e);
     void OnSysColourChanged(wxSysColourChangedEvent& e);
     void OnScrollWin(wxScrollWinEvent& e);
     void OnMouseWheel(wxMouseEvent& e);
