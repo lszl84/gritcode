@@ -5,12 +5,15 @@
 #include "preferences.h"
 #include "settings_dialog.h"
 #include <wx/sizer.h>
+#include <wx/wrapsizer.h>
+#include <wx/stattext.h>
 #include <wx/filename.h>
 #include <wx/file.h>
 #include <wx/dirdlg.h>
 #include <wx/bmpbndl.h>
 #include <wx/settings.h>
 #include <wx/stdpaths.h>
+#include <algorithm>
 #include <future>
 #include <memory>
 #include <sstream>
@@ -27,8 +30,10 @@ wxDEFINE_EVENT(wxEVT_TOOL_BATCH_DONE, wxThreadEvent);
 
 namespace {
 
-constexpr int ID_SEND     = wxID_HIGHEST + 1;
-constexpr int ID_INPUT    = wxID_HIGHEST + 2;
+constexpr int ID_SEND          = wxID_HIGHEST + 1;
+constexpr int ID_INPUT         = wxID_HIGHEST + 2;
+constexpr int ID_QUEUE_CONTINUE = wxID_HIGHEST + 3;
+constexpr int ID_QUEUE_CLEAR    = wxID_HIGHEST + 4;
 constexpr int ID_SESSION  = wxID_HIGHEST + 10;
 constexpr int ID_MODEL    = wxID_HIGHEST + 11;
 constexpr int ID_SETTINGS = wxID_HIGHEST + 12;
@@ -169,13 +174,29 @@ ChatFrame::ChatFrame()
     toolbarRow->AddStretchSpacer(8);
     toolbarRow->Add(settingsBtn_, 0, wxALIGN_CENTER_VERTICAL);
 
+    // Chip row — wraps to multiple lines if the queue gets long. Hidden
+    // (via sizer Show) until the queue has at least one entry.
+    chipRow_ = new wxPanel(panel);
+    chipSizer_ = new wxBoxSizer(wxVERTICAL);
+    chipRow_->SetSizer(chipSizer_);
+    chipRow_->Hide();
+
     auto* inputRow = new wxBoxSizer(wxHORIZONTAL);
     input_ = new wxTextCtrl(panel, ID_INPUT, "",
                             wxDefaultPosition, wxSize(-1, 60),
                             wxTE_MULTILINE | wxTE_PROCESS_ENTER);
     sendBtn_ = new wxButton(panel, ID_SEND, "Send");
+    // Queue-mode buttons share the input row's slot; hidden until idle-queue.
+    continueQueueBtn_ = new wxButton(panel, ID_QUEUE_CONTINUE, "Continue");
+    clearQueueBtn_ = new wxButton(panel, ID_QUEUE_CLEAR, "Clear queue");
+    continueQueueBtn_->Hide();
+    clearQueueBtn_->Hide();
+
     inputRow->Add(input_, 1, wxEXPAND | wxTOP, 6);
+    inputRow->Add(continueQueueBtn_, 1, wxEXPAND | wxRIGHT | wxTOP, 6);
+    inputRow->Add(clearQueueBtn_, 0, wxALIGN_CENTER_VERTICAL | wxTOP, 6);
     inputRow->Add(sendBtn_, 0, wxALIGN_CENTER_VERTICAL | wxLEFT | wxTOP, 6);
+    outer->Add(chipRow_, 0, wxEXPAND | wxTOP, 4);
     outer->Add(inputRow, 0, wxEXPAND);
     outer->Add(toolbarRow, 0, wxEXPAND | wxTOP, 4);
 
@@ -215,6 +236,8 @@ ChatFrame::ChatFrame()
     RestoreCanvasFromHistory();
 
     Bind(wxEVT_BUTTON, &ChatFrame::OnSend, this, ID_SEND);
+    Bind(wxEVT_BUTTON, &ChatFrame::OnContinueQueue, this, ID_QUEUE_CONTINUE);
+    Bind(wxEVT_BUTTON, &ChatFrame::OnClearQueue, this, ID_QUEUE_CLEAR);
     input_->Bind(wxEVT_KEY_DOWN, &ChatFrame::OnInputKey, this);
     // CHAR_HOOK fires at the frame before any focused child sees the key, so
     // Escape cancels regardless of where focus is (input, canvas, dropdowns).
@@ -242,10 +265,14 @@ ChatFrame::ChatFrame()
     MCPCallbacks cb;
     cb.getStatus = [this, guiSync]() {
         return guiSync([this]() -> nlohmann::json {
+            nlohmann::json queue = nlohmann::json::array();
+            for (const auto& q : pendingQueue_) queue.push_back(q);
             return {
                 {"streaming", streaming_},
                 {"toolIter", toolIter_},
                 {"historyLen", (int)history_.size()},
+                {"pendingQueue", std::move(queue)},
+                {"continueQueueVisible", continueQueueBtn_->IsShown()},
             };
         });
     };
@@ -266,10 +293,16 @@ ChatFrame::ChatFrame()
         wxString text = wxString::FromUTF8(msg);
         // Synchronous part: validate state and stage the input. Done on the
         // GUI thread under guiSync so the caller learns immediately whether
-        // the message was accepted.
+        // the message was accepted (or queued, or rejected as full).
         return guiSync([this, text]() -> nlohmann::json {
             if (streaming_) {
-                return {{"sent", false}, {"reason", "streaming"}};
+                if (pendingQueue_.size() >= kMaxQueue_) {
+                    return {{"sent", false}, {"reason", "queue_full"}};
+                }
+                pendingQueue_.push_back(text.ToStdString(wxConvUTF8));
+                UpdateQueueUI();
+                return {{"sent", true}, {"queued", true},
+                        {"queueLen", (int)pendingQueue_.size()}};
             }
             input_->SetValue(text);
             CallAfter([this]() {
@@ -704,10 +737,21 @@ void ChatFrame::OnSettings(wxCommandEvent&) {
 }
 
 void ChatFrame::OnSend(wxCommandEvent&) {
-    if (streaming_) return;
     wxString text = input_->GetValue();
     text.Trim().Trim(false);
     if (text.IsEmpty()) return;
+
+    // Agent busy: append to the queue (the Send button is "Add" while busy).
+    // Reaching kMaxQueue_ disables the button — defensive check for a
+    // synthesized event from MCP / Enter key.
+    if (streaming_) {
+        if (pendingQueue_.size() >= kMaxQueue_) return;
+        pendingQueue_.push_back(text.ToStdString(wxConvUTF8));
+        input_->Clear();
+        UpdateQueueUI();
+        return;
+    }
+
     input_->Clear();
     StartTurn(text);
 }
@@ -728,7 +772,7 @@ void ChatFrame::StartTurn(const wxString& userText) {
 
     streaming_ = true;
     canvas_->SetThinking(true);
-    sendBtn_->Disable();
+    UpdateQueueUI();  // Send becomes "Add", chip row stays visible if non-empty.
     toolIter_ = 0;
 
     StartCompletion();
@@ -802,7 +846,7 @@ void ChatFrame::StartCompletion() {
             RenderErrorBlock(
                 "No API key configured for the selected model. "
                 "Open Settings (gear icon) to add one.");
-            FinalizeTurn();
+            FinalizeTurn(true);
             return;
         }
     }
@@ -927,7 +971,7 @@ void ChatFrame::OnStreamDone(WebResponse resp) {
     if (!resp.ok && resp.error == "cancelled") {
         if (!streaming_) return;
         RenderErrorBlock("Cancelled.");
-        FinalizeTurn();
+        FinalizeTurn(true);
         return;
     }
 
@@ -1000,7 +1044,7 @@ void ChatFrame::HandleCompletion(const wxString& errorIfFailed) {
             }
             break;
         }
-        FinalizeTurn();
+        FinalizeTurn(true);
         return;
     }
 
@@ -1110,7 +1154,7 @@ void ChatFrame::OnToolBatchDone(wxThreadEvent& e) {
         // history, so the next user turn replays cleanly. Stop the loop here
         // and surface a marker block.
         RenderErrorBlock("Cancelled.");
-        FinalizeTurn();
+        FinalizeTurn(true);
         return;
     }
 
@@ -1120,16 +1164,28 @@ void ChatFrame::OnToolBatchDone(wxThreadEvent& e) {
     StartCompletion();
 }
 
-void ChatFrame::FinalizeTurn() {
+void ChatFrame::FinalizeTurn(bool wasCancelledOrError) {
     canvas_->SetThinking(false);
     streaming_ = false;
-    sendBtn_->Enable();
     activeAssistantText_.clear();
     activeToolCalls_.clear();
     PersistActive();
     // Title may have changed (first user message defines it) — refresh the
     // dropdown so the new label shows up.
     RefreshSessionChoice();
+
+    // Natural completion: auto-dispatch the next queued message so back-to-
+    // back turns flow without a click. DispatchNextQueued -> StartTurn flips
+    // streaming_ back on so UpdateQueueUI never observes the (idle, queue
+    // non-empty) intermediate state and the input stays visible the whole
+    // time. Error/cancel: drop into idle-queue mode (Continue / Clear) if
+    // the queue is non-empty, so the user decides what to do.
+    if (!wasCancelledOrError && !pendingQueue_.empty()) {
+        DispatchNextQueued();
+        return;
+    }
+    UpdateQueueUI();
+    if (input_->IsShown()) input_->SetFocus();
 }
 
 void ChatFrame::RenderToolBlock(const std::string& name,
@@ -1172,4 +1228,116 @@ void ChatFrame::RenderErrorBlock(const wxString& msg) {
     InlineRun r; r.text = msg; r.italic = true;
     b.runs.push_back(r);
     canvas_->AddBlock(std::move(b));
+}
+
+void ChatFrame::DispatchNextQueued() {
+    if (pendingQueue_.empty()) return;
+    std::string next = std::move(pendingQueue_.front());
+    pendingQueue_.erase(pendingQueue_.begin());
+    StartTurn(wxString::FromUTF8(next));
+}
+
+void ChatFrame::OnContinueQueue(wxCommandEvent&) {
+    DispatchNextQueued();
+}
+
+void ChatFrame::OnClearQueue(wxCommandEvent&) {
+    pendingQueue_.clear();
+    UpdateQueueUI();
+    if (input_->IsShown()) input_->SetFocus();
+}
+
+void ChatFrame::UpdateQueueUI() {
+    const bool busy = streaming_;
+    const bool hasQueue = !pendingQueue_.empty();
+    const bool idleQueueMode = !busy && hasQueue;
+
+    // Normal vs idle-queue: input + Send swap with Continue + Clear.
+    input_->Show(!idleQueueMode);
+    sendBtn_->Show(!idleQueueMode);
+    continueQueueBtn_->Show(idleQueueMode);
+    clearQueueBtn_->Show(idleQueueMode);
+
+    if (busy) {
+        sendBtn_->SetLabel("Add");
+        sendBtn_->Enable(pendingQueue_.size() < kMaxQueue_);
+    } else {
+        sendBtn_->SetLabel("Send");
+        sendBtn_->Enable(true);
+    }
+    if (idleQueueMode) {
+        continueQueueBtn_->SetLabel(
+            wxString::Format("Continue (%zu queued)", pendingQueue_.size()));
+    }
+
+    chipRow_->Show(hasQueue);
+    if (hasQueue) RebuildChips();
+    if (auto* parent = chipRow_->GetParent()) parent->Layout();
+}
+
+void ChatFrame::RebuildChips() {
+    chipSizer_->Clear(true);
+
+    // Pull system colors so the chips look at home in both light and dark
+    // themes. The chip body is a couple of shades off the window background;
+    // the close badge is a bit further off the chip body so it stands out.
+    wxColour winBg = wxSystemSettings::GetColour(wxSYS_COLOUR_WINDOW);
+    wxColour fg = wxSystemSettings::GetColour(wxSYS_COLOUR_WINDOWTEXT);
+    const bool dark = winBg.Red() + winBg.Green() + winBg.Blue() < 384;
+    auto shift = [dark](wxColour c, int delta) {
+        int d = dark ? delta : -delta;
+        return wxColour(std::clamp(c.Red() + d, 0, 255),
+                        std::clamp(c.Green() + d, 0, 255),
+                        std::clamp(c.Blue() + d, 0, 255));
+    };
+    wxColour chipBg = shift(winBg, 22);
+
+    constexpr size_t kMaxChars = 60;
+    for (size_t i = 0; i < pendingQueue_.size(); ++i) {
+        wxString full = wxString::FromUTF8(pendingQueue_[i]);
+        wxString label = full;
+        label.Replace("\n", " ");
+        label.Replace("\r", " ");
+        label.Replace("\t", " ");
+        while (label.Replace("  ", " ")) {}
+        label.Trim().Trim(false);
+        if (label.length() > kMaxChars)
+            label = label.Left(kMaxChars - 1) + wxString::FromUTF8("\xE2\x80\xA6");
+        if (label.IsEmpty()) label = "(empty)";
+
+        auto* chip = new wxPanel(chipRow_, wxID_ANY);
+        chip->SetBackgroundColour(chipBg);
+        chip->SetForegroundColour(fg);
+        chip->SetToolTip(full);
+
+        auto* inner = new wxBoxSizer(wxHORIZONTAL);
+        auto* lbl = new wxStaticText(chip, wxID_ANY, label);
+        lbl->SetForegroundColour(fg);
+        // Use a wxStaticText for the close badge so there's no native
+        // button frame around it. Hit-tested via wxEVT_LEFT_DOWN below.
+        auto* close = new wxStaticText(chip, wxID_ANY, wxString::FromUTF8("\xC3\x97"));
+        close->SetForegroundColour(fg);
+        close->SetCursor(wxCURSOR_HAND);
+        close->SetToolTip("Remove from queue");
+
+        inner->Add(lbl, 1, wxALIGN_CENTER_VERTICAL | wxLEFT | wxTOP | wxBOTTOM, FromDIP(6));
+        inner->Add(close, 0, wxALIGN_CENTER_VERTICAL | wxLEFT | wxRIGHT, FromDIP(8));
+        chip->SetSizer(inner);
+
+        // Mutation deferred via CallAfter: UpdateQueueUI -> RebuildChips
+        // deletes the very chip whose event handler we're inside, and
+        // touching it post-Destroy crashes GTK.
+        close->Bind(wxEVT_LEFT_DOWN, [this, i](wxMouseEvent&) {
+            CallAfter([this, i]() {
+                if (i >= pendingQueue_.size()) return;
+                pendingQueue_.erase(pendingQueue_.begin() + i);
+                UpdateQueueUI();
+                if (!streaming_ && pendingQueue_.empty() && input_->IsShown())
+                    input_->SetFocus();
+            });
+        });
+
+        chipSizer_->Add(chip, 0, wxEXPAND | wxBOTTOM, FromDIP(2));
+    }
+    chipRow_->Layout();
 }

@@ -33,6 +33,24 @@ private:
     wxTextCtrl* input_ = nullptr;
     wxButton* sendBtn_ = nullptr;
 
+    // Queue-mode buttons. Visible only when the agent is idle AND the
+    // pending queue is non-empty (idle-queue mode), where they replace the
+    // input + Send row. Continue dispatches the next queued message; Clear
+    // discards the queue and restores the normal input row.
+    wxButton* continueQueueBtn_ = nullptr;
+    wxButton* clearQueueBtn_ = nullptr;
+
+    // Chip row sitting between the canvas and the input. Hidden when the
+    // queue is empty; rebuilt from pendingQueue_ on every queue change.
+    wxPanel* chipRow_ = nullptr;
+    wxSizer* chipSizer_ = nullptr;
+
+    // Pending user messages typed/queued while a turn was in flight. On
+    // natural turn end the front auto-dispatches; on error/cancel we land
+    // in idle-queue mode.
+    std::vector<std::string> pendingQueue_;
+    static constexpr size_t kMaxQueue_ = 5;
+
     // Toolbar row above the input. Plain wxBoxSizer with two labelled
     // dropdowns and a gear button on the right.
     wxChoice* sessionChoice_ = nullptr;
@@ -96,9 +114,22 @@ private:
     nlohmann::json BuildBlocksSnapshot() const;
 
     void OnSend(wxCommandEvent&);
+    void OnContinueQueue(wxCommandEvent&);
+    void OnClearQueue(wxCommandEvent&);
     void OnInputKey(wxKeyEvent&);
     void OnCharHook(wxKeyEvent&);
     void OnClose(wxCloseEvent&);
+
+    // Pop the front of pendingQueue_ and dispatch it as a fresh turn.
+    // No-op on empty. Used both from FinalizeTurn (auto-dispatch on
+    // natural completion) and from the Continue button (idle-queue mode).
+    void DispatchNextQueued();
+    // Reflect (streaming, queue) state across input/Send/Continue/Clear/
+    // chip-row visibility and the Send button label.
+    void UpdateQueueUI();
+    // Recreate chip widgets to match pendingQueue_. Called from
+    // UpdateQueueUI whenever the queue is non-empty.
+    void RebuildChips();
 
     // Cancel whatever is currently in flight: HTTP stream, tool batch, or
     // both. Safe to call when nothing is running. Wired to Escape.
@@ -163,7 +194,10 @@ private:
     // After State_Completed: if any tool_calls were accumulated, dispatch them
     // and continue; otherwise finalize the turn.
     void HandleCompletion(const wxString& errorIfFailed);
-    void FinalizeTurn();
+    // wasCancelledOrError=true (any failure path) lands us in idle-queue
+    // mode if the queue is non-empty so the user decides whether to
+    // Continue. Default false (natural completion) auto-dispatches.
+    void FinalizeTurn(bool wasCancelledOrError = false);
 
     void RenderToolBlock(const std::string& name,
                          const std::string& argsJson,
