@@ -45,22 +45,33 @@ struct ModelRoute {
     const char* model;
     bool needsApiKey;
     Preferences::Provider provider;  // only valid when needsApiKey
+    // Output ceiling. Set to each model's documented maximum — leaving it
+    // unset would let deepseek apply its 4096 server-side default, which
+    // clips `write_file` arguments mid-JSON and triggers an unrecoverable
+    // "missing 'path' argument" loop. DeepSeek V4 docs publish 384K as the
+    // hard max; providers clamp silently if a value exceeds the model's own
+    // ceiling, so picking the documented top is safe.
+    int maxTokens;
 };
 
 ModelRoute RouteFor(ModelChoice m) {
     switch (m) {
     case ModelChoice::OpencodeFree:
         return {"https://opencode.ai/zen/v1/chat/completions",
-                "minimax-m2.5-free", false, Preferences::Provider::DeepSeek};
+                "minimax-m2.5-free", false, Preferences::Provider::DeepSeek,
+                384000};
     case ModelChoice::DeepseekFlash:
         return {"https://api.deepseek.com/chat/completions",
-                "deepseek-v4-flash", true, Preferences::Provider::DeepSeek};
+                "deepseek-v4-flash", true, Preferences::Provider::DeepSeek,
+                384000};
     case ModelChoice::DeepseekPro:
         return {"https://api.deepseek.com/chat/completions",
-                "deepseek-v4-pro", true, Preferences::Provider::DeepSeek};
+                "deepseek-v4-pro", true, Preferences::Provider::DeepSeek,
+                384000};
     }
     return {"https://opencode.ai/zen/v1/chat/completions",
-            "minimax-m2.5-free", false, Preferences::Provider::DeepSeek};
+            "minimax-m2.5-free", false, Preferences::Provider::DeepSeek,
+            384000};
 }
 
 // chdir() into the session's directory so tool subprocesses (bash,
@@ -854,7 +865,7 @@ void ChatFrame::StartCompletion() {
     nlohmann::json req;
     req["model"] = route.model;
     req["stream"] = true;
-    req["max_tokens"] = 4096;
+    req["max_tokens"] = route.maxTokens;
     req["messages"] = std::move(messages);
     req["tools"] = GetToolDefinitions();
 
@@ -1090,6 +1101,7 @@ void ChatFrame::HandleCompletion(const wxString& errorIfFailed) {
         std::string name;
         std::string argsJson;
         nlohmann::json argsParsed;
+        std::string parseError;  // non-empty: skip dispatch, surface this as the result
     };
     auto jobs = std::make_shared<std::vector<ToolJob>>();
     jobs->reserve(activeToolCalls_.size());
@@ -1098,14 +1110,27 @@ void ChatFrame::HandleCompletion(const wxString& errorIfFailed) {
         job.id = tc.id;
         job.name = tc.name;
         job.argsJson = tc.args;
-        if (!tc.args.empty()) {
+        if (tc.args.empty()) {
+            // Model emitted the call with no arguments at all. Don't dispatch;
+            // surface a clear error so the model retries with a populated
+            // payload instead of getting "missing X" from each individual tool.
+            job.argsParsed = nlohmann::json::object();
+            job.parseError = "Error: tool call had no arguments. Re-emit the "
+                             "call with the required parameters.";
+        } else {
             try {
                 job.argsParsed = nlohmann::json::parse(tc.args);
-            } catch (...) {
+            } catch (const std::exception& e) {
+                // Most common cause: the response was clipped by max_tokens
+                // mid-string, leaving an unterminated JSON. Tell the model
+                // exactly that — silently substituting `{}` triggers a
+                // "missing argument" loop that the model can't break out of.
                 job.argsParsed = nlohmann::json::object();
+                job.parseError =
+                    std::string("Error: tool arguments were not valid JSON (") +
+                    e.what() + "). The arguments may have been truncated. " +
+                    "Retry, splitting large content into smaller calls if needed.";
             }
-        } else {
-            job.argsParsed = nlohmann::json::object();
         }
         jobs->push_back(std::move(job));
     }
@@ -1120,6 +1145,8 @@ void ChatFrame::HandleCompletion(const wxString& errorIfFailed) {
             std::string r;
             if (token->cancelled.load()) {
                 r = "[cancelled]";
+            } else if (!job.parseError.empty()) {
+                r = std::move(job.parseError);
             } else {
                 r = DispatchTool(job.name, job.argsParsed, token.get());
             }
