@@ -662,6 +662,49 @@ static std::string ExecuteTool(const std::string& name, const std::string& argsJ
     return "Error: unknown tool " + name;
 }
 
+// One-line summary of a tool call's arguments for the collapsed TOOL_CALL
+// header. Picks the dominant arg per known tool (command for bash, path for
+// file tools, query for search) and falls back to the first arg's value for
+// anything else. Newlines/tabs collapsed to spaces so the chip stays one line.
+static std::string CompactToolArgs(const std::string& name, const std::string& argsJson) {
+    std::string pick;
+    try {
+        auto args = json::parse(argsJson.empty() ? "{}" : argsJson);
+        auto get = [&](const char* k) -> std::string {
+            if (args.contains(k) && args[k].is_string()) return args[k].get<std::string>();
+            return "";
+        };
+        if (name == "bash")           pick = get("command");
+        else if (name == "read_file") pick = get("path");
+        else if (name == "list_directory") pick = get("path");
+        else if (name == "write_file") pick = get("path");
+        else if (name == "edit_file") pick = get("path");
+        else if (name == "web_fetch") pick = get("url");
+        else if (name == "web_search") pick = get("query");
+        else if (name == "grit_history_search") pick = get("query");
+        if (pick.empty()) {
+            for (auto& [k, v] : args.items()) {
+                if (v.is_string()) { pick = v.get<std::string>(); break; }
+                pick = v.dump(); break;
+            }
+        }
+    } catch (...) {}
+    // Collapse whitespace so the header line stays single-row even if the
+    // raw arg contained newlines (multi-line bash commands, file content).
+    std::string out;
+    out.reserve(pick.size());
+    bool prevSpace = false;
+    for (char c : pick) {
+        if (c == '\n' || c == '\r' || c == '\t') c = ' ';
+        if (c == ' ') {
+            if (prevSpace) continue;
+            prevSpace = true;
+        } else prevSpace = false;
+        out += c;
+    }
+    return out;
+}
+
 static std::string StripAnsi(const std::string& s) {
     std::string out;
     out.reserve(s.size());
@@ -985,11 +1028,40 @@ void App::RestoreSessionToView() {
         events_.Push([this]() {
             MarkdownRenderer mdRenderer(14);
             scrollView_.BeginBatch();
+
+            // Pre-index tool results by tool_call_id so we can fill in
+            // toolResult on each restored TOOL_CALL block without an O(N^2)
+            // scan of the history.
+            std::map<std::string, std::string> toolResultById;
             for (auto& m : session_.History()) {
-                if (m.role == "user")
+                if (m.role == "tool" && !m.toolCallId.empty())
+                    toolResultById[m.toolCallId] = m.content;
+            }
+
+            for (auto& m : session_.History()) {
+                if (m.role == "user") {
                     scrollView_.AppendStream(BlockType::USER_PROMPT, m.content);
-                else if (m.role == "assistant" && !m.content.empty())
-                    scrollView_.AddBlocks(mdRenderer.Render(m.content, true));
+                } else if (m.role == "assistant") {
+                    if (!m.content.empty())
+                        scrollView_.AddBlocks(mdRenderer.Render(m.content, true));
+                    if (!m.toolCalls.empty()) {
+                        std::vector<std::unique_ptr<TextBlock>> tblks;
+                        for (auto& tc : m.toolCalls) {
+                            auto b = std::make_unique<TextBlock>(BlockType::TOOL_CALL, "");
+                            b->toolName = tc.value("name", "");
+                            b->toolArgs = CompactToolArgs(b->toolName, tc.value("arguments", "{}"));
+                            std::string tid = tc.value("id", "");
+                            auto it = toolResultById.find(tid);
+                            if (it != toolResultById.end())
+                                b->toolResult = StripAnsi(it->second);
+                            tblks.push_back(std::move(b));
+                        }
+                        scrollView_.AddBlocks(std::move(tblks));
+                    }
+                }
+                // role=="tool" messages are folded into the preceding
+                // assistant's TOOL_CALL blocks via the toolResultById map;
+                // emitting them as standalone blocks would duplicate output.
             }
             scrollView_.EndBatch();
             AppendSystem("Session restored (" + std::to_string(session_.History().size()) + " messages)");
@@ -2715,7 +2787,9 @@ void App::DoSendToProvider() {
         acpToolBlockIdx_ = -1;
         acpToolInputBuf_.clear();
         acpToolNames_.clear();
+        acpToolTidByIdx_.clear();
         acpToolUseIdToName_.clear();
+        acpToolBlockByTid_.clear();
 
         // Claude ACP: spawn `claude --print` with stream-json output.
         //
@@ -2894,6 +2968,7 @@ void App::DoSendToProvider() {
                                     if (gen != requestGen_.load()) return;
                                     acpToolNames_[idx] = tname;
                                     acpToolUseIdToName_[tid] = tname;
+                                    acpToolTidByIdx_[idx] = tid;
                                     acpToolInputBuf_[idx] = "";
 
                                     // Finalize any in-flight assistant text so
@@ -2908,14 +2983,19 @@ void App::DoSendToProvider() {
                                         receivingThinking_ = false;
                                     }
 
-                                    std::string header = "Tool: " + tname + "\n";
-                                    if (acpToolBlockIdx_ < 0) {
-                                        scrollView_.AppendStream(BlockType::THINKING, header);
-                                        acpToolBlockIdx_ = (int)scrollView_.BlockCount() - 1;
-                                        scrollView_.StartThinking(acpToolBlockIdx_);
-                                    } else {
-                                        scrollView_.ContinueStream(header);
-                                    }
+                                    // One TOOL_CALL block per tool_use. Args
+                                    // fill in at content_block_stop, result at
+                                    // tool_result. Block stays collapsed until
+                                    // the user clicks the header.
+                                    std::vector<std::unique_ptr<TextBlock>> blks;
+                                    auto b = std::make_unique<TextBlock>(BlockType::TOOL_CALL, "");
+                                    b->toolName = tname;
+                                    b->isLoading = true;
+                                    blks.push_back(std::move(b));
+                                    int blockIdx = (int)scrollView_.BlockCount();
+                                    scrollView_.AddBlocks(std::move(blks));
+                                    acpToolBlockIdx_ = blockIdx;
+                                    acpToolBlockByTid_[tid] = blockIdx;
                                     MarkDirty();
                                 });
                             }
@@ -2926,19 +3006,25 @@ void App::DoSendToProvider() {
                                 auto nit = acpToolNames_.find(idx);
                                 if (nit != acpToolNames_.end()) {
                                     // Tool_use block finished — parse the
-                                    // accumulated input JSON and emit one line
-                                    // per argument, matching Zen's layout.
+                                    // accumulated input JSON, pick the
+                                    // dominant arg, write it into the
+                                    // matching TOOL_CALL block's toolArgs.
                                     auto bit = acpToolInputBuf_.find(idx);
                                     std::string partial = (bit != acpToolInputBuf_.end()) ? bit->second : "";
-                                    std::string argText;
-                                    try {
-                                        json args = json::parse(partial.empty() ? "{}" : partial);
-                                        for (auto& [k, v] : args.items()) {
-                                            argText += "  " + k + ": " + v.dump() + "\n";
+                                    std::string compact = CompactToolArgs(nit->second, partial);
+                                    auto tit = acpToolTidByIdx_.find(idx);
+                                    if (tit != acpToolTidByIdx_.end()) {
+                                        auto bIt = acpToolBlockByTid_.find(tit->second);
+                                        if (bIt != acpToolBlockByTid_.end()) {
+                                            auto& blks = scrollView_.Blocks();
+                                            int bidx = bIt->second;
+                                            if (bidx >= 0 && bidx < (int)blks.size() &&
+                                                blks[bidx]->type == BlockType::TOOL_CALL) {
+                                                blks[bidx]->toolArgs = compact;
+                                                scrollView_.RequestRebuild();
+                                            }
                                         }
-                                    } catch (...) {}
-                                    if (!argText.empty() && acpToolBlockIdx_ >= 0) {
-                                        scrollView_.ContinueStream(argText);
+                                        acpToolTidByIdx_.erase(tit);
                                     }
                                     acpToolInputBuf_.erase(idx);
                                     acpToolNames_.erase(idx);
@@ -2958,12 +3044,11 @@ void App::DoSendToProvider() {
                                     fullResponse += text;
                                     events_.Push([this, text, gen]() {
                                         if (gen != requestGen_.load()) return;
-                                        // Close any open tool-call block before
-                                        // text streams in — tool round is over.
-                                        if (acpToolBlockIdx_ >= 0) {
-                                            scrollView_.StopThinking(acpToolBlockIdx_);
-                                            acpToolBlockIdx_ = -1;
-                                        }
+                                        // Tool round closing — block-level
+                                        // loading state stays managed by the
+                                        // per-tool TOOL_CALL blocks (set
+                                        // when tool_result arrives).
+                                        acpToolBlockIdx_ = -1;
                                         bool firstChunk = responseBuffer_.empty();
                                         if (receivingThinking_) {
                                             receivingThinking_ = false;
@@ -3036,13 +3121,17 @@ void App::DoSendToProvider() {
                                 }
                                 events_.Push([this, tid, out, gen]() {
                                     if (gen != requestGen_.load()) return;
-                                    auto nit = acpToolUseIdToName_.find(tid);
-                                    std::string tname = (nit != acpToolUseIdToName_.end()) ? nit->second : "";
-                                    if (acpToolBlockIdx_ >= 0) {
-                                        std::string resultText = "\n" + tname + ":\n" + StripAnsi(out) + "\n";
-                                        scrollView_.ContinueStream(resultText);
-                                        scrollView_.StopThinking(acpToolBlockIdx_);
-                                        acpToolBlockIdx_ = -1;
+                                    auto bIt = acpToolBlockByTid_.find(tid);
+                                    if (bIt != acpToolBlockByTid_.end()) {
+                                        auto& blks = scrollView_.Blocks();
+                                        int bidx = bIt->second;
+                                        if (bidx >= 0 && bidx < (int)blks.size() &&
+                                            blks[bidx]->type == BlockType::TOOL_CALL) {
+                                            blks[bidx]->isLoading = false;
+                                            blks[bidx]->toolResult = StripAnsi(out);
+                                            scrollView_.RequestRebuild();
+                                        }
+                                        acpToolBlockByTid_.erase(bIt);
                                     }
                                     acpToolUseIdToName_.erase(tid);
                                     MarkDirty();
@@ -3084,10 +3173,24 @@ void App::DoSendToProvider() {
                 if (receivingThinking_) {
                     receivingThinking_ = false;
                 }
+                // End-of-turn cleanup. If any tool blocks are still
+                // isLoading (rare — usually tool_result fires before this),
+                // mark them done so the spinner state doesn't stick.
+                {
+                    auto& blks = scrollView_.Blocks();
+                    for (auto& [tid, bidx] : acpToolBlockByTid_) {
+                        if (bidx >= 0 && bidx < (int)blks.size() &&
+                            blks[bidx]->type == BlockType::TOOL_CALL) {
+                            blks[bidx]->isLoading = false;
+                        }
+                    }
+                }
                 acpToolBlockIdx_ = -1;
                 acpToolInputBuf_.clear();
                 acpToolNames_.clear();
+                acpToolTidByIdx_.clear();
                 acpToolUseIdToName_.clear();
+                acpToolBlockByTid_.clear();
                 scrollView_.StopAllAnimations();
                 if (!responseBuffer_.empty()) {
                     RenderMarkdownToBlocks(true);
@@ -3493,17 +3596,22 @@ void App::ExecuteToolCalls(const std::vector<json>& toolCalls, const std::string
     session_.History().push_back(std::move(assistantMsg));
     reasoningBuffer_.clear();  // Don't double-count in next round
 
-    // Show tool info in thinking block
-    std::string info;
+    // Emit one TOOL_CALL block per tool call (collapsed by default; user
+    // clicks the header to expand). isLoading=true draws a spinner-ish
+    // hint until the result lands.
+    std::vector<std::unique_ptr<TextBlock>> toolBlocks;
+    std::vector<size_t> toolBlockIdxs;
+    size_t firstIdx = scrollView_.BlockCount();
     for (auto& tc : toolCalls) {
-        info += "Tool: " + tc.value("name", "") + "\n";
-        try {
-            auto args = json::parse(tc.value("arguments", "{}"));
-            for (auto& [k, v] : args.items()) info += "  " + k + ": " + v.dump() + "\n";
-        } catch (...) {}
+        auto b = std::make_unique<TextBlock>(BlockType::TOOL_CALL, "");
+        b->toolName = tc.value("name", "");
+        b->toolArgs = CompactToolArgs(b->toolName, tc.value("arguments", "{}"));
+        b->isLoading = true;
+        toolBlocks.push_back(std::move(b));
     }
-    scrollView_.AppendStream(BlockType::THINKING, info);
-    scrollView_.StartThinking(scrollView_.BlockCount() - 1);
+    for (size_t i = 0; i < toolCalls.size(); i++)
+        toolBlockIdxs.push_back(firstIdx + i);
+    scrollView_.AddBlocks(std::move(toolBlocks));
     MarkDirty();
 
     // Snapshot the current generation so we can cancel mid-run. Escape bumps
@@ -3514,7 +3622,7 @@ void App::ExecuteToolCalls(const std::vector<json>& toolCalls, const std::string
     MemoryDB* mem = &memory_;
     std::string excludeSid = session_.SessionId();
 
-    std::thread([this, tcCopy, gen, mem, excludeSid]() {
+    std::thread([this, tcCopy, gen, mem, excludeSid, toolBlockIdxs]() {
         struct Result { std::string id, output; };
         std::vector<Result> results;
         for (auto& tc : tcCopy) {
@@ -3527,22 +3635,34 @@ void App::ExecuteToolCalls(const std::vector<json>& toolCalls, const std::string
             });
         }
 
-        events_.Push([this, results, tcCopy, gen]() {
+        events_.Push([this, results, tcCopy, gen, toolBlockIdxs]() {
             // If Escape fired while this thread was running, history has
             // already been fixed up with synthetic tool_results and an
-            // assistant cancel marker. Drop the results on the floor.
+            // assistant cancel marker. Drop the results on the floor but
+            // clear the loading state on any tool blocks we already placed.
             if (requestGen_.load() != gen) {
-                scrollView_.StopThinking(scrollView_.BlockCount() - 1);
+                auto& blks = scrollView_.Blocks();
+                for (size_t idx : toolBlockIdxs) {
+                    if (idx < blks.size() && blks[idx]->type == BlockType::TOOL_CALL) {
+                        blks[idx]->isLoading = false;
+                        blks[idx]->toolResult = "[cancelled]";
+                    }
+                }
+                scrollView_.RequestRebuild();
                 MarkDirty();
                 return;
             }
 
-            // Show results
-            std::string resultText;
+            // Write result text into the matching tool block by index.
+            auto& blks = scrollView_.Blocks();
             for (size_t i = 0; i < results.size(); i++) {
-                resultText += "\n" + tcCopy[i].value("name", "") + ":\n" + StripAnsi(results[i].output) + "\n";
+                size_t idx = (i < toolBlockIdxs.size()) ? toolBlockIdxs[i] : SIZE_MAX;
+                if (idx < blks.size() && blks[idx]->type == BlockType::TOOL_CALL) {
+                    blks[idx]->isLoading = false;
+                    blks[idx]->toolResult = StripAnsi(results[i].output);
+                }
             }
-            scrollView_.ContinueStream(resultText);
+            scrollView_.RequestRebuild();
 
             // Add to history
             for (size_t i = 0; i < results.size(); i++) {
@@ -3550,7 +3670,6 @@ void App::ExecuteToolCalls(const std::vector<json>& toolCalls, const std::string
             }
             SaveAndIndex();
 
-            scrollView_.StopThinking(scrollView_.BlockCount() - 1);
             DoSendToProvider();  // Continue the loop
             MarkDirty();
         });
@@ -4098,18 +4217,20 @@ void App::Run() {
             // Scroll view (top portion)
             scrollView_.Paint(renderer_);
 
-            // Waiting dots (plain, below last block)
+            // Waiting dots (plain, below last block). Anchored to the centered
+            // chat column's left edge, not the window, so they line up with the
+            // text blocks above instead of hugging the window frame.
             if (waitingDotFrame_ >= 0) {
                 auto& fm = scrollView_.Fonts();
                 float dotR = fm.LineHeight(FontStyle::Regular) * 0.15f;
                 float spacing = dotR * 3;
-                float baseX = 20;
+                float baseX = scrollView_.ColumnLeft();
                 float baseY = scrollView_.ContentBottom() + fm.LineHeight(FontStyle::Regular);
                 for (int d = 0; d < 3; d++) {
                     float alpha = (d == waitingDotFrame_) ? 1.0f : 0.3f;
                     Color c{0.5f, 0.5f, 0.5f, alpha};
-                    float cx = baseX + d * spacing;
-                    renderer_.DrawRect(cx - dotR, baseY - dotR, dotR * 2, dotR * 2, c);
+                    float x = baseX + d * spacing;
+                    renderer_.DrawRect(x, baseY - dotR, dotR * 2, dotR * 2, c);
                 }
             }
 

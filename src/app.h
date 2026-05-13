@@ -203,14 +203,16 @@ private:
     size_t lastMarkdownLen_ = 0;
     double lastMarkdownTime_ = 0;
 
-    // Claude ACP tool-call streaming state. One THINKING block per tool round
-    // (matches Zen path visually): each "Tool: <name>\n  <arg>: <val>\n..." as
-    // tool_use blocks stream in, then "\n<name>:\n<output>\n" when tool_result
-    // user messages arrive. acpToolBlockIdx_ == -1 means no open tool block.
-    int acpToolBlockIdx_ = -1;
-    std::map<int, std::string> acpToolInputBuf_;    // content-block index → partial JSON
-    std::map<int, std::string> acpToolNames_;       // content-block index → tool name
-    std::map<std::string, std::string> acpToolUseIdToName_;  // tool_use_id → name
+    // Claude ACP tool-call streaming state. One TOOL_CALL block per tool_use
+    // (matches Zen path visually): block created on content_block_start with
+    // the tool name + isLoading, args filled in on content_block_stop, result
+    // populated when the matching tool_result user message arrives.
+    int acpToolBlockIdx_ = -1;                              // last opened block idx (or -1)
+    std::map<int, std::string> acpToolInputBuf_;            // content-block index → partial JSON
+    std::map<int, std::string> acpToolNames_;               // content-block index → tool name
+    std::map<int, std::string> acpToolTidByIdx_;            // content-block index → tool_use_id
+    std::map<std::string, std::string> acpToolUseIdToName_; // tool_use_id → name
+    std::map<std::string, int> acpToolBlockByTid_;          // tool_use_id → scrollView block idx
 
     // Waiting indicator (plain dots, not a block)
     float waitingDotTimer_ = 0;

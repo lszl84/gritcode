@@ -27,18 +27,29 @@ static constexpr double MULTI_CLICK_THRESHOLD = 0.4;
 ScrollView::ScrollView() = default;
 
 void ScrollView::InitColors() {
+    // Palette ported from the wxWidgets branch's chat canvas. Coherent
+    // tints instead of independently-picked colors — bg, code, bubble, and
+    // tool surfaces all sit on the same neutral hue family.
 #ifdef NDEBUG
-    bgColor_ = Color::RGB(30, 30, 30);
+    bgColor_ = Color::RGB(34, 34, 38);
 #else
     bgColor_ = Color::RGB(34, 26, 26);  // Reddish tint in debug
 #endif
     normalColor_ = Color::RGB(220, 220, 220);
-    userPromptColor_ = Color::RGB(100, 180, 255);
-    thinkingColor_ = Color::RGB(160, 160, 160);
-    codeColor_ = Color::RGB(230, 230, 230);
-    codeBg_ = Color::RGB(45, 45, 48);
+    userPromptColor_ = Color::RGB(255, 255, 255);
+    thinkingColor_ = Color::RGB(170, 170, 180);
+    codeColor_ = Color::RGB(210, 215, 225);
+    codeBg_ = Color::RGB(44, 44, 50);
     thinkingBg_ = Color::RGB(40, 40, 43);
-    userPromptBg_ = Color::RGB(35, 45, 55);
+    userPromptBg_ = Color::RGB(50, 72, 110);
+    toolHeaderBg_ = Color::RGB(50, 56, 70);
+    toolBodyBg_ = Color::RGB(40, 42, 50);
+    toolAccent_ = Color::RGB(140, 200, 255);
+    toolDim_ = Color::RGB(140, 145, 158);
+    // Tables sit on the page bg (no body fill) with just the header tinted —
+    // matches the wx-branch look.
+    tableHeaderBg_ = Color::RGB(44, 44, 52);
+    tableBorderColor_ = Color::RGB(90, 90, 100);
     selBgColor_ = Color::RGB(51, 153, 255);
     selTextColor_ = Color::RGB(255, 255, 255);
 }
@@ -52,7 +63,25 @@ bool ScrollView::Init(int w, int h, float scale) {
     if (baseFontPx < 14) baseFontPx = 14;
     if (!fonts_.Init(baseFontPx)) return false;
 
-    leftMargin_ = 16 * scale;
+    // Centered chat column (ported from wxWidgets branch). Column caps at
+    // ~720px; below that the column shrinks down to the sideMargin floor so
+    // the UI still fills narrower windows reasonably.
+    sideMargin_ = 24 * scale;
+    maxContentW_ = 720 * scale;
+    RecomputeColumn();
+
+    userBubblePad_ = 12 * scale;
+    userBubbleRadius_ = 8 * scale;
+    codeHPad_ = 12 * scale;
+    codeVPad_ = 8 * scale;
+    codeRadius_ = 6 * scale;
+    toolPadX_ = 10 * scale;
+    toolPadY_ = 6 * scale;
+    toolGap_ = 0;  // header and body share one bubble — no inter-strip gap
+    toolRadius_ = 6 * scale;
+    tableHPad_ = 10 * scale;
+    tableVPad_ = 6 * scale;
+    tableBorderW_ = std::max(1.0f, scale);
 
     float lh = fonts_.LineHeight(FontStyle::Regular);
     topMargin_ = lh;
@@ -62,10 +91,20 @@ bool ScrollView::Init(int w, int h, float scale) {
     return true;
 }
 
+void ScrollView::RecomputeColumn() {
+    float cw = (float)windowW_ - sideMargin_ * 2;
+    if (maxContentW_ > 0 && cw > maxContentW_) cw = maxContentW_;
+    if (cw < 100) cw = 100;
+    contentW_ = cw;
+    float floorMargin = sideMargin_ > 0 ? sideMargin_ : 10.0f;
+    leftMargin_ = std::max(floorMargin, ((float)windowW_ - contentW_) / 2.0f);
+}
+
 FontStyle ScrollView::StyleForType(BlockType t) const {
     switch (t) {
     case BlockType::THINKING: return FontStyle::ThinkingItalic;
     case BlockType::CODE: return FontStyle::Code;
+    case BlockType::TOOL_CALL: return FontStyle::Code;
     default: return FontStyle::Regular;
     }
 }
@@ -75,15 +114,17 @@ Color ScrollView::ColorForType(BlockType t) const {
     case BlockType::USER_PROMPT: return userPromptColor_;
     case BlockType::THINKING: return thinkingColor_;
     case BlockType::CODE: return codeColor_;
+    case BlockType::TOOL_CALL: return codeColor_;
     default: return normalColor_;
     }
 }
 
 Color ScrollView::BgForType(BlockType t) const {
+    // USER_PROMPT/CODE/TOOL_CALL chrome is drawn as a rounded shape in Paint,
+    // not as a full-block rectangular fill — return transparent so the generic
+    // bg pass skips them.
     switch (t) {
-    case BlockType::USER_PROMPT: return userPromptBg_;
     case BlockType::THINKING: return thinkingBg_;
-    case BlockType::CODE: return codeBg_;
     default: return Color(0, 0, 0, 0);
     }
 }
@@ -179,6 +220,7 @@ void ScrollView::OnScroll(float yOffset) {
 void ScrollView::OnResize(int w, int h) {
     windowW_ = w;
     windowH_ = h;
+    RecomputeColumn();
     needsFullRebuild_ = true;
     needsRedraw_ = true;
 }
@@ -674,10 +716,12 @@ void ScrollView::LayoutTable(size_t idx, float textAreaW, float,
     int numCols = block.tableCols;
     if (numCols <= 0 || block.tableRows.empty()) return;
 
-    // Table padding + chrome sizing. Keep it subtle to match the rest of the app.
-    const float hPad = 10;             // horizontal padding inside each cell
-    const float vPad = 4;              // vertical padding above/below each cell line
-    const float rowGap = 0;            // rows touch; the rule lines separate them visually
+    // Table padding + chrome sizing — matches wx-branch (kTableCellPadX/Y).
+    // Applied once per row (above the first visual line, below the last), not
+    // per visual line, so multi-line cells stay compact and the row height
+    // grows by exactly one lineH per wrap.
+    const float hPad = tableHPad_;     // horizontal padding inside each cell (scaled)
+    const float vPad = tableVPad_;     // vertical padding above/below cell content (scaled)
 
     FontStyle bodyStyle = FontStyle::Regular;
     float lineH = fonts_.LineHeight(bodyStyle);
@@ -689,7 +733,15 @@ void ScrollView::LayoutTable(size_t idx, float textAreaW, float,
         auto& row = block.tableRows[r];
         chunkGrid[r].resize(numCols);
         for (int c = 0; c < numCols && c < (int)row.size(); c++) {
-            for (auto& run : row[c].runs) ChunkCellRun(run, fonts_, chunkGrid[r][c]);
+            for (auto& run : row[c].runs) {
+                StyledTextRun runCopy = run;
+                if (r == 0) {
+                    runCopy.style = (runCopy.style == FontStyle::Italic ||
+                                     runCopy.style == FontStyle::BoldItalic)
+                                      ? FontStyle::BoldItalic : FontStyle::Bold;
+                }
+                ChunkCellRun(runCopy, fonts_, chunkGrid[r][c]);
+            }
         }
     }
 
@@ -715,9 +767,20 @@ void ScrollView::LayoutTable(size_t idx, float textAreaW, float,
     for (int c = 0; c < numCols; c++) maxSum += colMax[c];
 
     if (maxSum <= budget) {
-        // Everything fits — use max-content widths and let the table be
-        // narrower than the viewport.
+        // Everything fits — start at max-content and distribute the slack
+        // proportionally to each column's max-content width so the table
+        // always spans the full content column (wx-branch behavior). Falls
+        // back to even distribution if every column is empty.
         for (int c = 0; c < numCols; c++) colW[c] = colMax[c];
+        float slack = budget - maxSum;
+        if (slack > 0.5f) {
+            if (maxSum > 0.5f) {
+                for (int c = 0; c < numCols; c++) colW[c] += slack * (colMax[c] / maxSum);
+            } else {
+                float each = slack / (float)numCols;
+                for (int c = 0; c < numCols; c++) colW[c] += each;
+            }
+        }
     } else {
         // Need to shrink. Start with max-content, then proportionally shrink
         // columns whose width is above their min-content, pulling down until
@@ -776,13 +839,16 @@ void ScrollView::LayoutTable(size_t idx, float textAreaW, float,
             if (cellLines[c].size() > rowVisLines) rowVisLines = cellLines[c].size();
         }
 
+        // Top padding for this row.
+        outH += vPad;
+
         for (size_t v = 0; v < rowVisLines; v++) {
             WrappedLine wl;
             wl.rightToLeft = false;
             wl.x = leftMargin_;
             wl.y = outH;
             wl.width = totalW;
-            wl.height = lineH + vPad * 2;
+            wl.height = lineH;
             wl.tableRow = (int)r;
 
             std::string flatText;
@@ -842,19 +908,195 @@ void ScrollView::LayoutTable(size_t idx, float textAreaW, float,
             wl.caretXValid = true;
 
             out.push_back(std::move(wl));
-            outH += lineH + vPad * 2;
+            outH += lineH;
         }
+
+        // Bottom padding for this row.
+        outH += vPad;
 
         // Remember where the header rule should sit.
         if (r == 0) info.headerBottomY = outH;
 
-        outH += rowGap;
+        info.rowBottomY.push_back(outH);
+    }
+}
+
+// Per-block chrome offsets — describes where the text should land relative
+// to the baseline wl.x/wl.y, and what the rounded shape behind it spans.
+// Computed lazily off wrappedCache_ contents; cheap O(lines) for USER_PROMPT
+// where we need the longest line, O(1) for everything else.
+ScrollView::BlockChrome ScrollView::ChromeFor(size_t i) const {
+    BlockChrome ch;
+    if (i >= blocks_.size() || i >= wrappedCache_.size()) return ch;
+    const auto& block = *blocks_[i];
+    const auto& lines = wrappedCache_[i];
+
+    if (block.type == BlockType::USER_PROMPT) {
+        float maxW = 0;
+        for (const auto& wl : lines) if (wl.width > maxW) maxW = wl.width;
+        float bubbleW = maxW + userBubblePad_ * 2;
+        if (bubbleW > contentW_) bubbleW = contentW_;
+        if (bubbleW < userBubblePad_ * 2 + 4) bubbleW = userBubblePad_ * 2 + 4;
+        ch.bubbleW = bubbleW;
+        ch.bubbleX = leftMargin_ + contentW_ - bubbleW;
+        ch.xOff = ch.bubbleX + userBubblePad_ - leftMargin_;
+        ch.yOff = userBubblePad_;
+    } else if (block.type == BlockType::CODE) {
+        ch.bubbleX = leftMargin_;
+        ch.bubbleW = contentW_;
+        ch.xOff = codeHPad_;
+        ch.yOff = codeVPad_;
+    } else if (block.type == BlockType::TOOL_CALL) {
+        ch.bubbleX = leftMargin_;
+        ch.bubbleW = contentW_;
+        ch.headerH = fonts_.LineHeight(FontStyle::Code) + toolPadY_ * 2;
+        if (!block.isCollapsed && !lines.empty()) {
+            float h = toolPadY_ * 2;
+            for (const auto& wl : lines) h += wl.height;
+            ch.bodyH = h;
+        }
+        ch.xOff = toolPadX_;
+        // Body text sits inside the body region, which begins at headerH (no
+        // gap — header and body are one continuous bubble). chrome.yOff adds
+        // toolPadY_ for the body's inner top pad.
+        ch.yOff = ch.headerH + toolPadY_;
+    } else if (block.type == BlockType::THINKING) {
+        float thinkingLh = fonts_.LineHeight(FontStyle::ThinkingItalic);
+        ch.bubbleX = leftMargin_;
+        ch.bubbleW = contentW_;
+        ch.headerH = thinkingLh + toolPadY_ * 2;
+        if (block.isExpandable && !block.isCollapsed && lines.size() > 1) {
+            // Single continuous bubble: header strip on top, body region
+            // below — both painted on the same rounded rect with a tint
+            // change at headerH. Body extends from headerH down through the
+            // last wrapped line's bottom plus toolPadY_ bottom pad; loading
+            // adds one extra line for the animated dots.
+            auto& last = lines.back();
+            ch.bodyH = last.y + last.height + toolPadY_ - ch.headerH;
+            if (block.isLoading) ch.bodyH += thinkingLh;
+        }
+        ch.xOff = toolPadX_;
+        ch.yOff = toolPadY_;
+    }
+    return ch;
+}
+
+// Lays out the body text of an expanded TOOL_CALL block as monospace lines
+// wrapped at bodyTextW. Lines are appended to wrappedCache_[idx] starting at
+// y=0 (paint shifts them by the header offset). Each line carries a single
+// styled run in code style so the existing per-glyph paint path handles them.
+void ScrollView::LayoutToolCallBody(size_t idx, float bodyTextW) {
+    auto& block = *blocks_[idx];
+    auto& lines = wrappedCache_[idx];
+    lines.clear();
+
+    std::string body;
+    if (!block.toolArgs.empty()) body += "args: " + block.toolArgs + "\n\n";
+    body += block.toolResult;
+    if (body.empty()) return;
+
+    FontStyle style = FontStyle::Code;
+    float lh = fonts_.LineHeight(style);
+    if (bodyTextW < 20) bodyTextW = 20;
+
+    float y = 0;
+    auto emitLine = [&](const std::string& seg) {
+        WrappedLine wl;
+        wl.text = seg;
+        wl.rightToLeft = false;
+        wl.x = leftMargin_;
+        wl.y = y;
+        wl.width = fonts_.MeasureWidth(seg, style, false);
+        wl.height = lh;
+        if (!seg.empty()) {
+            wl.styledRuns.push_back({seg, style, codeColor_});
+            wl.runXOffsets.push_back(0);
+        }
+        lines.push_back(std::move(wl));
+        y += lh;
+    };
+
+    size_t pos = 0;
+    while (pos <= body.size()) {
+        size_t nl = body.find('\n', pos);
+        std::string srcLine = (nl == std::string::npos) ? body.substr(pos)
+                                                        : body.substr(pos, nl - pos);
+        if (srcLine.empty()) {
+            emitLine("");
+        } else {
+            // Greedy char-level wrap. Soft-break preference: backtrack to the
+            // last space in (start, end]. Avoids spilling long paths/URLs
+            // past the body's clipped rounded box.
+            size_t start = 0;
+            while (start < srcLine.size()) {
+                size_t end = start;
+                float w = 0;
+                size_t lastSpace = std::string::npos;
+                while (end < srcLine.size()) {
+                    size_t stride = utf8_stride(srcLine, end);
+                    std::string chs = srcLine.substr(end, stride);
+                    float cw = fonts_.MeasureWidth(chs, style, false);
+                    if (w + cw > bodyTextW && end > start) break;
+                    if (srcLine[end] == ' ') lastSpace = end;
+                    w += cw;
+                    end += stride;
+                }
+                size_t breakAt = end;
+                if (end < srcLine.size() && lastSpace != std::string::npos &&
+                    lastSpace + 1 > start) {
+                    breakAt = lastSpace + 1;
+                }
+                emitLine(srcLine.substr(start, breakAt - start));
+                start = breakAt;
+            }
+        }
+        if (nl == std::string::npos) break;
+        pos = nl + 1;
     }
 }
 
 void ScrollView::RebuildSingleBlock(size_t i, float textAreaW, float clientW) {
     auto& block = *blocks_[i];
     float h = 0;
+
+    // Bubbled / boxed blocks lay out their text inside an inset, so the
+    // effective wrap width is the column width minus 2x the inner pad. The
+    // padding itself is added back into blockHeightCache_ at the bottom of
+    // this function so the cached height matches the painted box.
+    float effectiveW = textAreaW;
+    if (block.type == BlockType::USER_PROMPT) effectiveW = textAreaW - userBubblePad_ * 2;
+    else if (block.type == BlockType::CODE) effectiveW = textAreaW - codeHPad_ * 2;
+    else if (block.type == BlockType::TOOL_CALL) effectiveW = textAreaW - toolPadX_ * 2;
+    else if (block.type == BlockType::THINKING) effectiveW = textAreaW - toolPadX_ * 2;
+    if (effectiveW < 50) effectiveW = 50;
+
+    if (block.type == BlockType::TOOL_CALL) {
+        float headerH = fonts_.LineHeight(FontStyle::Code) + toolPadY_ * 2;
+        if (block.isCollapsed) {
+            wrappedCache_[i].clear();
+            shapedCache_[i].clear();
+            segValid_[i] = true;
+            blockHeightCache_[i] = headerH;
+            charHeightCache_[i] = fonts_.LineHeight(FontStyle::Code);
+            return;
+        }
+        LayoutToolCallBody(i, effectiveW);
+        shapedCache_[i].clear();
+        segValid_[i] = true;
+        // Expanded but nothing to show in the body (e.g. clicked before the
+        // tool result arrived) — just render the header strip alone.
+        if (wrappedCache_[i].empty()) {
+            blockHeightCache_[i] = headerH;
+            charHeightCache_[i] = fonts_.LineHeight(FontStyle::Code);
+            return;
+        }
+        float bodyH = toolPadY_ * 2;
+        for (auto& wl : wrappedCache_[i]) bodyH += wl.height;
+        blockHeightCache_[i] = headerH + bodyH;
+        charHeightCache_[i] = fonts_.LineHeight(FontStyle::Code);
+        return;
+    }
+
     if (block.type == BlockType::TABLE) {
         if (i >= tableLayoutCache_.size()) tableLayoutCache_.resize(i + 1);
         LayoutTable(i, textAreaW, clientW, wrappedCache_[i], h);
@@ -871,66 +1113,134 @@ void ScrollView::RebuildSingleBlock(size_t i, float textAreaW, float clientW) {
             MeasureSegments(i);
     }
 
-    LayoutFromSegments(i, textAreaW, clientW, wrappedCache_[i], h);
+    LayoutFromSegments(i, effectiveW, clientW, wrappedCache_[i], h);
     shapedCache_[i].clear();
 
     if (block.type == BlockType::THINKING) {
-        // When expandText is set, the block is always expandable.
-        // Collapsed shows summary; expanded shows summary + detail.
-        if (!block.expandText.empty()) {
-            block.isExpandable = true;
-            if (block.isCollapsed) {
-                // Collapsed: just the summary line(s), truncated to 1 line
-                float firstH = wrappedCache_[i][0].height;
-                wrappedCache_[i].resize(1);
-                h = firstH;
-            } else {
-                // Expanded: re-lay out with summary + detail
-                std::string fullText = block.text + "\n\n" + block.expandText;
-                // Temporarily swap text for segment measurement
-                std::string origText = block.text;
-                block.text = fullText;
-                segValid_[i] = false;
-                MeasureSegments(i);
-                block.text = origText;
-                LayoutFromSegments(i, textAreaW, clientW, wrappedCache_[i], h);
-                shapedCache_[i].clear();
-            }
-        } else {
-            block.isExpandable = (wrappedCache_[i].size() > 1);
-            if (!block.isExpandable && !block.isLoading) block.isCollapsed = false;
+        // THINKING renders as a tool-style card: rounded header strip with a
+        // chevron + peek line, plus a body box of wrapped content when
+        // expanded. Italic style and thinking bg colors are kept so it still
+        // reads as a "thought" surface, not a tool call.
+        float thinkingLh = fonts_.LineHeight(FontStyle::ThinkingItalic);
+        float headerH = thinkingLh + toolPadY_ * 2;
 
-            if (block.isCollapsed && block.isExpandable) {
-                float firstH = wrappedCache_[i][0].height;
-                wrappedCache_[i].resize(1);
-                h = firstH;
-
-                if (block.isLoading) {
-                    float ch = fonts_.LineHeight(FontStyle::ThinkingItalic);
-                    float dotSpace = ch * 2.5f;
-                    float maxTextW = textAreaW - dotSpace - 20;
-                    auto& wl = wrappedCache_[i][0];
-                    if (wl.width > maxTextW && !wl.text.empty()) {
-                        std::string truncated = wl.text;
-                        while (!truncated.empty() && fonts_.MeasureWidth(truncated, FontStyle::ThinkingItalic) > maxTextW) {
-                            size_t sp = truncated.rfind(' ');
-                            if (sp == std::string::npos) { truncated.clear(); break; }
-                            truncated = truncated.substr(0, sp);
-                        }
-                        if (!truncated.empty() && truncated.size() < wl.text.size())
-                            truncated += "\xe2\x80\xa6";
-                        wl.text = truncated;
-                        wl.width = fonts_.MeasureWidth(truncated, FontStyle::ThinkingItalic);
-                        wl.shapedValid = false;
-                        shapedCache_[i].clear();
-                    }
-                }
+        // A block is only worth expanding if doing so reveals non-whitespace
+        // content. A trailing "\n" in block.text or an expandText of just
+        // whitespace would otherwise make the chevron appear but the expanded
+        // body show only a blank row.
+        auto hasNonWs = [](const std::string& s) {
+            for (unsigned char c : s) if (!std::isspace(c)) return true;
+            return false;
+        };
+        bool bodyHasContent = hasNonWs(block.expandText);
+        if (!bodyHasContent) {
+            for (size_t k = 1; k < wrappedCache_[i].size(); k++) {
+                if (hasNonWs(wrappedCache_[i][k].text)) { bodyHasContent = true; break; }
             }
         }
+        block.isExpandable = bodyHasContent;
+        float chevronW = block.isExpandable
+                         ? fonts_.MeasureWidth("\xe2\x96\xb8 ", FontStyle::ThinkingItalic) : 0;
+        // Note: don't force isCollapsed=false for non-expandable blocks here.
+        // During streaming a THINKING block starts as one wrapped line
+        // (isExpandable=false) and grows as more text arrives — flipping
+        // isCollapsed to false at that moment leaves it permanently expanded
+        // once it becomes multi-line. The constructor already initializes
+        // THINKING blocks as collapsed; trust that and only toggle on user
+        // clicks. Single-line blocks render identically in either state.
+
+        if (!block.isExpandable) {
+            // Single-line system message ("Connecting...", "Switched to x").
+            // Header strip only — chevron-less, plain italic on thinking bg.
+            wrappedCache_[i].resize(1);
+            shapedCache_[i].clear();
+            blockHeightCache_[i] = headerH;
+            charHeightCache_[i] = thinkingLh;
+            return;
+        }
+
+        // Expandable. Shift line 0 right by chevron width so the chevron
+        // glyph fits before the peek text inside the header.
+        auto bumpForChevron = [&](size_t li) {
+            if (li < wrappedCache_[i].size()) wrappedCache_[i][li].x += chevronW;
+        };
+
+        if (block.isCollapsed) {
+            // Keep only the first wrapped line as the header peek. If we're
+            // loading, also leave room for the animated dots at line's end.
+            wrappedCache_[i].resize(1);
+            auto& wl = wrappedCache_[i][0];
+            if (block.isLoading) {
+                float dotSpace = thinkingLh * 2.5f;
+                float maxTextW = effectiveW - chevronW - dotSpace - toolPadX_;
+                if (maxTextW < 20) maxTextW = 20;
+                if (wl.width > maxTextW && !wl.text.empty()) {
+                    std::string truncated = wl.text;
+                    while (!truncated.empty() &&
+                           fonts_.MeasureWidth(truncated, FontStyle::ThinkingItalic) > maxTextW) {
+                        size_t sp = truncated.rfind(' ');
+                        if (sp == std::string::npos) { truncated.clear(); break; }
+                        truncated = truncated.substr(0, sp);
+                    }
+                    if (!truncated.empty() && truncated.size() < wl.text.size())
+                        truncated += "\xe2\x80\xa6";
+                    wl.text = truncated;
+                    wl.width = fonts_.MeasureWidth(truncated, FontStyle::ThinkingItalic);
+                    wl.shapedValid = false;
+                }
+            }
+            bumpForChevron(0);
+            shapedCache_[i].clear();
+            blockHeightCache_[i] = headerH;
+            charHeightCache_[i] = thinkingLh;
+            return;
+        }
+
+        // Expanded. If there's an expandText (e.g. raw JSON detail), splice it
+        // onto the visible text and re-wrap so the body box shows everything.
+        if (!block.expandText.empty()) {
+            std::string fullText = block.text + "\n\n" + block.expandText;
+            std::string origText = block.text;
+            block.text = fullText;
+            segValid_[i] = false;
+            MeasureSegments(i);
+            block.text = origText;
+            LayoutFromSegments(i, effectiveW, clientW, wrappedCache_[i], h);
+            shapedCache_[i].clear();
+        }
+
+        // The header peek is line 0; the body holds lines 1..N. Shift the body
+        // lines' y so they land just below the header strip — no gap, the
+        // header/body share one continuous bubble. Paint adds chrome.yOff (=
+        // toolPadY_) on top of wl.y, so wl.y[1] needs to be exactly headerH.
+        if (wrappedCache_[i].size() >= 2) {
+            float desiredY1 = headerH;
+            float delta = desiredY1 - wrappedCache_[i][1].y;
+            for (size_t li = 1; li < wrappedCache_[i].size(); li++) {
+                wrappedCache_[i][li].y += delta;
+            }
+        }
+        bumpForChevron(0);
+
+        float totalH;
+        if (wrappedCache_[i].size() <= 1) {
+            totalH = headerH;
+        } else {
+            auto& last = wrappedCache_[i].back();
+            // last.y was shifted into body coordinate space (starts at headerH);
+            // paint adds chrome.yOff (toolPadY_) for the body's inner top pad.
+            // The trailing toolPadY_ here is the body's inner BOTTOM pad.
+            totalH = last.y + last.height + toolPadY_;
+        }
+        if (block.isLoading) totalH += thinkingLh;
+        blockHeightCache_[i] = totalH;
+        charHeightCache_[i] = thinkingLh;
+        return;
     }
 
     float ch = fonts_.LineHeight(StyleForType(block.type));
-    if (block.isLoading && !block.isCollapsed && block.isExpandable) h += ch;
+    if (block.type == BlockType::USER_PROMPT) h += userBubblePad_ * 2;
+    else if (block.type == BlockType::CODE) h += codeVPad_ * 2;
     blockHeightCache_[i] = h;
     charHeightCache_[i] = ch;
 }
@@ -982,13 +1292,19 @@ bool ScrollView::HasSelection() const {
 void ScrollView::SelectAll() {
     if (blocks_.empty() || wrappedCache_.empty()) return;
     TextPosition newAnchor = {0, 0, 0};
-    int lastB = (int)blocks_.size() - 1;
     TextPosition newCaret = newAnchor;
-    if (lastB < (int)wrappedCache_.size() && !wrappedCache_[lastB].empty()) {
-        auto& lastLines = wrappedCache_[lastB];
-        int lastL = (int)lastLines.size() - 1;
-        newCaret = {lastB, lastL, utf8_codepoint_count(lastLines[lastL].text)};
+    // Walk backwards to anchor the caret on the last block with wrapped lines.
+    // Collapsed TOOL_CALL blocks have an empty wrappedCache_ slot — if the
+    // conversation ends with one, the original `lastB`-only path would leave
+    // caret == anchor and HasSelection() would return false.
+    for (int bi = (int)blocks_.size() - 1; bi >= 0; bi--) {
+        if (bi >= (int)wrappedCache_.size() || wrappedCache_[bi].empty()) continue;
+        auto& lines = wrappedCache_[bi];
+        int lastL = (int)lines.size() - 1;
+        newCaret = {bi, lastL, utf8_codepoint_count(lines[lastL].text)};
+        break;
     }
+    if (newAnchor == newCaret) return;
     if (newAnchor != selAnchor_ || newCaret != selCaret_) needsRedraw_ = true;
     selAnchor_ = newAnchor;
     selCaret_ = newCaret;
@@ -1014,6 +1330,31 @@ std::string ScrollView::TextBetween(const TextPosition& start, const TextPositio
         auto& lines = wrappedCache_[bi];
         int firstL = (bi == start.block) ? start.line : 0;
         int lastL = (bi == end.block) ? end.line : (int)lines.size() - 1;
+
+        // Tool calls: emit a canonical "name args\nresult" representation so
+        // a cross-block drag-select (or Ctrl+A) captures tool output even
+        // when the block is collapsed and has no wrapped body lines. This
+        // mirrors origin/main where tool output rendered as plain text and
+        // was naturally part of any spanning selection. Expanded tool blocks
+        // also funnel through here so the clipboard always carries the same
+        // representation regardless of collapse state — partial selection
+        // within an expanded body would otherwise drift from what the user
+        // sees in the bubble.
+        if (bi < (int)blocks_.size() && blocks_[bi]->type == BlockType::TOOL_CALL) {
+            auto& block = *blocks_[bi];
+            std::string body;
+            if (!block.toolName.empty()) {
+                body += block.toolName;
+                if (!block.toolArgs.empty()) body += " " + block.toolArgs;
+            }
+            if (!block.toolResult.empty()) {
+                if (!body.empty()) body += "\n";
+                body += block.toolResult;
+            }
+            if (!body.empty()) result += body;
+            if (bi < end.block) result += '\n';
+            continue;
+        }
 
         // Table blocks: rebuild rows from the source data rather than
         // reassembling the wrapped visual-line pieces. This avoids the
@@ -1143,7 +1484,8 @@ TextPosition ScrollView::HitTest(float px, float py) const {
     if (lines.empty()) return {(int)bi, 0, 0};
 
     float blockTop = blockTopCache_[bi];
-    float localY = virtualY - blockTop;
+    BlockChrome chrome = ChromeFor(bi);
+    float localY = virtualY - blockTop - chrome.yOff;
 
     for (size_t li = 0; li < lines.size(); li++) {
         auto& wl = lines[li];
@@ -1156,7 +1498,7 @@ TextPosition ScrollView::HitTest(float px, float py) const {
             FontStyle style = StyleForType(blocks_[bi]->type);
             const_cast<ScrollView*>(this)->EnsureCaretX(mutWl, style, blocks_[bi]->rightToLeft);
 
-            float localX = px - wl.x;
+            float localX = px - wl.x - chrome.xOff;
             int len = utf8_codepoint_count(wl.text);
 
             if (!wl.rightToLeft) {
@@ -1250,11 +1592,18 @@ void ScrollView::FindWordBoundary(const TextPosition& pos, TextPosition& ws, Tex
 void ScrollView::OnMouseDown(float x, float y, bool shift) {
     TextPosition pos = HitTest(x, y);
 
-    // Toggle thinking collapse (only expandable blocks)
+    // Card-style blocks (TOOL_CALL, expandable THINKING): clicks on the
+    // header strip toggle collapse; clicks in the body select text via the
+    // normal hit-test path. When collapsed, the entire block IS the header,
+    // so any click toggles.
     if (pos.IsValid() && pos.block < (int)blocks_.size()) {
         auto& b = blocks_[pos.block];
-        if (b->type == BlockType::THINKING && b->isExpandable) {
-            if (b->isCollapsed || pos.line == 0) {
+        bool isExpandableThinking = (b->type == BlockType::THINKING && b->isExpandable);
+        if (b->type == BlockType::TOOL_CALL || isExpandableThinking) {
+            float blockTop = (pos.block < (int)blockTopCache_.size())
+                             ? blockTopCache_[pos.block] - scrollPos_ : 0;
+            BlockChrome chrome = ChromeFor(pos.block);
+            if (b->isCollapsed || y - blockTop < chrome.headerH) {
                 ToggleCollapse(pos.block);
                 return;
             }
@@ -1389,7 +1738,10 @@ void ScrollView::Paint(GLRenderer& renderer) {
     size_t blockCount = blocks_.size();
     float clientW = (float)windowW_;
     float clientH = (float)windowH_;
-    float textAreaW = clientW - leftMargin_ * 2;
+    // textAreaW is the centered chat column width. wl.x for non-bubble blocks
+    // is leftMargin_, and bubble/code/tool chrome insets text further via
+    // ChromeFor().xOff at paint time.
+    float textAreaW = contentW_;
 
     // Incremental rebuild: only last block changed (streaming)
     if (streamDirty_ && !needsFullRebuild_ && blockCount > 0) {
@@ -1461,62 +1813,223 @@ void ScrollView::Paint(GLRenderer& renderer) {
         FontStyle blockStyle = StyleForType(block.type);
         float ascent = fonts_.Ascent(blockStyle);
 
-        // Block backgrounds with padding
-        float bgPad = 6;  // Vertical padding above and below text
-        Color bg = BgForType(block.type);
-        if (bg.a > 0) {
-            if (block.type == BlockType::THINKING) {
-                renderer.DrawRect(0, blockTop - bgPad, clientW, blockH + bgPad * 2, bg);
-            } else {
-                renderer.DrawRect(leftMargin_ - 8, blockTop - bgPad, textAreaW + 16, blockH + bgPad * 2, bg);
+        BlockChrome chrome = ChromeFor(i);
+
+        // THINKING: one continuous rounded bubble in thinkingBg_. Collapsed
+        // is just the header strip; expanded keeps the same bubble shape and
+        // extends it downward — there is no visual seam between header and
+        // body, matching the wx branch design.
+        if (block.type == BlockType::THINKING) {
+            renderer.DrawRoundedRect(chrome.bubbleX, blockTop, chrome.bubbleW,
+                                     blockH, toolRadius_, thinkingBg_);
+
+            // Chevron at the header's left pad, vertically centered with the
+            // peek line. Only drawn for expandable thinking blocks.
+            if (block.isExpandable) {
+                FontStyle ts = FontStyle::ThinkingItalic;
+                float thinkAsc = fonts_.Ascent(ts);
+                std::string chev = block.isCollapsed ? "\xe2\x96\xb8 "
+                                                     : "\xe2\x96\xbe ";
+                float chevX = chrome.bubbleX + toolPadX_;
+                float chevY = blockTop + toolPadY_;
+                ShapedRun cs = fonts_.Shape(chev, ts, false);
+                renderer.DrawShapedRun(fonts_, cs, chevX, chevY, thinkAsc,
+                                       thinkingColor_);
             }
         }
 
-        // User prompt left border
+        // USER_PROMPT bubble: rounded rect right-aligned in the column. Width
+        // hugs the longest line + 2*bubblePad so short prompts read as a chip.
         if (block.type == BlockType::USER_PROMPT) {
-            renderer.DrawRect(leftMargin_ - 8, blockTop - bgPad, 3, blockH + bgPad * 2, userPromptColor_);
+            renderer.DrawRoundedRect(chrome.bubbleX, blockTop, chrome.bubbleW,
+                                     blockH, userBubbleRadius_, userPromptBg_);
         }
 
-        // Table chrome: subtle background panel, thin rule under the header,
-        // and faint vertical dividers between columns. Drawn before the text
-        // so per-line glyphs render on top.
+        // CODE block: rounded bg spanning the full column. Text is inset by
+        // codeHPad_/codeVPad_ via chrome.xOff/yOff.
+        if (block.type == BlockType::CODE) {
+            renderer.DrawRoundedRect(chrome.bubbleX, blockTop, chrome.bubbleW,
+                                     blockH, codeRadius_, codeBg_);
+        }
+
+        // TOOL_CALL: one continuous rounded bubble — body bg fills the whole
+        // shape when expanded; when collapsed only the header strip is drawn.
+        // For the expanded case the header tint is composed on top of the
+        // upper strip (rounded top corners, square bottom) so it reads as a
+        // single bubble with two color bands, not two separate cards.
+        if (block.type == BlockType::TOOL_CALL) {
+            if (chrome.bodyH > 0) {
+                renderer.DrawRoundedRect(chrome.bubbleX, blockTop, chrome.bubbleW,
+                                         blockH, toolRadius_, toolBodyBg_);
+                // Header tint: round only the top corners. A short rounded rect
+                // gives the top curves; a straight rect below fills the rest of
+                // the header height with a flat bottom edge against the body.
+                renderer.DrawRoundedRect(chrome.bubbleX, blockTop, chrome.bubbleW,
+                                         toolRadius_ * 2, toolRadius_, toolHeaderBg_);
+                renderer.DrawRect(chrome.bubbleX, blockTop + toolRadius_,
+                                  chrome.bubbleW, chrome.headerH - toolRadius_,
+                                  toolHeaderBg_);
+            } else {
+                renderer.DrawRoundedRect(chrome.bubbleX, blockTop, chrome.bubbleW,
+                                         blockH, toolRadius_, toolHeaderBg_);
+            }
+
+            // Selection feedback. A collapsed tool block has no wrapped
+            // lines, so the per-line selection pass below can't draw
+            // anything — when the selection fully spans this block, we
+            // paint tight rects behind just the actual text glyphs (left
+            // text segment + right-aligned hint), matching how selection
+            // looks on any other line of text instead of tinting the
+            // entire bubble width.
+            bool headerSelected = false;
+            if (hasSel) {
+                TextPosition bStart = {(int)i, 0, 0};
+                TextPosition bEnd = {(int)i + 1, 0, 0};
+                headerSelected = (selStart < bEnd && selEnd >= bStart && selStart <= bStart);
+            }
+
+            // Header content. Pre-formatted on the fly: chevron + name +
+            // " (args)" + right-aligned hint when collapsed (e.g. "· 12 lines").
+            std::string chev = block.isCollapsed ? "\xe2\x96\xb8 "  // ▸
+                                                 : "\xe2\x96\xbe "; // ▾
+            FontStyle code = FontStyle::Code;
+            float codeAsc = fonts_.Ascent(code);
+            float codeLh = fonts_.LineHeight(code);
+            float textY = blockTop + toolPadY_;
+            float leftStart = chrome.bubbleX + toolPadX_;
+            float xCursor = leftStart;
+
+            float chevW = fonts_.MeasureWidth(chev, code, false);
+            std::string nameStr = block.toolName.empty() ? "(tool)" : block.toolName;
+            float nameW = fonts_.MeasureWidth(nameStr, code, false);
+
+            std::string hint;
+            if (block.isCollapsed && !block.toolResult.empty()) {
+                int nlines = 1;
+                for (char c : block.toolResult) if (c == '\n') ++nlines;
+                if (nlines > 1) hint = " \xc2\xb7 " + std::to_string(nlines) + " lines";
+                else hint = " \xc2\xb7 ok";
+            } else if (block.isCollapsed && block.isLoading) {
+                hint = " \xc2\xb7 \xe2\x80\xa6";  // · …
+            }
+            float hintW = hint.empty() ? 0 : fonts_.MeasureWidth(hint, code, false);
+            float rightLimit = chrome.bubbleX + chrome.bubbleW - toolPadX_;
+            float argsRight = rightLimit - hintW;
+            float argsAvail = argsRight - (leftStart + chevW + nameW);
+
+            // Truncate args display ahead of drawing so we know the
+            // left-segment's true width for the selection rect.
+            std::string argsDisplay;
+            float argsDisplayW = 0;
+            if (!block.toolArgs.empty() && argsAvail > 20) {
+                argsDisplay = "(" + block.toolArgs + ")";
+                argsDisplayW = fonts_.MeasureWidth(argsDisplay, code, false);
+                if (argsDisplayW > argsAvail) {
+                    const std::string ell = "\xe2\x80\xa6)";  // …)
+                    float ellW = fonts_.MeasureWidth(ell, code, false);
+                    float budget = argsAvail - ellW;
+                    if (budget < 1) budget = 1;
+                    size_t cut = 1;  // start past the leading '('
+                    float w = fonts_.MeasureWidth("(", code, false);
+                    while (cut < argsDisplay.size()) {
+                        size_t stride = utf8_stride(argsDisplay, cut);
+                        std::string ch = argsDisplay.substr(cut, stride);
+                        float cw = fonts_.MeasureWidth(ch, code, false);
+                        if (w + cw > budget) break;
+                        w += cw;
+                        cut += stride;
+                    }
+                    argsDisplay = argsDisplay.substr(0, cut) + ell;
+                    argsDisplayW = fonts_.MeasureWidth(argsDisplay, code, false);
+                }
+            }
+
+            // Selection rects behind the two text segments (left = chev+name+args,
+            // right = hint), sized to glyph height like a regular text line.
+            if (headerSelected) {
+                float leftW = chevW + nameW + argsDisplayW;
+                if (leftW > 0) {
+                    renderer.DrawRect(leftStart, textY, leftW, codeLh, selBgColor_);
+                }
+                if (hintW > 0) {
+                    renderer.DrawRect(argsRight, textY, hintW, codeLh, selBgColor_);
+                }
+            }
+
+            // Color the header runs. When selected, swap to selTextColor_
+            // so text stays legible against the selection background.
+            Color cChev = headerSelected ? selTextColor_ : toolAccent_;
+            Color cName = headerSelected ? selTextColor_ : toolAccent_;
+            Color cArgs = headerSelected ? selTextColor_ : codeColor_;
+            Color cHint = headerSelected ? selTextColor_ : toolDim_;
+
+            ShapedRun chevShape = fonts_.Shape(chev, code, false);
+            renderer.DrawShapedRun(fonts_, chevShape, xCursor, textY, codeAsc, cChev);
+            xCursor += chevW;
+
+            ShapedRun nameShape = fonts_.Shape(nameStr, code, false);
+            renderer.DrawShapedRun(fonts_, nameShape, xCursor, textY, codeAsc, cName);
+            xCursor += nameW;
+
+            if (!argsDisplay.empty()) {
+                ShapedRun argsShape = fonts_.Shape(argsDisplay, code, false);
+                renderer.DrawShapedRun(fonts_, argsShape, xCursor, textY, codeAsc, cArgs);
+            }
+            if (!hint.empty()) {
+                ShapedRun hintShape = fonts_.Shape(hint, code, false);
+                renderer.DrawShapedRun(fonts_, hintShape, argsRight, textY, codeAsc, cHint);
+            }
+        }
+
+        // Table chrome (wx-branch look): no body fill (page bg shows through),
+        // tinted header row, full grid of 1px rules at every internal column
+        // and row edge, plus a 1px outer border. Glyphs render on top.
         if (block.type == BlockType::TABLE && i < tableLayoutCache_.size()) {
             auto& tinfo = tableLayoutCache_[i];
             if (!tinfo.colX.empty() && !wrappedCache_[i].empty()) {
-                Color tableBg = Color::RGB(40, 40, 43);
-                Color ruleColor = Color::RGB(90, 90, 95);
-                Color dividerColor = Color::RGB(60, 60, 64);
-                renderer.DrawRect(leftMargin_ - 4, blockTop - 2,
-                                  tinfo.totalW + 8, blockH + 4, tableBg);
-                // Column dividers (skip the leftmost edge).
-                for (size_t c = 1; c < tinfo.colX.size(); c++) {
-                    float dx = leftMargin_ + tinfo.colX[c];
-                    renderer.DrawRect(dx - 0.5f, blockTop - 2, 1, blockH + 4, dividerColor);
-                }
-                // Header rule.
+                const float tableX = leftMargin_;
+                const float tableY = blockTop;
+                const float tableW = tinfo.totalW;
+                const float tableH = blockH;
+
+                // Header row fill.
                 if (tinfo.headerBottomY > 0) {
-                    renderer.DrawRect(leftMargin_ - 4, blockTop + tinfo.headerBottomY - 1,
-                                      tinfo.totalW + 8, 1.5f, ruleColor);
+                    renderer.DrawRect(tableX, tableY, tableW, tinfo.headerBottomY, tableHeaderBg_);
                 }
+
+                const float bw = tableBorderW_;
+                const float bhalf = bw * 0.5f;
+
+                // Horizontal rules between rows.
+                for (size_t r = 0; r + 1 < tinfo.rowBottomY.size(); r++) {
+                    float ry = tableY + tinfo.rowBottomY[r];
+                    renderer.DrawRect(tableX, ry - bhalf, tableW, bw, tableBorderColor_);
+                }
+
+                // Vertical column dividers — internal edges only. colX has N
+                // entries for an N-column table (left edge of each column);
+                // internal dividers sit at colX[1..N-1].
+                for (size_t c = 1; c < tinfo.colX.size(); c++) {
+                    float dx = tableX + tinfo.colX[c];
+                    renderer.DrawRect(dx - bhalf, tableY, bw, tableH, tableBorderColor_);
+                }
+
+                // Outer border outline (top/bottom/left/right).
+                renderer.DrawRect(tableX, tableY, tableW, bw, tableBorderColor_);
+                renderer.DrawRect(tableX, tableY + tableH - bw, tableW, bw, tableBorderColor_);
+                renderer.DrawRect(tableX, tableY, bw, tableH, tableBorderColor_);
+                renderer.DrawRect(tableX + tableW - bw, tableY, bw, tableH, tableBorderColor_);
             }
         }
 
-        // Thinking collapse/expand triangle (only for expandable blocks)
-        if (block.type == BlockType::THINKING && block.isExpandable && !wrappedCache_[i].empty()) {
-            float ch = fonts_.LineHeight(FontStyle::ThinkingItalic);
-            float triSize = ch * 0.4f;
-            float triY = blockTop + wrappedCache_[i][0].y + ch / 2;
-            if (block.isCollapsed)
-                renderer.DrawTriRight(4, triY, triSize, thinkingColor_);
-            else
-                renderer.DrawTriDown(4 + triSize / 2, triY, triSize, thinkingColor_);
-        }
-
-        // Draw lines
+        // Draw lines. For bubble/code/tool blocks the wrapped lines store
+        // wl.x = leftMargin_; chrome.xOff/yOff shift them into the bubble or
+        // code box, and the line draw + selection rect must apply the same
+        // shift the hit-test does (else clicks land off-text).
         auto& lines = wrappedCache_[i];
         for (size_t li = 0; li < lines.size(); li++) {
             auto& wl = lines[li];
-            float absY = blockTop + wl.y;
+            float absY = blockTop + wl.y + chrome.yOff;
 
             if (absY + wl.height < 0) continue;
             if (absY > clientH) break;
@@ -1555,7 +2068,7 @@ void ScrollView::Paint(GLRenderer& renderer) {
                     float vx2 = CaretXForOffset(wl, selToChar);
                     float left = std::min(vx1, vx2);
                     float right = std::max(vx1, vx2);
-                    renderer.DrawRect(wl.x + left, absY, right - left, wl.height, selBgColor_);
+                    renderer.DrawRect(wl.x + chrome.xOff + left, absY, right - left, wl.height, selBgColor_);
                 }
             }
 
@@ -1576,7 +2089,7 @@ void ScrollView::Paint(GLRenderer& renderer) {
                 for (size_t ri = 0; ri < wl.styledRuns.size(); ri++) {
                     auto& run = wl.styledRuns[ri];
                     auto& shaped = shapes[ri];
-                    float runX = wl.x + (ri < wl.runXOffsets.size() ? wl.runXOffsets[ri] : 0);
+                    float runX = wl.x + chrome.xOff + (ri < wl.runXOffsets.size() ? wl.runXOffsets[ri] : 0);
                     float runAsc = fonts_.Ascent(run.style);
                     int runChars = utf8_codepoint_count(run.text);
                     int runStartChar = useExplicitStarts ? wl.runCharStarts[ri] : charAcc;
@@ -1600,43 +2113,53 @@ void ScrollView::Paint(GLRenderer& renderer) {
             } else if (!wl.text.empty() && !shapes.empty()) {
                 auto& shaped = shapes[0];
                 Color normalC = ColorForType(block.type);
+                float drawX = wl.x + chrome.xOff;
 
                 if (!lineSelected || (selFromChar == 0 && selToChar == lineCharLen)) {
                     Color c = (lineSelected && selFromChar == 0 && selToChar == lineCharLen)
                               ? selTextColor_ : normalC;
-                    renderer.DrawShapedRun(fonts_, shaped, wl.x, absY, ascent, c);
+                    renderer.DrawShapedRun(fonts_, shaped, drawX, absY, ascent, c);
                 } else if (lineSelected && selFromChar < selToChar) {
                     // Per-glyph coloring for partial selection
                     for (auto& g : shaped.glyphs) {
                         int gc = utf8_byte_to_char(wl.text, g.cluster);
                         Color c = (gc >= selFromChar && gc < selToChar) ? selTextColor_ : normalC;
                         const GlyphInfo& gi = fonts_.EnsureGlyph(g.glyphId, g.faceIdx);
-                        renderer.DrawGlyph(gi, wl.x + g.xPos, absY, c, ascent);
+                        renderer.DrawGlyph(gi, drawX + g.xPos, absY, c, ascent);
                     }
                 } else {
-                    renderer.DrawShapedRun(fonts_, shaped, wl.x, absY, ascent, normalC);
+                    renderer.DrawShapedRun(fonts_, shaped, drawX, absY, ascent, normalC);
                 }
             }
         }
 
-        // Loading dots for thinking blocks
+        // Loading dots for thinking blocks. Anchored relative to the column
+        // (chrome.bubbleX + toolPadX_) so they never spill into the side
+        // margin, and bounded against the right edge so collapsed peek lines
+        // can't push them off the bubble.
         if (block.type == BlockType::THINKING && block.isLoading && !lines.empty()) {
             float ch = charHeightCache_[i];
             float dotR = ch / 5;
             float dotSpacing = dotR * 3;
+            float dotsW = dotSpacing * (LOADING_DOT_COUNT - 1) + dotR * 2;
+            float rightLimit = chrome.bubbleX + chrome.bubbleW - toolPadX_;
 
             float dotX, dotY;
             if (block.isCollapsed || !block.isExpandable) {
-                // Collapsed or single-line: dots at end of first line
+                // Collapsed / single-line: dots at end of peek text on the
+                // header row.
                 auto& firstLine = lines[0];
-                dotX = firstLine.x + firstLine.width + dotSpacing;
-                dotY = blockTop + firstLine.y + ch / 2;
+                dotX = firstLine.x + chrome.xOff + firstLine.width + dotSpacing;
+                dotY = blockTop + firstLine.y + chrome.yOff + ch / 2;
             } else {
-                // Expanded multi-line: dots on new line below last text
+                // Expanded: dots on a new row at the bottom of the body box.
+                // RebuildSingleBlock already reserved `thinkingLh` for this.
                 auto& lastLine = lines.back();
-                dotX = leftMargin_ + 10;
-                dotY = blockTop + lastLine.y + lastLine.height + ch / 2;
+                dotX = chrome.bubbleX + toolPadX_;
+                dotY = blockTop + lastLine.y + chrome.yOff + lastLine.height + ch / 2;
             }
+            if (dotX + dotsW > rightLimit) dotX = rightLimit - dotsW;
+            if (dotX < chrome.bubbleX + toolPadX_) dotX = chrome.bubbleX + toolPadX_;
 
             for (int d = 0; d < LOADING_DOT_COUNT; d++) {
                 float cx = dotX + d * dotSpacing;

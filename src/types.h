@@ -21,7 +21,7 @@
 #include <cstddef>
 #include <ctime>
 
-enum class BlockType { NORMAL, USER_PROMPT, THINKING, CODE, LOADING, TABLE };
+enum class BlockType { NORMAL, USER_PROMPT, THINKING, CODE, LOADING, TABLE, TOOL_CALL };
 
 // Platform-independent key/modifier constants
 namespace Key {
@@ -84,9 +84,17 @@ struct TextBlock {
     bool isExpandable = false;  // True if block wraps to more than 1 line
     std::string expandText;     // Full detail text shown when expanded (e.g. raw JSON for errors)
 
+    // Tool-call block fields (only populated when type == TOOL_CALL).
+    // toolArgs is a single-line summary suitable for the header chip;
+    // toolResult is the raw output, shown only when the block is expanded.
+    std::string toolName;
+    std::string toolArgs;
+    std::string toolResult;
+
     TextBlock() : type(BlockType::NORMAL) {}
     TextBlock(BlockType t, const std::string& txt, bool rtl = false)
-        : type(t), text(txt), rightToLeft(rtl), isCollapsed(t == BlockType::THINKING) {}
+        : type(t), text(txt), rightToLeft(rtl),
+          isCollapsed(t == BlockType::THINKING || t == BlockType::TOOL_CALL) {}
 
     bool HasStyledRuns() const { return !runs.empty(); }
     std::string GetFullText() const {

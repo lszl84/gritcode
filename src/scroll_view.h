@@ -56,6 +56,8 @@ public:
         size_t last = blocks_.size() - 1;
         return blockTopCache_[last] + blockHeightCache_[last] - scrollPos_;
     }
+    float ColumnLeft() const { return leftMargin_; }
+    float ColumnWidth() const { return contentW_; }
 
     void Paint(GLRenderer& renderer);
     bool NeedsRedraw() const { return needsRedraw_; }
@@ -95,8 +97,33 @@ private:
     float topMargin_ = 0;
     float blockSpacing_ = 0;
 
+    // Centered chat column. leftMargin_ is recomputed from these so it always
+    // points at the column's left edge. When the window is wider than
+    // maxContentW_ + 2*sideMargin_, the column hugs the center with extra
+    // whitespace on either side; below that the column shrinks down to the
+    // sideMargin floor.
+    float sideMargin_ = 0;
+    float maxContentW_ = 0;
+    float contentW_ = 0;
+
+    // Per-block-type chrome paddings/radii (scaled at Init time).
+    float userBubblePad_ = 0;
+    float userBubbleRadius_ = 0;
+    float codeHPad_ = 0;
+    float codeVPad_ = 0;
+    float codeRadius_ = 0;
+    float toolPadX_ = 0;
+    float toolPadY_ = 0;
+    float toolGap_ = 0;
+    float toolRadius_ = 0;
+    float tableHPad_ = 0;
+    float tableVPad_ = 0;
+    float tableBorderW_ = 0;
+
     Color bgColor_, normalColor_, userPromptColor_, thinkingColor_, codeColor_;
     Color codeBg_, thinkingBg_, userPromptBg_;
+    Color toolHeaderBg_, toolBodyBg_, toolAccent_, toolDim_;
+    Color tableHeaderBg_, tableBorderColor_;
     Color selBgColor_, selTextColor_;
 
     mutable std::vector<std::vector<std::vector<ShapedRun>>> shapedCache_;
@@ -111,6 +138,7 @@ private:
     struct TableLayoutInfo {
         std::vector<float> colX;   // left edge of each column, relative to block's text area
         std::vector<float> colW;   // per-column content widths
+        std::vector<float> rowBottomY;  // bottom y of each row (relative to block top)
         float hPad = 0;            // horizontal padding inside each cell
         float vPad = 0;            // vertical padding inside each cell
         float headerBottomY = 0;   // y of the rule under the header row, relative to block top
@@ -174,4 +202,26 @@ private:
     Color ColorForType(BlockType t) const;
     Color BgForType(BlockType t) const;
     void InitColors();
+
+    // Recomputes leftMargin_/contentW_ from windowW_, sideMargin_, maxContentW_.
+    // Call after windowW_ changes.
+    void RecomputeColumn();
+
+    // Per-block paint offsets. xOff/yOff shift drawn text relative to wl.x and
+    // wl.y (bubbles inset, code padded, tool body sits below the header).
+    // bubbleX/bubbleW describe the right-aligned bubble for USER_PROMPT, the
+    // rounded box for CODE/TOOL_CALL.
+    struct BlockChrome {
+        float xOff = 0;
+        float yOff = 0;
+        float bubbleX = 0;
+        float bubbleW = 0;
+        float headerH = 0;  // TOOL_CALL only: header strip height
+        float bodyH = 0;    // TOOL_CALL only: body box height (0 when collapsed)
+    };
+    BlockChrome ChromeFor(size_t i) const;
+
+    // Build wrapped body lines for an expanded TOOL_CALL block. Mutates the
+    // block's wrappedCache slot to hold one WrappedLine per visual body line.
+    void LayoutToolCallBody(size_t idx, float bodyTextW);
 };
