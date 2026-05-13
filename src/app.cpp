@@ -1042,6 +1042,8 @@ void App::RestoreSessionToView() {
                 if (m.role == "user") {
                     scrollView_.AppendStream(BlockType::USER_PROMPT, m.content);
                 } else if (m.role == "assistant") {
+                    if (!m.reasoningContent.empty())
+                        scrollView_.AppendStream(BlockType::THINKING, m.reasoningContent);
                     if (!m.content.empty())
                         scrollView_.AddBlocks(mdRenderer.Render(m.content, true));
                     if (!m.toolCalls.empty()) {

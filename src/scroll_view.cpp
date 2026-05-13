@@ -59,8 +59,8 @@ bool ScrollView::Init(int w, int h, float scale) {
     windowH_ = h;
     InitColors();
 
-    int baseFontPx = (int)(14 * scale + 0.5f);
-    if (baseFontPx < 14) baseFontPx = 14;
+    int baseFontPx = (int)(15 * scale + 0.5f);
+    if (baseFontPx < 15) baseFontPx = 15;
     if (!fonts_.Init(baseFontPx)) return false;
 
     // Centered chat column (ported from wxWidgets branch). Column caps at
@@ -82,6 +82,7 @@ bool ScrollView::Init(int w, int h, float scale) {
     tableHPad_ = 10 * scale;
     tableVPad_ = 6 * scale;
     tableBorderW_ = std::max(1.0f, scale);
+    paraLineGap_ = 0;
 
     float lh = fonts_.LineHeight(FontStyle::Regular);
     topMargin_ = lh;
@@ -428,6 +429,10 @@ void ScrollView::LayoutFromSegments(size_t idx, float textAreaW, float clientW,
 
     float effectiveW = textAreaW - indent;
     if (effectiveW < 50) effectiveW = 50;
+    // Paragraph text gets a tiny bit of extra leading to match wx's
+    // GetTextExtent-derived line height. Code/thinking/tool blocks render in
+    // dense monospace and keep their native metrics.
+    float paraGap = (blockStyle == FontStyle::Regular) ? paraLineGap_ : 0.0f;
     std::string lineText;
     float lineW = 0, lineH = 0;
     // Track styled runs being built for current line
@@ -441,7 +446,7 @@ void ScrollView::LayoutFromSegments(size_t idx, float textAreaW, float clientW,
         bool lineRtl = !lineText.empty() ? DetectRTL(lineText) : rtl;
 
         if (lineText.empty() && lineRuns.empty() && !hasCurrentRun) {
-            float h = segs.empty() ? fonts_.LineHeight(blockStyle) : segs[0].height;
+            float h = (segs.empty() ? fonts_.LineHeight(blockStyle) : segs[0].height) + paraGap;
             WrappedLine wl = MakeLine("", lineRtl, 0, h, leftMargin_, clientW, (int)indent);
             wl.y = outH;
             out.push_back(std::move(wl));
@@ -455,7 +460,8 @@ void ScrollView::LayoutFromSegments(size_t idx, float textAreaW, float clientW,
             // Actually we need the offset before adding, let me fix
         }
 
-        WrappedLine wl = MakeLine(lineText, lineRtl, lineW, lineH > 0 ? lineH : fonts_.LineHeight(blockStyle),
+        float effLh = (lineH > 0 ? lineH : fonts_.LineHeight(blockStyle)) + paraGap;
+        WrappedLine wl = MakeLine(lineText, lineRtl, lineW, effLh,
                                    leftMargin_, clientW, (int)indent);
         wl.y = outH;
 
@@ -475,7 +481,7 @@ void ScrollView::LayoutFromSegments(size_t idx, float textAreaW, float clientW,
         }
 
         out.push_back(std::move(wl));
-        outH += lineH > 0 ? lineH : fonts_.LineHeight(blockStyle);
+        outH += effLh;
         lineText.clear();
         lineW = 0;
         lineH = 0;

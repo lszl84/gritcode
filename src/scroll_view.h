@@ -119,6 +119,10 @@ private:
     float tableHPad_ = 0;
     float tableVPad_ = 0;
     float tableBorderW_ = 0;
+    // Extra leading added per visual line for regular paragraph text — wx's
+    // GetTextExtent reports a slightly taller line box than FreeType's
+    // metrics.height/64, so we add ~1 scaled px to match the wx-branch feel.
+    float paraLineGap_ = 0;
 
     Color bgColor_, normalColor_, userPromptColor_, thinkingColor_, codeColor_;
     Color codeBg_, thinkingBg_, userPromptBg_;
