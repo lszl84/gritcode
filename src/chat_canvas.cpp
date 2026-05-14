@@ -1337,6 +1337,13 @@ BlockPos ChatCanvas::HitTest(const wxPoint& canvasPt) const {
                 yLine += kCodePadding;
             }
 
+            // Above the first line (upper-spacing-half claimed by this block,
+            // or top-padding for CodeBlock/UserPrompt): snap to block start.
+            // Without this, the line loop matches nothing and we fall through
+            // to the end-of-block return, which briefly extends the selection
+            // to wrap the whole block while the user drags past a line edge.
+            if (canvasPt.y < yLine) return {(int)i, 0};
+
             for (const auto& wl : b.lines) {
                 if (canvasPt.y >= yLine && canvasPt.y < yLine + wl.height) {
                     int xRel = canvasPt.x - textXLeft;
@@ -1354,7 +1361,13 @@ BlockPos ChatCanvas::HitTest(const wxPoint& canvasPt) const {
             // Below all lines of this block: return end.
             return {(int)i, (int)b.visibleText.size()};
         }
-        lastVisitedBlock = (int)i;
+        // Track the last block the cursor has passed (block bottom is at or
+        // above the cursor). Updating unconditionally walked past the cursor
+        // and left lastVisitedBlock at blocks_.size()-1, so a drag into the
+        // orphan slice of a gap (lower spacing half, not claimed by either
+        // neighbor) snapped to end-of-document — visually wrapping every
+        // block between the anchor and the doc tail.
+        if (canvasPt.y >= blockBottom) lastVisitedBlock = (int)i;
         y = blockBottom;
     }
     // Mouse above all blocks: return start of first block.
