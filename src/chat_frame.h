@@ -77,6 +77,12 @@ private:
     std::vector<nlohmann::json> history_;
     std::string activeAssistantText_;
     std::string activeReasoning_;  // accumulated reasoning_content for the in-flight assistant turn
+    // Per-completion-round flag. Reset in StartCompletion. Flipped true the
+    // first time we emit a Thinking block for this round (either at the
+    // first content/tool_call delta, or at HandleCompletion for a pure-
+    // reasoning response). Keeps us from rendering the same reasoning twice
+    // when a delta carries both reasoning and content.
+    bool thinkingEmitted_ = false;
     bool streaming_ = false;
 
     // SSE parsing state. Doubles as raw-body capture: on a non-2xx response the
@@ -217,4 +223,11 @@ private:
                          const std::string& argsJson,
                          const std::string& result);
     void RenderErrorBlock(const wxString& msg);
+    // Append a thinking block to the canvas. Always starts collapsed.
+    // Empty text is a no-op (a model can advertise reasoning_content but
+    // send nothing).
+    void RenderThinkingBlock(const wxString& text);
+    // Emit the pending thinking block (if any) for the current completion
+    // round and set thinkingEmitted_ true. Idempotent.
+    void EmitPendingThinking();
 };

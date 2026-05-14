@@ -18,6 +18,9 @@ struct Palette {
     wxColour toolBodyBg;
     wxColour toolAccent;     // tool name + chevron color
     wxColour toolDim;        // hint text ("· N lines", separator)
+    wxColour thinkingBg;     // uniform background for thinking blocks
+    wxColour thinkingText;   // body text color for thinking blocks (slightly dim)
+    wxColour thinkingAccent; // chevron + "Thinking" label color
 };
 
 // Custom-painted scrolling canvas that owns a vector<Block> and renders it
@@ -205,6 +208,7 @@ private:
     wxFont fontBodyItalic_;
     wxFont fontBodyBoldItalic_;
     wxFont fontCode_;
+    wxFont fontThinking_;       // smaller italic font for thinking-block body
     wxFont fontH_[6];
     wxFont fontHB_[6];   // bold variant for inline bold inside heading
     bool fontsReady_ = false;

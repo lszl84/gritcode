@@ -9,6 +9,7 @@ enum class BlockType {
     UserPrompt,
     Table,
     ToolCall,
+    Thinking,
 };
 
 enum class TableAlign { Left, Center, Right };
@@ -93,6 +94,15 @@ struct Block {
     std::vector<int> toolHeaderGlyphX;
     int toolHeaderSrcLen = 0;
     int toolHeaderVisChars = 0;
+
+    // Thinking-block-specific. Reasoning text lives in rawText/visibleText.
+    // toolExpanded reused for the collapsed/expanded toggle. lines holds the
+    // wrapped reasoning (italic-styled runs). thinkingSingleLine is set in
+    // LayoutBlock when the text fits on a single visual line *and* contains
+    // no embedded newlines — that mode renders the text inline with no
+    // chevron and no toggle, so 1-liners look like an inline italic comment
+    // rather than a collapsible block.
+    bool thinkingSingleLine = false;
 };
 
 // (blockIndex, charOffset-in-visibleText). Stable across reflows because both

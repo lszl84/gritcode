@@ -423,10 +423,12 @@ ChatFrame::ChatFrame()
                     case BlockType::UserPrompt: typ = "user";      break;
                     case BlockType::Table:      typ = "table";     break;
                     case BlockType::ToolCall:   typ = "tool";      break;
+                    case BlockType::Thinking:   typ = "thinking";  break;
                 }
                 arr.push_back({
                     {"index", i}, {"yTop", y}, {"height", h}, {"type", typ},
-                    {"toolExpanded", blocks[i].type == BlockType::ToolCall
+                    {"toolExpanded", (blocks[i].type == BlockType::ToolCall
+                                      || blocks[i].type == BlockType::Thinking)
                                      ? blocks[i].toolExpanded : false},
                     {"visibleLen", (int)blocks[i].visibleText.size()},
                 });
@@ -527,6 +529,7 @@ nlohmann::json ChatFrame::BuildBlocksSnapshot() const {
         case BlockType::UserPrompt: return "user";
         case BlockType::Table:      return "table";
         case BlockType::ToolCall:   return "tool";
+        case BlockType::Thinking:   return "thinking";
         }
         return "?";
     };
@@ -570,6 +573,10 @@ nlohmann::json ChatFrame::BuildBlocksSnapshot() const {
             e["toolResultPreview"] = rprev.ToStdString();
             e["toolResultChars"] = (int)b.toolResult.Length();
             e["expanded"] = b.toolExpanded;
+        } else if (b.type == BlockType::Thinking) {
+            e["expanded"] = b.toolExpanded;
+            e["singleLine"] = b.thinkingSingleLine;
+            e["chars"] = (int)b.rawText.Length();
         }
         out.push_back(std::move(e));
     }
@@ -801,6 +808,14 @@ void ChatFrame::RestoreCanvasFromHistory() {
         }
 
         if (role == "assistant") {
+            // 0. Reasoning is rendered before content/tool blocks so the
+            // visual order matches the streamed-turn order.
+            if (m.contains("reasoning_content") && m["reasoning_content"].is_string()) {
+                std::string reasoning = m["reasoning_content"].get<std::string>();
+                if (!reasoning.empty()) {
+                    RenderThinkingBlock(wxString::FromUTF8(reasoning));
+                }
+            }
             // 1. Render content (if any) through the markdown stream.
             if (m.contains("content") && m["content"].is_string()) {
                 std::string content = m["content"].get<std::string>();
@@ -903,6 +918,7 @@ void ChatFrame::StartCompletion() {
     activeAssistantText_.clear();
     activeReasoning_.clear();
     activeToolCalls_.clear();
+    thinkingEmitted_ = false;
     sseBuf_.clear();
     mdStream_ = std::make_unique<MdStream>([this](Block b) {
         canvas_->AddBlock(std::move(b));
@@ -1045,13 +1061,24 @@ void ChatFrame::OnStreamData(std::string_view chunk) {
                 if (delta.contains("content") && delta["content"].is_string()) {
                     std::string content = delta["content"].get<std::string>();
                     if (!content.empty()) {
+                        // First non-reasoning byte of this round: emit the
+                        // thinking block now so it lands before any content
+                        // block the markdown stream is about to push out.
+                        EmitPendingThinking();
                         activeAssistantText_ += content;
                         if (mdStream_) mdStream_->Feed(wxString::FromUTF8(content));
                     }
                 }
 
                 // ---- tool_calls ----
-                if (delta.contains("tool_calls") && delta["tool_calls"].is_array()) {
+                if (delta.contains("tool_calls") && delta["tool_calls"].is_array()
+                    && !delta["tool_calls"].empty()) {
+                    // Same as the content case — render thinking before any
+                    // tool block lands. RenderToolBlock fires later in
+                    // HandleCompletion, but emitting here keeps the order
+                    // consistent regardless of when the model interleaves
+                    // tool_calls and content.
+                    EmitPendingThinking();
                     for (const auto& tc : delta["tool_calls"]) {
                         int idx = tc.value("index", 0);
                         if ((int)activeToolCalls_.size() <= idx)
@@ -1145,6 +1172,11 @@ wxString ChatFrame::ExtractErrorBody() const {
 }
 
 void ChatFrame::HandleCompletion(const wxString& errorIfFailed) {
+    // Pure-reasoning response (model returned reasoning_content but no content
+    // or tool_calls): emit the thinking block here so the user sees what the
+    // model produced. No-op if a prior content/tool delta already emitted it.
+    EmitPendingThinking();
+
     if (!errorIfFailed.IsEmpty()) {
         RenderErrorBlock(errorIfFailed);
         // Roll back the failed turn from history_: drop any tool messages plus
@@ -1383,6 +1415,23 @@ void ChatFrame::RenderErrorBlock(const wxString& msg) {
     InlineRun r; r.text = msg; r.italic = true;
     b.runs.push_back(r);
     canvas_->AddBlock(std::move(b));
+}
+
+void ChatFrame::RenderThinkingBlock(const wxString& text) {
+    if (text.IsEmpty()) return;
+    Block b;
+    b.type = BlockType::Thinking;
+    b.rawText = text;
+    b.visibleText = text;
+    b.toolExpanded = false;  // collapsed by default per spec
+    canvas_->AddBlock(std::move(b));
+}
+
+void ChatFrame::EmitPendingThinking() {
+    if (thinkingEmitted_) return;
+    thinkingEmitted_ = true;
+    if (activeReasoning_.empty()) return;
+    RenderThinkingBlock(wxString::FromUTF8(activeReasoning_));
 }
 
 void ChatFrame::DispatchNextQueued() {

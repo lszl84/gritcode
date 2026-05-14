@@ -55,6 +55,9 @@ Palette MakePalette() {
         p.toolBodyBg    = wxColour( 40,  42,  50);
         p.toolAccent    = wxColour(140, 200, 255);
         p.toolDim       = wxColour(140, 145, 158);
+        p.thinkingBg    = wxColour( 42,  42,  48);
+        p.thinkingText  = wxColour(180, 180, 190);
+        p.thinkingAccent= wxColour(150, 155, 170);
     } else {
         p.bg            = wxColour(248, 248, 248);
         p.text          = wxColour( 28,  28,  32);
@@ -69,6 +72,9 @@ Palette MakePalette() {
         p.toolBodyBg    = wxColour(244, 246, 250);
         p.toolAccent    = wxColour( 30,  90, 170);
         p.toolDim       = wxColour(120, 130, 145);
+        p.thinkingBg    = wxColour(242, 242, 246);
+        p.thinkingText  = wxColour( 90,  90, 100);
+        p.thinkingAccent= wxColour(120, 125, 140);
     }
     return p;
 }
@@ -193,6 +199,7 @@ void ChatCanvas::EnsureFonts() {
     fontBodyItalic_ = wxFont(wxFontInfo(11).Family(wxFONTFAMILY_DEFAULT).Italic());
     fontBodyBoldItalic_ = wxFont(wxFontInfo(11).Family(wxFONTFAMILY_DEFAULT).Bold().Italic());
     fontCode_ = wxFont(wxFontInfo(10).Family(wxFONTFAMILY_TELETYPE));
+    fontThinking_ = wxFont(wxFontInfo(10).Family(wxFONTFAMILY_DEFAULT).Italic());
 
     static const int hSizes[6] = {20, 17, 14, 13, 12, 11};
     for (int i = 0; i < 6; ++i) {
@@ -208,6 +215,7 @@ const wxFont& ChatCanvas::FontFor(const InlineRun& r, BlockType bt, int hLvl) co
         int idx = ClampInt(hLvl - 1, 0, 5);
         return fontH_[idx];
     }
+    if (bt == BlockType::Thinking) return fontThinking_;
     if (r.bold && r.italic) return fontBodyBoldItalic_;
     if (r.bold) return fontBodyBold_;
     if (r.italic) return fontBodyItalic_;
@@ -217,7 +225,7 @@ const wxFont& ChatCanvas::FontFor(const InlineRun& r, BlockType bt, int hLvl) co
 void ChatCanvas::ToggleToolCall(int blockIdx) {
     if (blockIdx < 0 || blockIdx >= (int)blocks_.size()) return;
     Block& b = blocks_[blockIdx];
-    if (b.type != BlockType::ToolCall) return;
+    if (b.type != BlockType::ToolCall && b.type != BlockType::Thinking) return;
     b.toolExpanded = !b.toolExpanded;
     // Only this one block's height changed. Invalidate it and let Relayout
     // patch the offset table — every other block keeps its layout cache.
@@ -429,6 +437,56 @@ void ChatCanvas::LayoutBlock(wxDC& dc, Block& b, int contentWidth, int /*topSpac
         }
         // Total block height = last row's bottom edge + 1px bottom border.
         b.cachedHeight = b.tableRowY.back() + 1;
+        return;
+    }
+
+    if (b.type == BlockType::Thinking) {
+        // Body lines: wrap the reasoning text as italic runs. WrapRuns picks
+        // fontThinking_ via FontFor(BlockType::Thinking). Inner width matches
+        // the padding rhythm of tool blocks.
+        int innerW = contentWidth - kToolPadX * 2;
+        if (innerW < 50) innerW = 50;
+        std::vector<InlineRun> runs;
+        InlineRun r;
+        r.text = b.rawText;
+        r.italic = true;
+        runs.push_back(r);
+        b.lines.clear();
+        WrapRuns(dc, runs, BlockType::Thinking, 0, innerW, b.lines);
+
+        // Single-line mode: no embedded newlines AND wraps to one visual line.
+        // Render the body inline (no chevron, no toggle).
+        const bool hasNewline = (b.rawText.Find('\n') != wxNOT_FOUND);
+        b.thinkingSingleLine = (!hasNewline && b.lines.size() <= 1);
+
+        dc.SetFont(fontThinking_);
+        int lineH = dc.GetCharHeight();
+        // Pre-compute chevron width once (used in multi-line modes).
+        b.toolChevStr = wxString(b.toolExpanded ? L'▾' : L'▸') + " ";
+        wxCoord cw = 0, ch = 0;
+        dc.GetTextExtent(b.toolChevStr, &cw, &ch);
+        b.toolChevW = cw;
+
+        if (b.thinkingSingleLine) {
+            // Single line — height = padding + lineH.
+            b.toolHeaderH = 0;
+            int h = kToolPadY * 2;
+            if (!b.lines.empty()) h += b.lines.front().height;
+            else h += lineH;
+            b.cachedHeight = h;
+        } else if (!b.toolExpanded) {
+            // Collapsed multi-line: only the "▸ Thinking" header is drawn.
+            b.toolHeaderH = lineH + kToolPadY * 2;
+            b.cachedHeight = b.toolHeaderH;
+        } else {
+            // Expanded multi-line: header + gap + body lines (each with own height).
+            b.toolHeaderH = lineH + kToolPadY * 2;
+            int bodyH = 0;
+            for (const auto& wl : b.lines) bodyH += wl.height;
+            // Bottom padding for the body region (top padding for the body
+            // region is the kToolGap below the header).
+            b.cachedHeight = b.toolHeaderH + kToolGap + bodyH + kToolPadY;
+        }
         return;
     }
 
@@ -940,6 +998,7 @@ void ChatCanvas::PaintBlock(wxDC& dc, const Block& b, int yTop, BlockPos selStar
         case BlockType::UserPrompt: tag = "PaintBlock:User";      break;
         case BlockType::Table:      tag = "PaintBlock:Table";     break;
         case BlockType::ToolCall:   tag = "PaintBlock:Tool";      break;
+        case BlockType::Thinking:   tag = "PaintBlock:Thinking";  break;
     }
     PERF_SCOPE_T(tag, 200);
     const Palette& pal = palette_;
@@ -1050,6 +1109,101 @@ void ChatCanvas::PaintBlock(wxDC& dc, const Block& b, int yTop, BlockPos selStar
         for (int r = 0; r <= R; ++r) {
             int y = yTop + b.tableRowY[r];
             dc.DrawLine(blockX, y, blockX + tableW, y);
+        }
+        return;
+    }
+
+    if (b.type == BlockType::Thinking) {
+        const int radius = 6;
+
+        // Tinting rule mirrors collapsed-tool behavior:
+        //  - Single-line:  per-char selection on the one visible line.
+        //  - Collapsed:    body is hidden, so any cross-block touch tints the
+        //                  whole header strip.
+        //  - Expanded:     strict full-range tint for cross-block selections;
+        //                  per-line tint for intra-block selections.
+        bool fullySelected = false;
+        if (blockSelected) {
+            if (b.thinkingSingleLine) {
+                fullySelected = (bSelStart <= 0
+                                 && bSelEnd >= (int)b.visibleText.size());
+            } else if (!b.toolExpanded) {
+                fullySelected = (bSelEnd > bSelStart);
+            } else {
+                fullySelected = (bSelStart <= 0
+                                 && bSelEnd >= (int)b.visibleText.size());
+            }
+        }
+
+        const wxColour blockBg = fullySelected ? pal.selectionBg : pal.thinkingBg;
+        dc.SetPen(*wxTRANSPARENT_PEN);
+        dc.SetBrush(wxBrush(blockBg));
+        dc.DrawRoundedRectangle(blockX, yTop, blockW, b.cachedHeight, radius);
+
+        dc.SetFont(fontThinking_);
+
+        if (b.thinkingSingleLine) {
+            // Render the single wrapped line inline with per-char selection tint.
+            const int textXLeft = blockX + kToolPadX;
+            int yLine = yTop + kToolPadY;
+            if (!b.lines.empty()) {
+                const auto& wl = b.lines.front();
+                if (blockSelected && !fullySelected) {
+                    int lineSelStart = std::max(bSelStart - wl.textStart, 0);
+                    int lineSelEnd = std::min(bSelEnd - wl.textStart, (int)wl.text.size());
+                    if (lineSelEnd > lineSelStart && lineSelStart < (int)wl.text.size() && lineSelEnd > 0) {
+                        int x1 = textXLeft + wl.glyphX[lineSelStart];
+                        int x2 = textXLeft + wl.glyphX[lineSelEnd];
+                        dc.SetBrush(wxBrush(pal.selectionBg));
+                        dc.SetPen(*wxTRANSPARENT_PEN);
+                        dc.DrawRectangle(x1, yLine, x2 - x1, wl.height);
+                    }
+                }
+                dc.SetTextForeground(pal.thinkingText);
+                dc.DrawText(wl.text, textXLeft, yLine);
+            }
+            return;
+        }
+
+        // Multi-line modes: draw the "▸ Thinking" / "▾ Thinking" header.
+        const int textY = yTop + kToolPadY;
+        const int xChev = blockX + kToolPadX;
+        const int xLabel = xChev + b.toolChevW;
+        dc.SetTextForeground(pal.thinkingAccent);
+        dc.DrawText(b.toolChevStr, xChev, textY);
+        dc.DrawText("Thinking", xLabel, textY);
+
+        if (b.toolExpanded) {
+            const int textXLeft = blockX + kToolPadX;
+            int yLine = yTop + b.toolHeaderH + kToolGap;
+            for (const auto& wl : b.lines) {
+                if (blockSelected && !fullySelected) {
+                    int lineSelStart = std::max(bSelStart - wl.textStart, 0);
+                    int lineSelEnd = std::min(bSelEnd - wl.textStart, (int)wl.text.size());
+                    if (lineSelEnd > lineSelStart && lineSelStart < (int)wl.text.size() && lineSelEnd > 0) {
+                        int x1 = textXLeft + wl.glyphX[lineSelStart];
+                        int x2 = textXLeft + wl.glyphX[lineSelEnd];
+                        dc.SetBrush(wxBrush(pal.selectionBg));
+                        dc.SetPen(*wxTRANSPARENT_PEN);
+                        dc.DrawRectangle(x1, yLine, x2 - x1, wl.height);
+                    } else if (wl.text.IsEmpty()
+                               && bSelStart <= wl.textStart && bSelEnd > wl.textStart) {
+                        dc.SetBrush(wxBrush(pal.selectionBg));
+                        dc.SetPen(*wxTRANSPARENT_PEN);
+                        dc.DrawRectangle(textXLeft, yLine, wl.height, wl.height);
+                    }
+                }
+                // Draw runs (all italic per FontFor(BlockType::Thinking)).
+                dc.SetTextForeground(pal.thinkingText);
+                for (size_t ri = 0; ri < wl.runs.size(); ++ri) {
+                    const auto& run = wl.runs[ri];
+                    const wxFont& f = FontFor(run, BlockType::Thinking, 0);
+                    dc.SetFont(f);
+                    int xr = textXLeft + (ri < wl.runX.size() ? wl.runX[ri] : 0);
+                    dc.DrawText(run.text, xr, yLine);
+                }
+                yLine += wl.height;
+            }
         }
         return;
     }
@@ -1418,6 +1572,57 @@ BlockPos ChatCanvas::HitTest(const wxPoint& canvasPt) const {
                 return {(int)i, TableCellToOffset(b, row, col, lastLineEnd)};
             }
 
+            // Thinking blocks: in single-line mode the entire block is a
+            // single italic line — hit-test per-char like a paragraph. In
+            // multi-line modes the header ("▸/▾ Thinking") is opaque (snap
+            // to start for cross-block drag), the body (when expanded) is
+            // per-char like a normal paragraph.
+            if (b.type == BlockType::Thinking) {
+                const int textXLeft = xLeft + kToolPadX;
+
+                if (b.thinkingSingleLine) {
+                    int yLine = blockTop + kToolPadY;
+                    if (canvasPt.y < yLine) return {(int)i, 0};
+                    if (b.lines.empty()) return {(int)i, 0};
+                    const auto& wl = b.lines.front();
+                    if (canvasPt.y >= yLine && canvasPt.y < yLine + wl.height) {
+                        int xRel = canvasPt.x - textXLeft;
+                        if (xRel < 0) return {(int)i, wl.textStart};
+                        int charIdx = (int)wl.text.size();
+                        for (size_t k = 0; k + 1 < wl.glyphX.size(); ++k) {
+                            int mid = (wl.glyphX[k] + wl.glyphX[k + 1]) / 2;
+                            if (xRel < mid) { charIdx = (int)k; break; }
+                        }
+                        return {(int)i, wl.textStart + charIdx};
+                    }
+                    return {(int)i, (int)b.visibleText.size()};
+                }
+
+                const int headerBottom = blockTop + b.toolHeaderH;
+                if (!b.toolExpanded || canvasPt.y < headerBottom) {
+                    // Header strip — chevron + "Thinking" label are not part
+                    // of visibleText, so snap to a sensible anchor for any
+                    // selection drag that lands here.
+                    return {(int)i, 0};
+                }
+                int yLine = blockTop + b.toolHeaderH + kToolGap;
+                if (canvasPt.y < yLine) return {(int)i, 0};
+                for (const auto& wl : b.lines) {
+                    if (canvasPt.y >= yLine && canvasPt.y < yLine + wl.height) {
+                        int xRel = canvasPt.x - textXLeft;
+                        if (xRel < 0) return {(int)i, wl.textStart};
+                        int charIdx = (int)wl.text.size();
+                        for (size_t k = 0; k + 1 < wl.glyphX.size(); ++k) {
+                            int mid = (wl.glyphX[k] + wl.glyphX[k + 1]) / 2;
+                            if (xRel < mid) { charIdx = (int)k; break; }
+                        }
+                        return {(int)i, wl.textStart + charIdx};
+                    }
+                    yLine += wl.height;
+                }
+                return {(int)i, (int)b.visibleText.size()};
+            }
+
             // Tool-call blocks: header text (toolName + toolArgsFit) is
             // per-character selectable; chevron region is the toggle target
             // (handled by OnLeftDown — HitTest snaps it to offset 0 so a
@@ -1631,6 +1836,23 @@ void ChatCanvas::OnLeftDown(wxMouseEvent& e) {
         }
     }
 
+    // Thinking blocks: in multi-line modes, clicking anywhere in the header
+    // strip toggles. The header has no selectable text (just the "Thinking"
+    // label), so there's no ambiguity with selection. Single-line mode has
+    // no chevron and no toggle — falls through to normal selection.
+    if (hp.block >= 0 && hp.block < (int)blocks_.size()
+        && blocks_[hp.block].type == BlockType::Thinking) {
+        const Block& tb = blocks_[hp.block];
+        if (!tb.thinkingSingleLine && hp.block < (int)blockTops_.size()) {
+            const int headerBottom = blockTops_[hp.block] + tb.toolHeaderH;
+            if (p.y < headerBottom) {
+                selAnchor_ = selCaret_ = {};
+                ToggleToolCall(hp.block);  // same toggle path — flips toolExpanded
+                return;
+            }
+        }
+    }
+
     selAnchor_ = hp;
     selCaret_ = hp;
     selecting_ = true;
@@ -1665,6 +1887,16 @@ void ChatCanvas::OnLeftDClick(wxMouseEvent& e) {
             const int xName = xLeft + kToolPadX + tb.toolChevW;
             const int headerBottom = blockTops_[hp.block] + tb.toolHeaderH;
             if (p.y < headerBottom && p.x >= xLeft && p.x < xName) return;
+        }
+    }
+
+    // Thinking header double-click: first click already toggled, swallow.
+    if (hp.block >= 0 && hp.block < (int)blocks_.size()
+        && blocks_[hp.block].type == BlockType::Thinking) {
+        const Block& tb = blocks_[hp.block];
+        if (!tb.thinkingSingleLine && hp.block < (int)blockTops_.size()) {
+            const int headerBottom = blockTops_[hp.block] + tb.toolHeaderH;
+            if (p.y < headerBottom) return;
         }
     }
 
@@ -1705,7 +1937,14 @@ BlockPos ChatCanvas::ApplyDragSnap(BlockPos hp, const wxPoint& /*canvasPt*/,
     if (!anchor.IsValid() || anchor.block == hp.block) return hp;
     if (hp.block < 0 || hp.block >= (int)blocks_.size()) return hp;
     const Block& tb = blocks_[hp.block];
-    if (tb.type != BlockType::ToolCall || tb.toolExpanded) return hp;
+    // Atomic blocks for through-drag: collapsed tool calls and collapsed
+    // multi-line thinking blocks (both hide their body when collapsed).
+    // Single-line thinking blocks are NOT atomic — their body is visible,
+    // so per-character drag selection works the same as a paragraph.
+    const bool atomic =
+        (tb.type == BlockType::ToolCall && !tb.toolExpanded) ||
+        (tb.type == BlockType::Thinking && !tb.toolExpanded && !tb.thinkingSingleLine);
+    if (!atomic) return hp;
     hp.offset = (anchor.block < hp.block) ? (int)tb.visibleText.size() : 0;
     return hp;
 }
