@@ -262,7 +262,11 @@ ChatFrame::ChatFrame()
          [this](wxSysColourChangedEvent& e) { ReloadToolbarIcons(); e.Skip(); });
 
     // Helper: bounce a value-returning closure onto the GUI thread and block
-    // the calling (MCP) thread until it has returned.
+    // the calling (MCP) thread until it has returned. Polls `destroying_` so
+    // the MCP thread can unblock during teardown: once ~ChatFrame sets the
+    // flag the GUI thread stops pumping events, the CallAfter we just queued
+    // will never fire, and a plain future.get() would hang mcp_.Stop()'s
+    // join forever.
     auto guiSync = [this](auto fn) -> nlohmann::json {
         auto promise = std::make_shared<std::promise<nlohmann::json>>();
         auto future = promise->get_future();
@@ -270,7 +274,12 @@ ChatFrame::ChatFrame()
             try { promise->set_value(fn()); }
             catch (...) { promise->set_exception(std::current_exception()); }
         });
-        return future.get();
+        using namespace std::chrono_literals;
+        while (true) {
+            if (destroying_.load()) return nlohmann::json::object();
+            if (future.wait_for(100ms) == std::future_status::ready)
+                return future.get();
+        }
     };
 
     MCPCallbacks cb;
@@ -407,10 +416,25 @@ ChatFrame::ChatFrame()
 }
 
 ChatFrame::~ChatFrame() {
+    // Signal MCP's guiSync callers to bail out of their future.get() polls
+    // before we stop the server — otherwise mcp_.Stop()'s join would deadlock
+    // on a thread waiting for a CallAfter that can no longer fire.
+    destroying_.store(true);
     mcp_.Stop();
     request_.Cancel();
     // ~StreamingWebRequest joins the worker thread, so by the time we return
     // no more callbacks can be posted.
+
+    // Tool worker isn't detached — cancel any in-flight bash subtree and join
+    // so the worker can't fire wxQueueEvent on a half-destroyed frame.
+    if (toolWorker_.joinable()) {
+        if (auto tok = currentToolToken_) {
+            tok->cancelled.store(true);
+            int pgid = tok->activePgid.load();
+            if (pgid > 0) ::kill(-pgid, SIGTERM);
+        }
+        toolWorker_.join();
+    }
 }
 
 nlohmann::json ChatFrame::BuildBlocksSnapshot() const {
@@ -492,12 +516,16 @@ nlohmann::json ChatFrame::BuildConversationSnapshot() const {
 }
 
 void ChatFrame::OnClose(wxCloseEvent& evt) {
-    if (request_.IsActive()) {
+    // currentToolToken_ is non-null exactly while the tool-dispatch worker is
+    // running. Closing during a tool batch must veto + cancel just like
+    // closing during an in-flight HTTP request — otherwise the worker would
+    // outlive the frame and post wxQueueEvent to a dangling `this`.
+    if (request_.IsActive() || currentToolToken_) {
         quitRequested_ = true;
         Hide();
-        request_.Cancel();
-        // The worker will deliver a final OnStreamDone via CallAfter; that
-        // path checks quitRequested_ and re-fires Close() once we're idle.
+        RequestCancel();
+        // OnStreamDone / OnToolBatchDone both check quitRequested_ and re-fire
+        // Close() once their phase finishes.
         evt.Veto();
     } else {
         PersistActive();
@@ -1138,7 +1166,12 @@ void ChatFrame::HandleCompletion(const wxString& errorIfFailed) {
     auto token = std::make_shared<ToolCancelToken>();
     currentToolToken_ = token;
 
-    std::thread([this, jobs, token]() {
+    // OnToolBatchDone only runs after the previous worker exits, so by the
+    // time we dispatch a new batch the prior thread is finished — join() is
+    // a non-blocking handoff that lets us reuse the std::thread slot without
+    // detaching (detach makes destructor cleanup impossible).
+    if (toolWorker_.joinable()) toolWorker_.join();
+    toolWorker_ = std::thread([this, jobs, token]() {
         auto results = std::make_shared<std::vector<ToolBatchEntry>>();
         results->reserve(jobs->size());
         for (auto& job : *jobs) {
@@ -1156,13 +1189,22 @@ void ChatFrame::HandleCompletion(const wxString& errorIfFailed) {
         auto* ev = new wxThreadEvent(wxEVT_TOOL_BATCH_DONE);
         ev->SetPayload(results);
         wxQueueEvent(this, ev);
-    }).detach();
+    });
 }
 
 void ChatFrame::OnToolBatchDone(wxThreadEvent& e) {
     auto results = e.GetPayload<std::shared_ptr<std::vector<ToolBatchEntry>>>();
     bool wasCancelled = currentToolToken_ && currentToolToken_->cancelled.load();
     currentToolToken_.reset();
+
+    // User closed the window mid-batch — OnClose vetoed and is waiting for us
+    // to complete this phase. Re-fire Close so the second pass through OnClose
+    // sees an idle frame and lets the destruction proceed.
+    if (quitRequested_) {
+        Close();
+        return;
+    }
+
     if (!results) return;
 
     for (auto& r : *results) {
@@ -1294,7 +1336,7 @@ void ChatFrame::UpdateQueueUI() {
     }
     if (idleQueueMode) {
         continueQueueBtn_->SetLabel(
-            wxString::Format("Continue (%zu queued)", pendingQueue_.size()));
+            FormatU8("Continue ({} queued)", pendingQueue_.size()));
     }
 
     chipRow_->Show(hasQueue);
@@ -1353,11 +1395,19 @@ void ChatFrame::RebuildChips() {
 
         // Mutation deferred via CallAfter: UpdateQueueUI -> RebuildChips
         // deletes the very chip whose event handler we're inside, and
-        // touching it post-Destroy crashes GTK.
-        close->Bind(wxEVT_LEFT_DOWN, [this, i](wxMouseEvent&) {
-            CallAfter([this, i]() {
-                if (i >= pendingQueue_.size()) return;
-                pendingQueue_.erase(pendingQueue_.begin() + i);
+        // touching it post-Destroy crashes GTK. Match by stored content
+        // instead of capturing index `i` — two rapid clicks on different
+        // chips would otherwise resolve their indices against a queue that
+        // has already shifted under the first CallAfter, and a stale `i`
+        // would erase the wrong (or, at end-of-queue, a no-longer-valid)
+        // entry.
+        std::string entry = pendingQueue_[i];
+        close->Bind(wxEVT_LEFT_DOWN, [this, entry](wxMouseEvent&) {
+            CallAfter([this, entry]() {
+                auto it = std::find(pendingQueue_.begin(),
+                                    pendingQueue_.end(), entry);
+                if (it == pendingQueue_.end()) return;
+                pendingQueue_.erase(it);
                 UpdateQueueUI();
                 if (!streaming_ && pendingQueue_.empty() && input_->IsShown())
                     input_->SetFocus();

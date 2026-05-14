@@ -11,8 +11,10 @@
 #include "session_store.h"
 #include "streaming_web_request.h"
 #include "tools.h"
+#include <atomic>
 #include <memory>
 #include <string>
+#include <thread>
 #include <vector>
 
 // Single model dropdown picks one of these. Order matches the choice items
@@ -100,8 +102,20 @@ private:
     // `cancelled` and signals any in-flight bash subprocess via `activePgid`.
     std::shared_ptr<ToolCancelToken> currentToolToken_;
 
+    // Tool dispatch worker. Owned (not detached) so the destructor can cancel
+    // and join it — otherwise a long-running bash invocation could outlive the
+    // frame and call wxQueueEvent on a dangling `this`.
+    std::thread toolWorker_;
+
     // Graceful close — see OnClose.
     bool quitRequested_ = false;
+
+    // Set in ~ChatFrame before stopping MCP. Read by guiSync (on the MCP
+    // thread) so it can break out of its future.get() wait when the GUI
+    // thread is no longer pumping events. Without this, a CallAfter posted
+    // by guiSync would never fire during destruction and mcp_.Stop() would
+    // deadlock joining the MCP thread.
+    std::atomic<bool> destroying_{false};
 
     // TCP JSON-RPC server for programmatic control (port 8765+). Reads/writes
     // happen on a background thread; mutations bounce back to the GUI thread

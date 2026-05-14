@@ -97,6 +97,7 @@ private:
     void OnSize(wxSizeEvent& e);
     void OnLeftDown(wxMouseEvent& e);
     void OnLeftUp(wxMouseEvent& e);
+    void OnLeftDClick(wxMouseEvent& e);
     void OnMotion(wxMouseEvent& e);
     void OnKeyDown(wxKeyEvent& e);
     void OnAnimTick(wxTimerEvent& e);
@@ -130,6 +131,16 @@ private:
 
     // Hit-test: canvas-coords (after scrolling unscale) -> BlockPos.
     BlockPos HitTest(const wxPoint& canvasPt) const;
+
+    // Map a table block's visibleText offset to a (row, col, cellCharOffset).
+    // Returns true if the offset falls within a cell (not on a delimiter).
+    bool TableOffsetToCell(const Block& b, int offset,
+                           int& row, int& col, int& cellOff) const;
+    // Inverse: (row, col, cellCharOffset) -> visibleText offset.
+    int TableCellToOffset(const Block& b, int row, int col, int cellOff) const;
+
+    // Find word boundaries around a given BlockPos for double-click selection.
+    void FindWordBounds(const BlockPos& pos, BlockPos& wordStart, BlockPos& wordEnd) const;
 
     // Paint helpers.
     void PaintBlock(wxDC& dc, const Block& b, int yTop, BlockPos selStart, BlockPos selEnd, int blockIdx) const;

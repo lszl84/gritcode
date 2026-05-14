@@ -148,6 +148,7 @@ wxBEGIN_EVENT_TABLE(ChatCanvas, wxScrolledCanvas)
     EVT_SIZE(ChatCanvas::OnSize)
     EVT_LEFT_DOWN(ChatCanvas::OnLeftDown)
     EVT_LEFT_UP(ChatCanvas::OnLeftUp)
+    EVT_LEFT_DCLICK(ChatCanvas::OnLeftDClick)
     EVT_MOTION(ChatCanvas::OnMotion)
     EVT_KEY_DOWN(ChatCanvas::OnKeyDown)
     EVT_TIMER(ID_ANIM_TIMER, ChatCanvas::OnAnimTick)
@@ -942,38 +943,16 @@ void ChatCanvas::PaintBlock(wxDC& dc, const Block& b, int yTop, BlockPos selStar
 
         const int tableW = b.tableColX.back() + 1;
 
-        // Selection tint behind the whole table when selected.
-        if (blockSelected) {
-            dc.SetPen(*wxTRANSPARENT_PEN);
-            dc.SetBrush(wxBrush(pal.selectionBg));
-            dc.DrawRectangle(blockX, yTop, tableW, b.cachedHeight);
-        }
+        // Header row background (subtle tint).
+        dc.SetPen(*wxTRANSPARENT_PEN);
+        dc.SetBrush(wxBrush(pal.tableHeaderBg));
+        int hy0 = yTop + b.tableRowY[0] + 1;
+        int hy1 = yTop + b.tableRowY[1];
+        int hx0 = blockX + 1;
+        int hx1 = blockX + b.tableColX.back();
+        dc.DrawRectangle(hx0, hy0, hx1 - hx0, hy1 - hy0);
 
-        // Header row background (subtle tint, only if no selection overlay).
-        if (!blockSelected) {
-            dc.SetPen(*wxTRANSPARENT_PEN);
-            dc.SetBrush(wxBrush(pal.tableHeaderBg));
-            int hy0 = yTop + b.tableRowY[0] + 1;
-            int hy1 = yTop + b.tableRowY[1];
-            int hx0 = blockX + 1;
-            int hx1 = blockX + b.tableColX.back();
-            dc.DrawRectangle(hx0, hy0, hx1 - hx0, hy1 - hy0);
-        }
-
-        // Grid lines.
-        dc.SetPen(wxPen(pal.tableBorder, 1));
-        // Vertical: at each column edge.
-        for (int c = 0; c <= N; ++c) {
-            int x = blockX + b.tableColX[c];
-            dc.DrawLine(x, yTop, x, yTop + b.cachedHeight);
-        }
-        // Horizontal: at each row edge.
-        for (int r = 0; r <= R; ++r) {
-            int y = yTop + b.tableRowY[r];
-            dc.DrawLine(blockX, y, blockX + tableW, y);
-        }
-
-        // Cell text.
+        // Cell text with per-cell selection highlights.
         for (int r = 0; r < R; ++r) {
             const int rowTextY0 = yTop + b.tableRowY[r] + 1 + kTableCellPadY;
             const int rowH = b.tableRowY[r + 1] - b.tableRowY[r] - 2 - 2 * kTableCellPadY;
@@ -981,6 +960,18 @@ void ChatCanvas::PaintBlock(wxDC& dc, const Block& b, int yTop, BlockPos selStar
                 const TableCell& cell = b.tableRows[r][c];
                 const int colTextX0 = blockX + b.tableColX[c] + 1 + kTableCellPadX;
                 const int colTextW  = b.tableColX[c + 1] - b.tableColX[c] - 1 - 2 * kTableCellPadX;
+
+                // Compute per-cell selection range from block-level offsets.
+                int cellSelStart = -1, cellSelEnd = -1;
+                if (blockSelected) {
+                    int cellBase = TableCellToOffset(b, r, c, 0);
+                    int cellLen = (int)cell.visibleText.size();
+                    int cellEnd = cellBase + cellLen;
+                    if (bSelEnd > cellBase && bSelStart < cellEnd) {
+                        cellSelStart = std::max(0, bSelStart - cellBase);
+                        cellSelEnd = std::min(cellLen, bSelEnd - cellBase);
+                    }
+                }
 
                 // Vertical centering of cell content within the row.
                 int innerH = 0;
@@ -994,6 +985,20 @@ void ChatCanvas::PaintBlock(wxDC& dc, const Block& b, int yTop, BlockPos selStar
                     if (al == TableAlign::Center)      xBase = colTextX0 + (colTextW - lineW) / 2;
                     else if (al == TableAlign::Right)  xBase = colTextX0 + (colTextW - lineW);
 
+                    // Per-cell, per-line selection highlight.
+                    if (cellSelStart >= 0 && cellSelEnd > cellSelStart) {
+                        int lineSelStart = std::max(cellSelStart - wl.textStart, 0);
+                        int lineSelEnd = std::min(cellSelEnd - wl.textStart, (int)wl.text.size());
+                        if (lineSelEnd > lineSelStart && lineSelStart < (int)wl.text.size()
+                            && wl.textStart < cellSelEnd && wl.textEnd > cellSelStart) {
+                            int x1 = xBase + wl.glyphX[lineSelStart];
+                            int x2 = xBase + wl.glyphX[lineSelEnd];
+                            dc.SetBrush(wxBrush(pal.selectionBg));
+                            dc.SetPen(*wxTRANSPARENT_PEN);
+                            dc.DrawRectangle(x1, yLine, x2 - x1, wl.height);
+                        }
+                    }
+
                     for (size_t ri = 0; ri < wl.runs.size(); ++ri) {
                         const auto& run = wl.runs[ri];
                         const wxFont& f = FontFor(run, BlockType::Paragraph, 0);
@@ -1005,6 +1010,19 @@ void ChatCanvas::PaintBlock(wxDC& dc, const Block& b, int yTop, BlockPos selStar
                     yLine += wl.height;
                 }
             }
+        }
+
+        // Grid lines (drawn last so they sit on top of selection/cell backgrounds).
+        dc.SetPen(wxPen(pal.tableBorder, 1));
+        // Vertical: at each column edge.
+        for (int c = 0; c <= N; ++c) {
+            int x = blockX + b.tableColX[c];
+            dc.DrawLine(x, yTop, x, yTop + b.cachedHeight);
+        }
+        // Horizontal: at each row edge.
+        for (int r = 0; r <= R; ++r) {
+            int y = yTop + b.tableRowY[r];
+            dc.DrawLine(blockX, y, blockX + tableW, y);
         }
         return;
     }
@@ -1163,6 +1181,48 @@ void ChatCanvas::PaintThinkingDots(wxDC& dc, int xLeft, int yTop) const {
 
 // ---------- Hit-test & selection ----------
 
+// Map a table block's visibleText offset to (row, col, cellCharOffset).
+// Returns true if the offset falls within a cell's text (not on a delimiter).
+bool ChatCanvas::TableOffsetToCell(const Block& b, int offset,
+                                   int& row, int& col, int& cellOff) const {
+    int off = 0;
+    for (size_t r = 0; r < b.tableRows.size(); ++r) {
+        for (size_t c = 0; c < b.tableRows[r].size(); ++c) {
+            int cellLen = (int)b.tableRows[r][c].visibleText.size();
+            if (offset >= off && offset < off + cellLen) {
+                row = (int)r;
+                col = (int)c;
+                cellOff = offset - off;
+                return true;
+            }
+            off += cellLen;
+            // Skip delimiter after cell.
+            if (c + 1 < b.tableRows[r].size()) {
+                if (offset == off) return false;  // on a tab
+                ++off;  // '\t'
+            }
+        }
+        if (r + 1 < b.tableRows.size()) {
+            if (offset == off) return false;  // on a newline
+            ++off;  // '\n'
+        }
+    }
+    return false;
+}
+
+int ChatCanvas::TableCellToOffset(const Block& b, int row, int col, int cellOff) const {
+    int off = 0;
+    for (int r = 0; r < (int)b.tableRows.size(); ++r) {
+        for (int c = 0; c < (int)b.tableRows[r].size(); ++c) {
+            if (r == row && c == col) return off + cellOff;
+            off += (int)b.tableRows[r][c].visibleText.size();
+            if (c + 1 < (int)b.tableRows[r].size()) ++off;  // '\t'
+        }
+        if (r + 1 < (int)b.tableRows.size()) ++off;  // '\n'
+    }
+    return off;
+}
+
 BlockPos ChatCanvas::HitTest(const wxPoint& canvasPt) const {
     wxSize sz = GetClientSize();
     int contentW = std::min(sz.x - 2 * kSideMargin, kMaxContentW);
@@ -1171,6 +1231,7 @@ BlockPos ChatCanvas::HitTest(const wxPoint& canvasPt) const {
     if (xLeft < kSideMargin) xLeft = kSideMargin;
 
     int y = kTopMargin;
+    int lastVisitedBlock = -1;
     for (size_t i = 0; i < blocks_.size(); ++i) {
         const Block& b = blocks_[i];
         int spacing = (b.type == BlockType::Heading) ? kHeadingSpacing : kBlockSpacing;
@@ -1178,14 +1239,89 @@ BlockPos ChatCanvas::HitTest(const wxPoint& canvasPt) const {
         int blockTop = y;
         int blockBottom = y + b.cachedHeight;
         if (canvasPt.y >= blockTop - spacing / 2 && canvasPt.y < blockBottom) {
-            // Tables and tool-call blocks: snap to start/end based on click Y
-            // midpoint. Per-character selection isn't supported.
-            if (b.type == BlockType::Table || b.type == BlockType::ToolCall) {
+
+            // Table: per-cell, per-character hit-test.
+            if (b.type == BlockType::Table) {
+                // Degenerate table (e.g. empty rows/aligns): LayoutBlock left
+                // tableRowY/tableColX empty. `size() - 1` on an empty vector
+                // is size_t underflow — guard before walking.
+                if (b.tableRowY.size() < 2 || b.tableColX.size() < 2) {
+                    return {(int)i, 0};
+                }
+                int localY = canvasPt.y - blockTop;
+                // Find row.
+                int row = -1;
+                for (size_t r = 0; r + 1 < b.tableRowY.size(); ++r) {
+                    if (localY >= b.tableRowY[r] && localY < b.tableRowY[r + 1]) {
+                        row = (int)r;
+                        break;
+                    }
+                }
+                if (row < 0) {
+                    // Clicked in the gap between rows or below last row.
+                    if (localY < b.tableRowY[0]) return {(int)i, 0};
+                    return {(int)i, (int)b.visibleText.size()};
+                }
+                // Find column.
+                int localX = canvasPt.x - xLeft;
+                int col = -1;
+                for (size_t c = 0; c + 1 < b.tableColX.size(); ++c) {
+                    if (localX >= b.tableColX[c] && localX < b.tableColX[c + 1]) {
+                        col = (int)c;
+                        break;
+                    }
+                }
+                if (col < 0) {
+                    // Clicked in the margin outside columns.
+                    return {(int)i, TableCellToOffset(b, row, 0, 0)};
+                }
+                if (row >= (int)b.tableRows.size() || col >= (int)b.tableRows[row].size()) {
+                    return {(int)i, (int)b.visibleText.size()};
+                }
+                const TableCell& cell = b.tableRows[row][col];
+                // Vertical offset within the cell's lines.
+                const int rowTextY0 = blockTop + b.tableRowY[row] + 1 + kTableCellPadY;
+                int cellY = canvasPt.y - rowTextY0;
+                int yLine = 0;
+                const int colTextX0 = xLeft + b.tableColX[col] + 1 + kTableCellPadX;
+                const int colTextW  = b.tableColX[col + 1] - b.tableColX[col] - 1 - 2 * kTableCellPadX;
+                for (const auto& wl : cell.lines) {
+                    if (cellY >= yLine && cellY < yLine + wl.height) {
+                        // Found the line. Compute xBase (text start after alignment).
+                        int lineW = wl.glyphX.empty() ? 0 : wl.glyphX.back();
+                        int xBase = colTextX0;
+                        TableAlign al = b.tableAligns[col];
+                        if (al == TableAlign::Center)      xBase = colTextX0 + (colTextW - lineW) / 2;
+                        else if (al == TableAlign::Right)  xBase = colTextX0 + (colTextW - lineW);
+                        int xRel = canvasPt.x - xBase;
+                        int charIdx = (int)wl.text.size();
+                        if (xRel < 0) charIdx = 0;
+                        else {
+                            for (size_t k = 0; k + 1 < wl.glyphX.size(); ++k) {
+                                int mid = (wl.glyphX[k] + wl.glyphX[k + 1]) / 2;
+                                if (xRel < mid) { charIdx = (int)k; break; }
+                            }
+                        }
+                        return {(int)i, TableCellToOffset(b, row, col, wl.textStart + charIdx)};
+                    }
+                    yLine += wl.height;
+                }
+                // Below all cell lines: return end of cell.
+                int lastLineEnd = cell.lines.empty() ? 0 : cell.lines.back().textEnd;
+                return {(int)i, TableCellToOffset(b, row, col, lastLineEnd)};
+            }
+
+            // Tool-call blocks: snap to start/end. The body text layout
+            // ("args: ...\n\nresult") differs from visibleText, so per-character
+            // mapping is unreliable. Whole-block selection still works via
+            // Ctrl+A or drag-selecting across blocks.
+            if (b.type == BlockType::ToolCall) {
                 int mid = blockTop + b.cachedHeight / 2;
                 if (canvasPt.y < mid) return {(int)i, 0};
                 return {(int)i, (int)b.visibleText.size()};
             }
-            // Find line.
+
+            // CodeBlock, Paragraph, Heading, UserPrompt: per-character.
             int textXLeft = xLeft;
             int yLine = blockTop;
             if (b.type == BlockType::UserPrompt) {
@@ -1218,12 +1354,79 @@ BlockPos ChatCanvas::HitTest(const wxPoint& canvasPt) const {
             // Below all lines of this block: return end.
             return {(int)i, (int)b.visibleText.size()};
         }
+        lastVisitedBlock = (int)i;
         y = blockBottom;
     }
+    // Mouse above all blocks: return start of first block.
+    if (canvasPt.y < kTopMargin) {
+        if (!blocks_.empty()) return {0, 0};
+        return {};
+    }
+    // Mouse in the gap between blocks or below the last block.
+    // Snap to the nearest block boundary.
     if (!blocks_.empty()) {
-        return {(int)blocks_.size() - 1, (int)blocks_.back().visibleText.size()};
+        if (lastVisitedBlock < 0) return {0, 0};
+        return {lastVisitedBlock, (int)blocks_[lastVisitedBlock].visibleText.size()};
     }
     return {};
+}
+
+void ChatCanvas::FindWordBounds(const BlockPos& pos, BlockPos& wordStart, BlockPos& wordEnd) const {
+    wordStart = wordEnd = pos;
+    if (pos.block < 0 || pos.block >= (int)blocks_.size()) return;
+    const Block& b = blocks_[pos.block];
+
+    // For tables, map to the cell first.
+    const wxString* text = &b.visibleText;
+    int localOff = pos.offset;
+
+    if (b.type == BlockType::Table) {
+        int row, col, cellOff;
+        if (!TableOffsetToCell(b, pos.offset, row, col, cellOff)) return;
+        text = &b.tableRows[row][col].visibleText;
+        localOff = cellOff;
+    }
+
+    const wxString& t = *text;
+    if (t.IsEmpty()) return;
+
+    // Clamp.
+    if (localOff < 0) localOff = 0;
+    if (localOff > (int)t.size()) localOff = (int)t.size();
+
+    // Helper: is this a word char?
+    auto isWord = [](wxUniChar c) {
+        return (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') ||
+               (c >= '0' && c <= '9') || c == '_';
+    };
+
+    int start = localOff;
+    int end = localOff;
+
+    // If we're on a word char, expand to word boundaries.
+    if (start < (int)t.size() && isWord(t[start])) {
+        while (start > 0 && isWord(t[start - 1])) --start;
+        while (end < (int)t.size() && isWord(t[end])) ++end;
+    } else if (start < (int)t.size() && t[start] == ' ') {
+        // On space: select the run of whitespace.
+        while (start > 0 && t[start - 1] == ' ') --start;
+        while (end < (int)t.size() && t[end] == ' ') ++end;
+    } else if (start < (int)t.size()) {
+        // On punctuation/symbol: select just that char.
+        end = start + 1;
+    }
+
+    // Map back to block-visibleText offsets for tables.
+    if (b.type == BlockType::Table) {
+        int row, col, cellOff;
+        if (TableOffsetToCell(b, pos.offset, row, col, cellOff)) {
+            wordStart = {(int)pos.block, TableCellToOffset(b, row, col, start)};
+            wordEnd   = {(int)pos.block, TableCellToOffset(b, row, col, end)};
+        }
+    } else {
+        wordStart = {(int)pos.block, start};
+        wordEnd   = {(int)pos.block, end};
+    }
 }
 
 void ChatCanvas::OnLeftDown(wxMouseEvent& e) {
@@ -1255,6 +1458,28 @@ void ChatCanvas::OnLeftDown(wxMouseEvent& e) {
 void ChatCanvas::OnLeftUp(wxMouseEvent& /*e*/) {
     if (selecting_ && HasCapture()) ReleaseMouse();
     selecting_ = false;
+}
+
+void ChatCanvas::OnLeftDClick(wxMouseEvent& e) {
+    SetFocus();
+    wxPoint p = e.GetPosition();
+    CalcUnscrolledPosition(p.x, p.y, &p.x, &p.y);
+    BlockPos hp = HitTest(p);
+    if (!hp.IsValid()) return;
+
+    // Don't double-click toggle tool-call blocks.
+    if (hp.block >= 0 && hp.block < (int)blocks_.size()
+        && blocks_[hp.block].type == BlockType::ToolCall) {
+        return;
+    }
+
+    BlockPos ws, we;
+    FindWordBounds(hp, ws, we);
+    selAnchor_ = ws;
+    selCaret_ = we;
+    selecting_ = false;
+    if (HasCapture()) ReleaseMouse();
+    Refresh();
 }
 
 void ChatCanvas::OnMotion(wxMouseEvent& e) {
