@@ -62,6 +62,20 @@ struct MCPCallbacks {
     // useful for verifying persistence and key-presence in tests. The actual
     // key value is never returned over MCP.
     std::function<nlohmann::json()> getPreferences;
+
+    // Test-only selection drivers. Let MCP-driven tests exercise the same
+    // HitTest / selection state the mouse events use, without simulating
+    // OS-level pointer events.
+    //   hitTest(x, y)   → {block, offset, valid}
+    //   getSelection()  → {anchorBlock, anchorOff, caretBlock, caretOff, text}
+    //   setSelection(anchorBlock, anchorOff, caretBlock, caretOff)
+    //   getGeometry()   → [{index, yTop, height, type}, ...]
+    //   simulateDrag(x1,y1,x2,y2,steps) → trace of (x,y,block,offset) per step
+    std::function<nlohmann::json(int, int)> hitTest;
+    std::function<nlohmann::json()> getSelection;
+    std::function<nlohmann::json(int, int, int, int)> setSelection;
+    std::function<nlohmann::json()> getGeometry;
+    std::function<nlohmann::json(int, int, int, int, int)> simulateDrag;
 };
 
 class MCPServer {

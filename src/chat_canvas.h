@@ -54,6 +54,43 @@ public:
     // GUI thread; callers must marshal via CallAfter.
     const std::vector<Block>& Blocks() const { return blocks_; }
 
+    // ---- Selection introspection / programmatic drive (used by MCP). All
+    //      callers must already be on the GUI thread.
+    BlockPos HitTestPublic(int canvasX, int canvasY) const {
+        return HitTest({canvasX, canvasY});
+    }
+    // Returns the caret position a drag motion to (canvasX, canvasY) would
+    // produce given the supplied anchor. This is the same resolution
+    // OnMotion uses on real mouse events — including the through-drag snap
+    // that treats collapsed tool blocks as atomic units when crossed from
+    // outside. Lets MCP drag-simulation reproduce real interactive behavior.
+    BlockPos ResolveDragCaret(int canvasX, int canvasY, BlockPos anchor) const {
+        return ApplyDragSnap(HitTest({canvasX, canvasY}), {canvasX, canvasY}, anchor);
+    }
+    void GetSelection(BlockPos& anchor, BlockPos& caret) const {
+        anchor = selAnchor_;
+        caret = selCaret_;
+    }
+    void SetSelectionExplicit(BlockPos anchor, BlockPos caret) {
+        selAnchor_ = anchor;
+        selCaret_ = caret;
+        selecting_ = false;
+        Refresh();
+    }
+    // Per-block geometry in canvas (unscrolled) coords. Returns -1/-1 if idx
+    // is out of range. Lets MCP-driven tests aim at known Y positions inside
+    // a tool block without re-deriving layout from the outside.
+    void GetBlockGeometry(int idx, int& yTop, int& height) const {
+        if (idx < 0 || idx >= (int)blocks_.size()
+            || idx >= (int)blockTops_.size()) {
+            yTop = -1;
+            height = -1;
+            return;
+        }
+        yTop = blockTops_[idx];
+        height = blocks_[idx].cachedHeight;
+    }
+
 private:
     std::vector<Block> blocks_;
     bool thinking_ = false;
@@ -131,6 +168,13 @@ private:
 
     // Hit-test: canvas-coords (after scrolling unscale) -> BlockPos.
     BlockPos HitTest(const wxPoint& canvasPt) const;
+
+    // Through-drag snap: when the cursor enters a *collapsed* tool block
+    // during a drag whose anchor is in a different block, snap the caret
+    // offset to 0 (upper half of the block) or end-of-visibleText (lower
+    // half). See OnMotion comment for rationale.
+    BlockPos ApplyDragSnap(BlockPos hp, const wxPoint& canvasPt,
+                           BlockPos anchor) const;
 
     // Map a table block's visibleText offset to a (row, col, cellCharOffset).
     // Returns true if the offset falls within a cell (not on a delimiter).

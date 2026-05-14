@@ -205,5 +205,38 @@ json MCPServer::HandleRequest(const json& request) {
         if (!cb_.getPreferences) return err(-32603, "not ready");
         return okResult(cb_.getPreferences());
     }
+    if (method == "hitTest") {
+        if (!cb_.hitTest) return err(-32603, "not ready");
+        if (!params.contains("x") || !params.contains("y"))
+            return err(-32602, "missing 'x' or 'y'");
+        return okResult(cb_.hitTest(params["x"].get<int>(),
+                                    params["y"].get<int>()));
+    }
+    if (method == "getSelection") {
+        if (!cb_.getSelection) return err(-32603, "not ready");
+        return okResult(cb_.getSelection());
+    }
+    if (method == "setSelection") {
+        if (!cb_.setSelection) return err(-32603, "not ready");
+        int ab = params.value("anchorBlock", -1);
+        int ao = params.value("anchorOff", 0);
+        int cb = params.value("caretBlock", -1);
+        int co = params.value("caretOff", 0);
+        return okResult(cb_.setSelection(ab, ao, cb, co));
+    }
+    if (method == "getGeometry") {
+        if (!cb_.getGeometry) return err(-32603, "not ready");
+        return okResult(cb_.getGeometry());
+    }
+    if (method == "simulateDrag") {
+        if (!cb_.simulateDrag) return err(-32603, "not ready");
+        if (!params.contains("x1") || !params.contains("y1")
+            || !params.contains("x2") || !params.contains("y2"))
+            return err(-32602, "missing drag endpoints");
+        int steps = params.value("steps", 10);
+        return okResult(cb_.simulateDrag(
+            params["x1"].get<int>(), params["y1"].get<int>(),
+            params["x2"].get<int>(), params["y2"].get<int>(), steps));
+    }
     return err(-32601, "unknown method: " + method);
 }

@@ -380,6 +380,87 @@ ChatFrame::ChatFrame()
             };
         });
     };
+    cb.hitTest = [this, guiSync](int x, int y) -> nlohmann::json {
+        return guiSync([this, x, y]() -> nlohmann::json {
+            BlockPos p = canvas_->HitTestPublic(x, y);
+            return {{"block", p.block}, {"offset", p.offset},
+                    {"valid", p.IsValid()}};
+        });
+    };
+    cb.getSelection = [this, guiSync]() -> nlohmann::json {
+        return guiSync([this]() -> nlohmann::json {
+            BlockPos a, c;
+            canvas_->GetSelection(a, c);
+            wxString sel = canvas_->GetSelectedText();
+            return {
+                {"anchorBlock", a.block}, {"anchorOff", a.offset},
+                {"caretBlock", c.block},  {"caretOff", c.offset},
+                {"text", sel.ToStdString(wxConvUTF8)},
+            };
+        });
+    };
+    cb.setSelection = [this, guiSync](int ab, int ao, int cbi, int co)
+        -> nlohmann::json {
+        return guiSync([this, ab, ao, cbi, co]() -> nlohmann::json {
+            BlockPos a{ab, ao};
+            BlockPos c{cbi, co};
+            canvas_->SetSelectionExplicit(a, c);
+            return {{"ok", true}};
+        });
+    };
+    cb.getGeometry = [this, guiSync]() -> nlohmann::json {
+        return guiSync([this]() -> nlohmann::json {
+            const auto& blocks = canvas_->Blocks();
+            nlohmann::json arr = nlohmann::json::array();
+            for (int i = 0; i < (int)blocks.size(); ++i) {
+                int y, h;
+                canvas_->GetBlockGeometry(i, y, h);
+                std::string typ = "other";
+                switch (blocks[i].type) {
+                    case BlockType::Paragraph:  typ = "paragraph"; break;
+                    case BlockType::Heading:    typ = "heading";   break;
+                    case BlockType::CodeBlock:  typ = "code";      break;
+                    case BlockType::UserPrompt: typ = "user";      break;
+                    case BlockType::Table:      typ = "table";     break;
+                    case BlockType::ToolCall:   typ = "tool";      break;
+                }
+                arr.push_back({
+                    {"index", i}, {"yTop", y}, {"height", h}, {"type", typ},
+                    {"toolExpanded", blocks[i].type == BlockType::ToolCall
+                                     ? blocks[i].toolExpanded : false},
+                    {"visibleLen", (int)blocks[i].visibleText.size()},
+                });
+            }
+            return {{"blocks", std::move(arr)}};
+        });
+    };
+    cb.simulateDrag = [this, guiSync](int x1, int y1, int x2, int y2,
+                                      int steps) -> nlohmann::json {
+        return guiSync([this, x1, y1, x2, y2, steps]() -> nlohmann::json {
+            nlohmann::json trace = nlohmann::json::array();
+            int n = std::max(1, steps);
+            // Anchor is set by HitTest alone (no through-drag snap on
+            // mouse-down); subsequent caret positions go through the same
+            // resolver OnMotion uses, including the snap.
+            BlockPos anchor = canvas_->HitTestPublic(x1, y1);
+            BlockPos caret = anchor;
+            canvas_->SetSelectionExplicit(anchor, caret);
+            trace.push_back({{"step", 0}, {"x", x1}, {"y", y1},
+                             {"block", caret.block}, {"offset", caret.offset}});
+            for (int s = 1; s <= n; ++s) {
+                int x = x1 + (x2 - x1) * s / n;
+                int y = y1 + (y2 - y1) * s / n;
+                caret = canvas_->ResolveDragCaret(x, y, anchor);
+                canvas_->SetSelectionExplicit(anchor, caret);
+                trace.push_back({{"step", s}, {"x", x}, {"y", y},
+                                 {"block", caret.block},
+                                 {"offset", caret.offset}});
+            }
+            wxString sel = canvas_->GetSelectedText();
+            return {{"trace", std::move(trace)},
+                    {"selectedText", sel.ToStdString(wxConvUTF8)}};
+        });
+    };
     cb.newSession = [this, guiSync]() -> nlohmann::json {
         return guiSync([this]() -> nlohmann::json {
             if (streaming_) return {{"ok", false}, {"reason", "streaming"}};
@@ -1282,9 +1363,14 @@ void ChatFrame::RenderToolBlock(const std::string& name,
     b.toolArgs = wxString::FromUTF8(displayArgs);
     b.toolResult = wxString::FromUTF8(preview);
     b.toolExpanded = false;
-    // visibleText is what Ctrl+A → Ctrl+C will yield. Include the body so
-    // selection captures the result text even though the block doesn't
-    // support per-character mouse selection.
+    // visibleText layout:
+    //   [0, headerLen)            "toolName(args)"
+    //   [headerLen, headerLen+2)  "\n\n" separator
+    //   [headerLen+2, end)        toolResult
+    // Header chars are selectable in the rendered header strip; body chars
+    // are selectable only when expanded. Selecting across a collapsed block
+    // (drag from another block, through this one) still grabs the full
+    // visibleText, so Ctrl+C captures both the header and the hidden body.
     b.visibleText = b.toolName + "(" + b.toolArgs + ")\n\n" + b.toolResult;
     canvas_->AddBlock(std::move(b));
 }

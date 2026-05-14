@@ -81,6 +81,18 @@ struct Block {
     int toolArgsX = 0;       // block-local x where toolArgsFit starts
     wxString toolHint;       // right-aligned hint string ("· N lines" / "· ok") — collapsed only
     int toolHintW = 0;       // pixel width of the hint string
+
+    // Selection support for the header line. The displayed header text is
+    // `toolName + toolArgsFit` (drawn at xName, no chevron, no hint).
+    // glyphX has size = displayed.size() + 1, indexing each char boundary.
+    // toolHeaderSrcLen is the *full* untruncated header length in visibleText
+    // (= toolName.size() + 2 + toolArgs.size(), for the surrounding parens).
+    // toolHeaderVisChars is the number of leading displayed chars that map
+    // 1:1 to source offsets — when args is truncated to "(prefix…)" the
+    // trailing "…)" maps to source offset toolHeaderSrcLen instead.
+    std::vector<int> toolHeaderGlyphX;
+    int toolHeaderSrcLen = 0;
+    int toolHeaderVisChars = 0;
 };
 
 // (blockIndex, charOffset-in-visibleText). Stable across reflows because both

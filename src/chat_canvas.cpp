@@ -495,9 +495,15 @@ void ChatCanvas::LayoutBlock(wxDC& dc, Block& b, int contentWidth, int /*topSpac
         wxString argsDisplay = "(" + b.toolArgs.Left(maxChars) + ")";
         wxCoord aw = 0, ah = 0;
         dc.GetTextExtent(argsDisplay, &aw, &ah);
+        // toolHeaderVisCharsInArgs = number of leading chars in toolArgsFit
+        // that still map 1:1 to source ("(prefix"). The trailing "…)" maps
+        // to the full header end. For the non-truncated case, all chars
+        // map 1:1 so this equals toolArgsFit.size().
+        int toolHeaderVisCharsInArgs = 0;
         if (aw <= argsAvail && b.toolArgs.size() <= maxChars) {
             // Whole args fit — no truncation needed.
             b.toolArgsFit = "(" + b.toolArgs + ")";
+            toolHeaderVisCharsInArgs = (int)b.toolArgsFit.size();
         } else {
             // Need to truncate. Measure only the capped candidate.
             const wxString ell = "…)";
@@ -512,18 +518,39 @@ void ChatCanvas::LayoutBlock(wxDC& dc, Block& b, int contentWidth, int /*topSpac
                 if (parts[i] > budget) { cut = i; break; }
             }
             b.toolArgsFit = argsDisplay.Left(cut) + ell;
+            toolHeaderVisCharsInArgs = (int)cut;
+        }
+
+        // Header selection geometry. Displayed header text is
+        // toolName + toolArgsFit, drawn starting at xName. glyphX has
+        // one entry per char boundary so HitTest/Paint can map a pixel
+        // x to a char index in O(log n) (linear scan is fine here).
+        // toolHeaderSrcLen is the *full* untruncated header length.
+        // toolHeaderVisChars: chars in displayed header that map 1:1
+        // to source — anything past this (i.e. the "…)" tail) maps to
+        // toolHeaderSrcLen on hit-test, and is treated as covering the
+        // hidden tail for selection-paint purposes.
+        b.toolHeaderSrcLen = (int)b.toolName.size() + 2 + (int)b.toolArgs.size();
+        b.toolHeaderVisChars = (int)b.toolName.size() + toolHeaderVisCharsInArgs;
+        wxString headerDisplay = b.toolName + b.toolArgsFit;
+        b.toolHeaderGlyphX.clear();
+        b.toolHeaderGlyphX.push_back(0);
+        if (!headerDisplay.IsEmpty()) {
+            wxArrayInt hparts;
+            dc.GetPartialTextExtents(headerDisplay, hparts);
+            for (auto p : hparts) b.toolHeaderGlyphX.push_back(p);
         }
 
         if (b.toolExpanded) {
-            // Body is the full args + result, char-wrapped at the inner width.
+            // Body is just the result (no "args:" prefix — args is in the
+            // header now). Its WrappedLine.textStart/textEnd are offset by
+            // toolHeaderSrcLen + 2 (for the "\n\n" separator) so they index
+            // into visibleText.
             int innerW = contentWidth - kToolPadX * 2;
             if (innerW < 50) innerW = 50;
-            wxString bodyText;
-            if (!b.toolArgs.IsEmpty()) {
-                bodyText = "args: " + b.toolArgs + "\n\n";
-            }
-            bodyText += b.toolResult;
-            WrapMonospace(dc, bodyText, innerW, b.lines);
+            b.lines.clear();
+            const int bodyBase = b.toolHeaderSrcLen + 2;
+            WrapMonospace(dc, b.toolResult, innerW, b.lines, bodyBase);
 
             int bodyH = 0;
             for (const auto& wl : b.lines) bodyH += wl.height;
@@ -1030,23 +1057,57 @@ void ChatCanvas::PaintBlock(wxDC& dc, const Block& b, int yTop, BlockPos selStar
     if (b.type == BlockType::ToolCall) {
         const int radius = 6;
 
-        // Whole-block selection tint when the user has Ctrl+A'd or selected
-        // across this block. Tool blocks don't support per-character mouse
-        // selection, so it's all-or-nothing.
-        if (blockSelected) {
-            dc.SetPen(*wxTRANSPARENT_PEN);
-            dc.SetBrush(wxBrush(pal.selectionBg));
-            dc.DrawRoundedRectangle(blockX, yTop, blockW, b.cachedHeight, radius);
+        // fullySelected drives the whole-block background tint behind the
+        // header + (collapsed) body slot.
+        //
+        // Expanded: strict — only the genuine select-all / whole-block
+        // pass-through (bSelStart=0, bSelEnd=visibleText.size()) tints the
+        // background. Anything narrower goes to per-char header tint +
+        // per-line body tint below.
+        //
+        // Collapsed: the body is hidden, so we can't show a partial body
+        // selection. As soon as the selection extends past the displayed
+        // header (or this block is an intermediate block in a multi-block
+        // selection), tint the whole thing. Only when the selection lives
+        // entirely within the displayed header *and* both endpoints are in
+        // this block do we fall through to the per-char header tint.
+        bool fullySelected;
+        if (b.toolExpanded) {
+            fullySelected = blockSelected
+                && bSelStart <= 0 && bSelEnd >= (int)b.visibleText.size();
+        } else {
+            const bool intraHeader = (selStart.block == blockIdx
+                                      && selEnd.block == blockIdx
+                                      && bSelEnd <= b.toolHeaderSrcLen);
+            fullySelected = blockSelected
+                && bSelEnd > bSelStart
+                && !intraHeader;
         }
+        // When fullySelected, paint the bg with selectionBg directly. The
+        // earlier draw-selectionBg-rect-then-overlay-headerBg pattern was a
+        // bug: the header bg's rounded rect (and the body bg's, when
+        // expanded) covered the entire selection rect except for a sliver
+        // in the rounded corners — so cross-block selections were invisible
+        // over collapsed tools, and on expanded tools the selection
+        // "disappeared" the moment the cursor moved past the block bottom
+        // (bSelEnd jumps to visibleText.size() → fullySelected flips true →
+        // bg overdraws the per-line tints we'd been drawing up to that point).
+        const wxColour headerBg = fullySelected ? pal.selectionBg : pal.toolHeaderBg;
+        const wxColour bodyBg   = fullySelected ? pal.selectionBg : pal.toolBodyBg;
 
         // Header background.
         dc.SetPen(*wxTRANSPARENT_PEN);
-        dc.SetBrush(wxBrush(pal.toolHeaderBg));
+        dc.SetBrush(wxBrush(headerBg));
         if (b.toolExpanded) {
             // Header rounded only on top corners — fake by drawing a round
             // rect spanning the whole block then a bottom-half flat rect.
             dc.DrawRoundedRectangle(blockX, yTop, blockW, b.toolHeaderH + radius, radius);
             dc.DrawRectangle(blockX, yTop + b.toolHeaderH - 1, blockW, 1);
+            // Fill the gap between header and body so the strip shows the
+            // selection color too (otherwise it shows the window bg).
+            if (fullySelected && kToolGap > 0) {
+                dc.DrawRectangle(blockX, yTop + b.toolHeaderH, blockW, kToolGap);
+            }
         } else {
             dc.DrawRoundedRectangle(blockX, yTop, blockW, b.toolHeaderH, radius);
         }
@@ -1058,6 +1119,33 @@ void ChatCanvas::PaintBlock(wxDC& dc, const Block& b, int yTop, BlockPos selStar
         const int xName = xChev + b.toolChevW;
         const int xArgs = blockX + b.toolArgsX;
         const int rightLimit = blockX + blockW - kToolPadX;
+
+        // Header selection tint — drawn before the text so it sits behind
+        // the glyphs. The header text covers source offsets [0, srcLen);
+        // chars past toolHeaderVisChars are the "…)" tail that visually
+        // stands in for the truncated args, so we treat any selection that
+        // extends past visChars as covering through end-of-displayed-header.
+        if (blockSelected && !fullySelected
+            && !b.toolHeaderGlyphX.empty()
+            && bSelStart < b.toolHeaderSrcLen && bSelEnd > 0) {
+            const int displayedLen = (int)b.toolHeaderGlyphX.size() - 1;
+            int dispStart = std::max(bSelStart, 0);
+            int dispEnd = std::min(bSelEnd, b.toolHeaderSrcLen);
+            // Clamp to the 1:1 range, except when the selection reaches the
+            // full header end — then extend to the end of the displayed
+            // string (covers the "…)" tail).
+            if (dispStart > b.toolHeaderVisChars) dispStart = b.toolHeaderVisChars;
+            int dispEndIdx;
+            if (dispEnd >= b.toolHeaderSrcLen) dispEndIdx = displayedLen;
+            else dispEndIdx = std::min(dispEnd, b.toolHeaderVisChars);
+            if (dispEndIdx > dispStart) {
+                int x1 = xName + b.toolHeaderGlyphX[dispStart];
+                int x2 = xName + b.toolHeaderGlyphX[dispEndIdx];
+                dc.SetBrush(wxBrush(pal.selectionBg));
+                dc.SetPen(*wxTRANSPARENT_PEN);
+                dc.DrawRectangle(x1, textY, x2 - x1, b.toolHeaderH - kToolPadY * 2);
+            }
+        }
 
         dc.SetTextForeground(pal.toolAccent);
         dc.DrawText(b.toolChevStr, xChev, textY);
@@ -1076,7 +1164,7 @@ void ChatCanvas::PaintBlock(wxDC& dc, const Block& b, int yTop, BlockPos selStar
             const int bodyTop = yTop + b.toolHeaderH + kToolGap;
             const int bodyH = b.cachedHeight - b.toolHeaderH - kToolGap;
             dc.SetPen(*wxTRANSPARENT_PEN);
-            dc.SetBrush(wxBrush(pal.toolBodyBg));
+            dc.SetBrush(wxBrush(bodyBg));
             dc.DrawRoundedRectangle(blockX, bodyTop, blockW, bodyH, radius);
             // Square the top corners (continuous with header).
             dc.DrawRectangle(blockX, bodyTop, blockW, radius);
@@ -1084,8 +1172,27 @@ void ChatCanvas::PaintBlock(wxDC& dc, const Block& b, int yTop, BlockPos selStar
             int yLine = bodyTop + kToolPadY;
             const int textXLeft = blockX + kToolPadX;
             dc.SetFont(fontCode_);
-            dc.SetTextForeground(pal.codeFg);
             for (const auto& wl : b.lines) {
+                if (blockSelected && !fullySelected) {
+                    int lineSelStart = std::max(bSelStart - wl.textStart, 0);
+                    int lineSelEnd = std::min(bSelEnd - wl.textStart, (int)wl.text.size());
+                    if (lineSelEnd > lineSelStart && lineSelStart < (int)wl.text.size() && lineSelEnd > 0) {
+                        int x1 = textXLeft + wl.glyphX[lineSelStart];
+                        int x2 = textXLeft + wl.glyphX[lineSelEnd];
+                        dc.SetBrush(wxBrush(pal.selectionBg));
+                        dc.SetPen(*wxTRANSPARENT_PEN);
+                        dc.DrawRectangle(x1, yLine, x2 - x1, wl.height);
+                    } else if (wl.text.IsEmpty()
+                               && bSelStart <= wl.textStart && bSelEnd > wl.textStart) {
+                        // Empty line fully inside the selection: draw a
+                        // small tint so the blank row doesn't look like a
+                        // selection gap.
+                        dc.SetBrush(wxBrush(pal.selectionBg));
+                        dc.SetPen(*wxTRANSPARENT_PEN);
+                        dc.DrawRectangle(textXLeft, yLine, wl.height, wl.height);
+                    }
+                }
+                dc.SetTextForeground(pal.codeFg);
                 if (!wl.text.IsEmpty()) dc.DrawText(wl.text, textXLeft, yLine);
                 yLine += wl.height;
             }
@@ -1311,13 +1418,61 @@ BlockPos ChatCanvas::HitTest(const wxPoint& canvasPt) const {
                 return {(int)i, TableCellToOffset(b, row, col, lastLineEnd)};
             }
 
-            // Tool-call blocks: snap to start/end. The body text layout
-            // ("args: ...\n\nresult") differs from visibleText, so per-character
-            // mapping is unreliable. Whole-block selection still works via
-            // Ctrl+A or drag-selecting across blocks.
+            // Tool-call blocks: header text (toolName + toolArgsFit) is
+            // per-character selectable; chevron region is the toggle target
+            // (handled by OnLeftDown — HitTest snaps it to offset 0 so a
+            // selection drag starting there still has a sensible anchor);
+            // the body is per-character selectable when expanded.
             if (b.type == BlockType::ToolCall) {
-                int mid = blockTop + b.cachedHeight / 2;
-                if (canvasPt.y < mid) return {(int)i, 0};
+                const int headerBottom = blockTop + b.toolHeaderH;
+                if (!b.toolExpanded || canvasPt.y < headerBottom) {
+                    // Header strip.
+                    const int xChevLeft = xLeft + kToolPadX;
+                    const int xName = xChevLeft + b.toolChevW;
+                    if (canvasPt.x < xName) {
+                        // Chevron / left padding → start of header.
+                        return {(int)i, 0};
+                    }
+                    int xRel = canvasPt.x - xName;
+                    if (b.toolHeaderGlyphX.empty()) return {(int)i, 0};
+                    int displayedLen = (int)b.toolHeaderGlyphX.size() - 1;
+                    if (xRel >= b.toolHeaderGlyphX.back()) {
+                        // Right of displayed header text (over hint or padding)
+                        // → end of (full untruncated) header.
+                        return {(int)i, b.toolHeaderSrcLen};
+                    }
+                    int charIdx = displayedLen;
+                    for (int k = 0; k + 1 < displayedLen + 1; ++k) {
+                        int mid = (b.toolHeaderGlyphX[k] + b.toolHeaderGlyphX[k + 1]) / 2;
+                        if (xRel < mid) { charIdx = k; break; }
+                    }
+                    // Map displayed-char index back to source offset:
+                    // chars within toolHeaderVisChars are 1:1; chars in the
+                    // "…)" tail collapse onto the full header end.
+                    int srcOff = (charIdx <= b.toolHeaderVisChars)
+                        ? charIdx : b.toolHeaderSrcLen;
+                    return {(int)i, srcOff};
+                }
+                const int textXLeft = xLeft + kToolPadX;
+                int yLine = blockTop + b.toolHeaderH + kToolGap + kToolPadY;
+                if (canvasPt.y < yLine) {
+                    // Top padding inside body, above the first wrapped line:
+                    // snap to body start (just after the "\n\n").
+                    return {(int)i, b.toolHeaderSrcLen + 2};
+                }
+                for (const auto& wl : b.lines) {
+                    if (canvasPt.y >= yLine && canvasPt.y < yLine + wl.height) {
+                        int xRel = canvasPt.x - textXLeft;
+                        if (xRel < 0) return {(int)i, wl.textStart};
+                        int charIdx = (int)wl.text.size();
+                        for (size_t k = 0; k + 1 < wl.glyphX.size(); ++k) {
+                            int mid = (wl.glyphX[k] + wl.glyphX[k + 1]) / 2;
+                            if (xRel < mid) { charIdx = (int)k; break; }
+                        }
+                        return {(int)i, wl.textStart + charIdx};
+                    }
+                    yLine += wl.height;
+                }
                 return {(int)i, (int)b.visibleText.size()};
             }
 
@@ -1449,16 +1604,31 @@ void ChatCanvas::OnLeftDown(wxMouseEvent& e) {
     BlockPos hp = HitTest(p);
     if (!hp.IsValid()) return;
 
-    // Tool-call blocks consume clicks for expansion toggle. They don't
-    // support per-character selection; whole-block selection still works
-    // via Ctrl+A or by drag-selecting through them from another block.
+    // Tool-call blocks: only the chevron region toggles expansion. The
+    // rest of the header (toolName + args) and the body (when expanded)
+    // are selectable text. This is the standard disclosure-triangle
+    // pattern — avoids ambiguity between "click to toggle" and "click to
+    // place caret for selection", and keeps double-click → word-select
+    // working in the header.
     if (hp.block >= 0 && hp.block < (int)blocks_.size()
         && blocks_[hp.block].type == BlockType::ToolCall) {
-        // Clear any prior selection so the tinted overlay doesn't obscure
-        // the block while the user is just toggling.
-        selAnchor_ = selCaret_ = {};
-        ToggleToolCall(hp.block);
-        return;
+        const Block& tb = blocks_[hp.block];
+        if (hp.block < (int)blockTops_.size()) {
+            wxSize sz = GetClientSize();
+            int contentW = std::min(sz.x - 2 * kSideMargin, kMaxContentW);
+            if (contentW < 100) contentW = 100;
+            int xLeft = (sz.x - contentW) / 2;
+            if (xLeft < kSideMargin) xLeft = kSideMargin;
+            const int xChev = xLeft + kToolPadX;
+            const int xName = xChev + tb.toolChevW;
+            const int headerBottom = blockTops_[hp.block] + tb.toolHeaderH;
+            if (p.y < headerBottom && p.x >= xLeft && p.x < xName) {
+                // Chevron (and a bit of left padding) → toggle.
+                selAnchor_ = selCaret_ = {};
+                ToggleToolCall(hp.block);
+                return;
+            }
+        }
     }
 
     selAnchor_ = hp;
@@ -1480,10 +1650,22 @@ void ChatCanvas::OnLeftDClick(wxMouseEvent& e) {
     BlockPos hp = HitTest(p);
     if (!hp.IsValid()) return;
 
-    // Don't double-click toggle tool-call blocks.
+    // Tool-call chevron: swallow double-clicks (the first click already
+    // toggled). Header text and body double-clicks fall through to word
+    // selection so users can pick out a token like the tool name.
     if (hp.block >= 0 && hp.block < (int)blocks_.size()
         && blocks_[hp.block].type == BlockType::ToolCall) {
-        return;
+        const Block& tb = blocks_[hp.block];
+        if (hp.block < (int)blockTops_.size()) {
+            wxSize sz = GetClientSize();
+            int contentW = std::min(sz.x - 2 * kSideMargin, kMaxContentW);
+            if (contentW < 100) contentW = 100;
+            int xLeft = (sz.x - contentW) / 2;
+            if (xLeft < kSideMargin) xLeft = kSideMargin;
+            const int xName = xLeft + kToolPadX + tb.toolChevW;
+            const int headerBottom = blockTops_[hp.block] + tb.toolHeaderH;
+            if (p.y < headerBottom && p.x >= xLeft && p.x < xName) return;
+        }
     }
 
     BlockPos ws, we;
@@ -1495,12 +1677,46 @@ void ChatCanvas::OnLeftDClick(wxMouseEvent& e) {
     Refresh();
 }
 
+BlockPos ChatCanvas::ApplyDragSnap(BlockPos hp, const wxPoint& /*canvasPt*/,
+                                   BlockPos anchor) const {
+    // Through-drag snap for collapsed tool blocks: treat them as atomic
+    // units when crossed from a drag anchored elsewhere.
+    //
+    // The body is hidden, so we can't show a partial selection inside it
+    // anyway. We snap so the block flips to fully-selected the moment the
+    // caret enters its claim region (from whichever side the anchor is
+    // on), and stays that way until the caret leaves. This avoids two
+    // failure modes:
+    //   1. Y-midline snap (previous attempt) flipped on/off as the cursor
+    //      crossed the block's vertical midpoint — hand jitter around the
+    //      midline made the highlight strobe.
+    //   2. Raw HitTest with no snap gave one offset inside the header
+    //      band (small, X-driven) and a different one in the orphan gap
+    //      just below (huge, end-of-block). A 1-px Y delta near the
+    //      block's bottom border toggled the whole-block tint.
+    //
+    // Direction-based snap: if the anchor is above this block (anchor.block
+    // < hp.block), the cursor entered from above, so the entire block is
+    // already covered by the selection — snap to visibleText.size().
+    // Symmetric for anchor below.
+    //
+    // Same-block drags fall through (anchor.block == hp.block): per-char
+    // header selection works normally.
+    if (!anchor.IsValid() || anchor.block == hp.block) return hp;
+    if (hp.block < 0 || hp.block >= (int)blocks_.size()) return hp;
+    const Block& tb = blocks_[hp.block];
+    if (tb.type != BlockType::ToolCall || tb.toolExpanded) return hp;
+    hp.offset = (anchor.block < hp.block) ? (int)tb.visibleText.size() : 0;
+    return hp;
+}
+
 void ChatCanvas::OnMotion(wxMouseEvent& e) {
     if (!selecting_) return;
     wxPoint p = e.GetPosition();
     CalcUnscrolledPosition(p.x, p.y, &p.x, &p.y);
     BlockPos hp = HitTest(p);
     if (!hp.IsValid()) return;
+    hp = ApplyDragSnap(hp, p, selAnchor_);
     if (hp == selCaret_) return;
     selCaret_ = hp;
     Refresh();
