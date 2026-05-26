@@ -63,9 +63,11 @@ struct ModelRoute {
 ModelRoute RouteFor(ModelChoice m) {
     switch (m) {
     case ModelChoice::OpencodeFree:
+        // OpenCode Zen free tier. Models rotate — currently deepseek-v4-flash-free.
+        // No API key needed; endpoint is open.
         return {"https://opencode.ai/zen/v1/chat/completions",
-                "minimax-m2.5-free", false, Preferences::Provider::DeepSeek,
-                384000, 204800};
+                "deepseek-v4-flash-free", false, Preferences::Provider::DeepSeek,
+                384000, 200000};
     case ModelChoice::DeepseekFlash:
         return {"https://api.deepseek.com/chat/completions",
                 "deepseek-v4-flash", true, Preferences::Provider::DeepSeek,
@@ -76,8 +78,8 @@ ModelRoute RouteFor(ModelChoice m) {
                 384000, 1000000};
     }
     return {"https://opencode.ai/zen/v1/chat/completions",
-            "minimax-m2.5-free", false, Preferences::Provider::DeepSeek,
-            384000, 204800};
+            "deepseek-v4-flash-free", false, Preferences::Provider::DeepSeek,
+            384000, 200000};
 }
 
 // chdir() into the session's directory so tool subprocesses (bash,
