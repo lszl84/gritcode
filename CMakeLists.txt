@@ -132,6 +132,12 @@ if(UNIX AND NOT APPLE)
     pkg_check_modules(GTK3 REQUIRED gtk+-3.0)
     target_include_directories(wx_gritcode PRIVATE ${GTK3_INCLUDE_DIRS})
     target_link_libraries(wx_gritcode PRIVATE ${GTK3_LIBRARIES})
+
+    # libsecret backs the API-key keyring fallback when wxUSE_SECRETSTORE is 0
+    # (the system wx package on Ubuntu 24.04 is built without it).
+    pkg_check_modules(LIBSECRET REQUIRED libsecret-1)
+    target_include_directories(wx_gritcode PRIVATE ${LIBSECRET_INCLUDE_DIRS})
+    target_link_libraries(wx_gritcode PRIVATE ${LIBSECRET_LIBRARIES})
 endif()
 
 target_compile_options(wx_gritcode PRIVATE -Wall -Wextra -Wno-unused-parameter)

@@ -3,6 +3,8 @@
 #include <wx/fileconf.h>
 #if wxUSE_SECRETSTORE
 #include <wx/secretstore.h>
+#else
+#include <libsecret/secret.h>
 #endif
 
 namespace {
@@ -15,15 +17,24 @@ const wxString kUsername      = "api_key";
 
 const char* kModelIndexKey = "/UI/LastModelIndex";
 
-// Fallback config-path keys when wxSecretStore is unavailable.
-const char* kApiKeyFallbackKey = "/Secrets/ApiKey";
-
 wxString ServiceFor(Preferences::Provider p) {
     switch (p) {
     case Preferences::Provider::DeepSeek: return kServicePrefix + "deepseek";
     }
     return kServicePrefix + "unknown";
 }
+
+#if !wxUSE_SECRETSTORE
+// libsecret schema for our keyring entries.
+const SecretSchema kSecretSchema = {
+    "wx_gritcode.ApiKey",
+    SECRET_SCHEMA_NONE,
+    {
+        { "provider", SECRET_SCHEMA_ATTRIBUTE_STRING },
+        { NULL, 0 }
+    }
+};
+#endif
 
 }  // namespace
 
@@ -63,9 +74,18 @@ wxString Preferences::GetApiKey(Provider p) {
     if (!value.IsOk()) return wxString();
     return value.GetAsString();
 #else
-    // Fallback: read from plaintext config file.
-    auto* cfg = wxConfigBase::Get();
-    return cfg->Read(kApiKeyFallbackKey, wxString());
+    GError* err = nullptr;
+    gchar* secret = secret_password_lookup_sync(
+        &kSecretSchema, nullptr, &err,
+        "provider", ServiceFor(p).utf8_str().data(), nullptr);
+    if (err != nullptr) {
+        g_error_free(err);
+        return wxString();
+    }
+    if (secret == nullptr) return wxString();
+    wxString result = wxString::FromUTF8(secret);
+    secret_password_free(secret);
+    return result;
 #endif
 }
 
@@ -79,14 +99,23 @@ bool Preferences::SetApiKey(Provider p, const wxString& key) {
     }
     return store.Save(ServiceFor(p), kUsername, wxSecretValue(key));
 #else
-    // Fallback: store in plaintext config file.
-    auto* cfg = wxConfigBase::Get();
+    GError* err = nullptr;
     if (key.IsEmpty()) {
-        cfg->DeleteEntry(kApiKeyFallbackKey);
+        secret_password_clear_sync(
+            &kSecretSchema, nullptr, &err,
+            "provider", ServiceFor(p).utf8_str().data(), nullptr);
     } else {
-        cfg->Write(kApiKeyFallbackKey, key);
+        secret_password_store_sync(
+            &kSecretSchema, SECRET_COLLECTION_DEFAULT,
+            ServiceFor(p).utf8_str().data(),
+            key.utf8_str().data(),
+            nullptr, &err,
+            "provider", ServiceFor(p).utf8_str().data(), nullptr);
     }
-    cfg->Flush();
+    if (err != nullptr) {
+        g_error_free(err);
+        return false;
+    }
     return true;
 #endif
 }
