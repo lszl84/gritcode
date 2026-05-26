@@ -3,6 +3,8 @@
 #include <atomic>
 #include <string>
 
+class MemoryDB;
+
 // Returns the OpenAI-compatible "tools" array describing all tools the agent
 // can call. Pass this as the "tools" field of the chat completions request.
 nlohmann::json GetToolDefinitions();
@@ -24,6 +26,11 @@ struct ToolCancelToken {
 //
 // `token` may be null for callers that don't support cancellation; when set,
 // long-running tools (bash) periodically check it and abort cleanly.
+// `memory` + `currentSessionId` back the grit_history_search/fetch tools.
+// Pass nullptr for `memory` if the index isn't open (those tools return a
+// "Memory index unavailable" string in that case).
 std::string DispatchTool(const std::string& name,
                          const nlohmann::json& args,
-                         ToolCancelToken* token = nullptr);
+                         ToolCancelToken* token = nullptr,
+                         MemoryDB* memory = nullptr,
+                         const std::string& currentSessionId = {});

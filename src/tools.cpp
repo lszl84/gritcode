@@ -1,5 +1,6 @@
 #include "tools.h"
 #include "format_u8.h"
+#include "memory.h"
 #include "streaming_web_request.h"
 
 #include <algorithm>
@@ -578,11 +579,86 @@ nlohmann::json GetToolDefinitions() {
          {"properties", {{"query", StrParam("Search query (natural language).")}}},
          {"required", {"query"}}}));
 
+    tools.push_back(ToolDef(
+        "grit_history_search",
+        "Search the transcripts of past wx_gritcode conversations across "
+        "every project the user has worked on (excludes the current session). "
+        "This is the AUTHORITATIVE source of prior-conversation recall — use "
+        "it first whenever the user references any past work (\"last time\", "
+        "\"once again\", \"we had\", \"how did we\", \"in <project>\"). "
+        "Query budget: typically 1-3 searches per user question. Start with "
+        "ONE broad keyword query; only run more if the first returned strong "
+        "hits. Returns short snippets (~20-token window) with session_id, "
+        "turn_index, and full_chars — follow up with grit_history_fetch.",
+        {{"type", "object"},
+         {"properties", {
+             {"query", StrParam("2-5 keywords. FTS5 MATCH expression (phrases in quotes, AND/OR/NOT, prefix*).")},
+             {"limit", {{"type", "integer"},
+                        {"description", "Max results (default 5, max 20)."}}},
+         }},
+         {"required", {"query"}}}));
+
+    tools.push_back(ToolDef(
+        "grit_history_fetch",
+        "Read the full text of a specific past turn plus a window of "
+        "surrounding turns. Use after grit_history_search when a snippet "
+        "looks relevant. session_id + turn_index come directly from a "
+        "grit_history_search hit. Default window is 2 turns before + 2 after.",
+        {{"type", "object"},
+         {"properties", {
+             {"session_id", StrParam("Opaque session id from grit_history_search.")},
+             {"turn_index", {{"type", "integer"},
+                             {"description", "Turn index from grit_history_search."}}},
+             {"before", {{"type", "integer"},
+                         {"description", "How many prior turns to include (default 2, max 10)."}}},
+             {"after",  {{"type", "integer"},
+                         {"description", "How many following turns to include (default 2, max 10)."}}},
+         }},
+         {"required", {"session_id", "turn_index"}}}));
+
     return tools;
 }
 
+namespace {
+
+std::string ToolGritHistorySearch(const nlohmann::json& args, MemoryDB* memory,
+                                  const std::string& currentSessionId) {
+    if (!memory || !memory->IsOpen()) return "Memory index is not available.";
+    std::string query = GetStringArg(args, "query");
+    if (query.empty()) return "Error: 'query' is required.";
+    int limit = 5;
+    if (args.is_object() && args.contains("limit") && args["limit"].is_number_integer())
+        limit = args["limit"].get<int>();
+    if (limit < 1) limit = 1;
+    if (limit > 20) limit = 20;
+    auto hits = memory->Search(query, limit, currentSessionId);
+    return MemoryDB::FormatSearchHits(hits);
+}
+
+std::string ToolGritHistoryFetch(const nlohmann::json& args, MemoryDB* memory) {
+    if (!memory || !memory->IsOpen()) return "Memory index is not available.";
+    std::string sid = GetStringArg(args, "session_id");
+    int ti = -1, before = 2, after = 2;
+    if (args.is_object()) {
+        if (args.contains("turn_index") && args["turn_index"].is_number_integer())
+            ti = args["turn_index"].get<int>();
+        if (args.contains("before") && args["before"].is_number_integer())
+            before = args["before"].get<int>();
+        if (args.contains("after") && args["after"].is_number_integer())
+            after = args["after"].get<int>();
+    }
+    if (sid.empty() || ti < 0)
+        return "Error: 'session_id' and 'turn_index' are required.";
+    auto hits = memory->Fetch(sid, ti, before, after);
+    return MemoryDB::FormatFetchHits(hits);
+}
+
+}  // namespace
+
 std::string DispatchTool(const std::string& name, const nlohmann::json& args,
-                         ToolCancelToken* token) {
+                         ToolCancelToken* token,
+                         MemoryDB* memory,
+                         const std::string& currentSessionId) {
     if (token && token->cancelled.load()) return "[cancelled]";
     try {
         if (name == "read_file")     return CapOutput(ToolReadFile(args));
@@ -592,6 +668,10 @@ std::string DispatchTool(const std::string& name, const nlohmann::json& args,
         if (name == "list_directory")return CapOutput(ToolListDirectory(args));
         if (name == "web_fetch")     return ToolWebFetch(args);   // already capped
         if (name == "web_search")    return ToolWebSearch(args);  // already capped
+        if (name == "grit_history_search")
+            return ToolGritHistorySearch(args, memory, currentSessionId);
+        if (name == "grit_history_fetch")
+            return ToolGritHistoryFetch(args, memory);
         return "Error: unknown tool '" + name + "'";
     } catch (const std::exception& e) {
         return std::string("Error: tool threw exception: ") + e.what();

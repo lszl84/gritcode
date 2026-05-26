@@ -8,6 +8,7 @@
 #include "chat_canvas.h"
 #include "md_parser.h"
 #include "mcp_server.h"
+#include "memory.h"
 #include "session_store.h"
 #include "streaming_web_request.h"
 #include "tools.h"
@@ -66,6 +67,13 @@ private:
     SessionStore store_;
     std::vector<std::string> sessionCwds_;
     std::string activeCwd_;
+
+    // Cross-project memory: FTS5 index over every saved session. Opened at
+    // construction; written after every PersistActive(); queried by the
+    // grit_history_search tool. If the open fails (e.g. read-only home) the
+    // tool returns "Memory index unavailable" — memory is an enhancement,
+    // not required for normal chat.
+    MemoryDB memory_;
 
     ModelChoice currentModel_ = ModelChoice::OpencodeFree;
 
@@ -210,6 +218,46 @@ private:
     // history_ vector. Used both to start a turn and to continue after tool
     // results have been appended.
     void StartCompletion();
+    // Build + dispatch the actual chat completion request. Split out of
+    // StartCompletion so the compaction path can chain into it directly
+    // after the summary returns without re-checking the budget.
+    void DoSendActualRequest();
+
+    // ---- Context compaction ----
+    // historyCompactBaseCount_: message count immediately after the last
+    //   successful compaction. The hysteresis check (<5 growth since then)
+    //   prevents firing a new compaction on every single turn — history
+    //   only grows between requests, so without the gate we'd re-compact
+    //   the same head every time.
+    // compacting_: true while a summary LLM call is in flight. Set by
+    //   RunSummaryThenSend, cleared by ApplyCompaction. StartCompletion
+    //   skips the budget check while this is true.
+    int historyCompactBaseCount_ = 0;
+    bool compacting_ = false;
+    // Buffered state for the in-flight summary request.
+    std::string summarySseBuf_;
+    std::string summaryText_;
+    int compactionSplitIdx_ = -1;
+    int compactionHeadCount_ = 0;
+
+    // Returns true if a summary request was kicked off (caller should
+    // return immediately); false if history fits and the caller should
+    // proceed to send the normal request.
+    bool MaybeCompactThenSend();
+    // Fires the summary stream request. The head [0..splitIdx) of
+    // history_ is summarized into a single user-role message.
+    void RunSummaryThenSend(int splitIdx);
+    // Summary stream callbacks (separate from the main OnStreamData /
+    // OnStreamDone — the summary response is private to the compaction
+    // path and never lands in canvas blocks).
+    void OnSummaryStreamData(std::string_view chunk);
+    void OnSummaryStreamDone(WebResponse resp);
+    // Replace history_[0..splitIdx) with a single isSummary user message
+    // carrying `summary`, persist, then resume the real request. Falls
+    // back to a generic "context dropped" notice if `success` is false so
+    // the next request still fits.
+    void ApplyCompaction(bool success, const std::string& summary,
+                         const std::string& error);
 
     // After State_Completed: if any tool_calls were accumulated, dispatch them
     // and continue; otherwise finalize the turn.

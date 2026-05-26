@@ -49,6 +49,12 @@ endif()
 # is no longer linked.
 find_package(CURL REQUIRED)
 
+# SQLite FTS5 backs the cross-project memory index (memory.cpp). Use the
+# system package via pkg-config — every supported distro ships it, and we
+# need FTS5 enabled (which the Linux system builds always have).
+find_package(PkgConfig REQUIRED)
+pkg_check_modules(SQLITE3 REQUIRED IMPORTED_TARGET sqlite3)
+
 # ---- Sources ----
 set(SRCS
     src/main.cpp
@@ -58,6 +64,8 @@ set(SRCS
     src/inline_parser.cpp
     src/tools.cpp
     src/mcp_server.cpp
+    src/mcp_stdio.cpp
+    src/memory.cpp
     src/session_store.cpp
     src/shell_env.cpp
     src/preferences.cpp
@@ -115,12 +123,12 @@ target_link_libraries(wx_gritcode PRIVATE
     ${WX_LIBS}
     nlohmann_json::nlohmann_json
     CURL::libcurl
+    PkgConfig::SQLITE3
 )
 
 # On GTK builds we touch GtkSettings directly to disable theme animations on
 # the canvas. This is the smallest GTK dep we can take.
 if(UNIX AND NOT APPLE)
-    find_package(PkgConfig REQUIRED)
     pkg_check_modules(GTK3 REQUIRED gtk+-3.0)
     target_include_directories(wx_gritcode PRIVATE ${GTK3_INCLUDE_DIRS})
     target_link_libraries(wx_gritcode PRIVATE ${GTK3_LIBRARIES})

@@ -14,6 +14,7 @@
 #include <wx/settings.h>
 #include <wx/stdpaths.h>
 #include <algorithm>
+#include <ctime>
 #include <future>
 #include <memory>
 #include <sstream>
@@ -52,6 +53,11 @@ struct ModelRoute {
     // hard max; providers clamp silently if a value exceeds the model's own
     // ceiling, so picking the documented top is safe.
     int maxTokens;
+    // Total input+output token budget for the model. Used by the context
+    // compactor to decide when to summarize the head of history. Set per
+    // model from the published context window; conservative values are
+    // fine — compaction triggers earlier rather than later.
+    int contextWindow;
 };
 
 ModelRoute RouteFor(ModelChoice m) {
@@ -59,19 +65,19 @@ ModelRoute RouteFor(ModelChoice m) {
     case ModelChoice::OpencodeFree:
         return {"https://opencode.ai/zen/v1/chat/completions",
                 "minimax-m2.5-free", false, Preferences::Provider::DeepSeek,
-                384000};
+                384000, 192000};
     case ModelChoice::DeepseekFlash:
         return {"https://api.deepseek.com/chat/completions",
                 "deepseek-v4-flash", true, Preferences::Provider::DeepSeek,
-                384000};
+                384000, 128000};
     case ModelChoice::DeepseekPro:
         return {"https://api.deepseek.com/chat/completions",
                 "deepseek-v4-pro", true, Preferences::Provider::DeepSeek,
-                384000};
+                384000, 128000};
     }
     return {"https://opencode.ai/zen/v1/chat/completions",
             "minimax-m2.5-free", false, Preferences::Provider::DeepSeek,
-            384000};
+            384000, 192000};
 }
 
 // chdir() into the session's directory so tool subprocesses (bash,
@@ -218,6 +224,9 @@ ChatFrame::ChatFrame()
     // Open the most recent session if one exists; otherwise seed one for the
     // default cwd so the dropdown always has at least one entry.
     store_.Init();
+    // Open the FTS5 memory index. Failure (e.g. read-only home) is silent;
+    // grit_history_search returns "Memory index unavailable" in that case.
+    memory_.Open(MemoryDB::DefaultPath());
     bool restored = false;
     if (auto last = store_.LastActiveCwd()) {
         std::vector<nlohmann::json> hist;
@@ -741,6 +750,7 @@ void ChatFrame::CreateNewSession() {
         SeedSystemPrompt();
         store_.Save(activeCwd_, history_);
     }
+    historyCompactBaseCount_ = 0;  // fresh compaction gate for the new session
     store_.SetLastActiveCwd(activeCwd_);
     canvas_->Clear();
     RestoreCanvasFromHistory();
@@ -760,6 +770,7 @@ void ChatFrame::SwitchToCwd(const std::string& cwd) {
         SeedSystemPrompt();
         store_.Save(activeCwd_, history_);
     }
+    historyCompactBaseCount_ = 0;  // fresh compaction gate for the new session
     store_.SetLastActiveCwd(activeCwd_);
     ChdirToCwd(activeCwd_);
     canvas_->Clear();
@@ -772,6 +783,20 @@ void ChatFrame::PersistActive() {
     // Always save — keeps the lastUsed timestamp current so the dropdown
     // ordering is stable and the index reflects the most recent activity.
     store_.Save(activeCwd_, history_);
+    // Re-index into the FTS5 memory so grit_history_search picks up the
+    // turns we just persisted. RebuildSession is idempotent: it deletes
+    // every prior row for this session_id and re-inserts the current
+    // history. Cheap in absolute terms (a 500-turn rebuild is sub-100ms).
+    if (memory_.IsOpen()) {
+        auto now = []{
+            std::time_t t = std::time(nullptr); std::tm tm; localtime_r(&t, &tm);
+            char buf[32]; std::strftime(buf, sizeof(buf), "%Y-%m-%dT%H:%M:%S", &tm);
+            return std::string(buf);
+        }();
+        nlohmann::json msgs = history_;  // shallow copy → array of json messages
+        memory_.RebuildSession(SessionStore::IdForCwd(activeCwd_),
+                               activeCwd_, msgs, now);
+    }
 }
 
 void ChatFrame::SeedSystemPrompt() {
@@ -782,7 +807,16 @@ void ChatFrame::SeedSystemPrompt() {
          "shell, and web tools. Use them when the user's request requires "
          "reading files, running shell commands, or fetching web pages. "
          "Prefer concrete actions over speculation. Use markdown for "
-         "formatting and fenced code blocks for code."}
+         "formatting and fenced code blocks for code.\n\n"
+         "Cross-project memory: use grit_history_search whenever the user "
+         "references any prior work (\"last time\", \"once again\", \"we "
+         "had\", \"how did we\", \"in <project>\"). It searches the "
+         "transcripts of every past wx_gritcode session across all "
+         "projects and returns short snippets with session_id + "
+         "turn_index. Follow up with grit_history_fetch(session_id, "
+         "turn_index) to read full turns. Start with ONE broad keyword "
+         "query — if it returns no relevant hits, stop and answer from "
+         "what you have rather than firing speculative variants."}
     });
 }
 
@@ -914,6 +948,17 @@ void ChatFrame::StartTurn(const wxString& userText) {
 }
 
 void ChatFrame::StartCompletion() {
+    // Compaction preflight. If the rendered request would overflow the
+    // model's context window, we summarize the head of history first via
+    // a separate streaming request; the summary completion path will
+    // call DoSendActualRequest itself once history has been rewritten.
+    // Skipped while compacting_ is true so a chained ApplyCompaction
+    // doesn't re-evaluate the same condition.
+    if (!compacting_ && MaybeCompactThenSend()) return;
+    DoSendActualRequest();
+}
+
+void ChatFrame::DoSendActualRequest() {
     // Reset per-completion stream state.
     activeAssistantText_.clear();
     activeReasoning_.clear();
@@ -1279,12 +1324,18 @@ void ChatFrame::HandleCompletion(const wxString& errorIfFailed) {
     auto token = std::make_shared<ToolCancelToken>();
     currentToolToken_ = token;
 
+    // Snapshot the session id so the worker can ask Memory to exclude this
+    // session from grit_history_search results — there's no point recalling
+    // the conversation the agent is already in.
+    std::string excludeSid = activeCwd_.empty() ? std::string{}
+                              : SessionStore::IdForCwd(activeCwd_);
+
     // OnToolBatchDone only runs after the previous worker exits, so by the
     // time we dispatch a new batch the prior thread is finished — join() is
     // a non-blocking handoff that lets us reuse the std::thread slot without
     // detaching (detach makes destructor cleanup impossible).
     if (toolWorker_.joinable()) toolWorker_.join();
-    toolWorker_ = std::thread([this, jobs, token]() {
+    toolWorker_ = std::thread([this, jobs, token, excludeSid]() {
         auto results = std::make_shared<std::vector<ToolBatchEntry>>();
         results->reserve(jobs->size());
         for (auto& job : *jobs) {
@@ -1294,7 +1345,8 @@ void ChatFrame::HandleCompletion(const wxString& errorIfFailed) {
             } else if (!job.parseError.empty()) {
                 r = std::move(job.parseError);
             } else {
-                r = DispatchTool(job.name, job.argsParsed, token.get());
+                r = DispatchTool(job.name, job.argsParsed, token.get(),
+                                 &memory_, excludeSid);
             }
             results->push_back({std::move(job.id), std::move(job.name),
                                 std::move(job.argsJson), std::move(r)});
@@ -1552,4 +1604,331 @@ void ChatFrame::RebuildChips() {
         chipSizer_->Add(chip, 0, wxEXPAND | wxBOTTOM, FromDIP(2));
     }
     chipRow_->Layout();
+}
+
+// ---------------------------------------------------------------------------
+// Context compaction
+//
+// Goal: when the rendered history would overflow the model's context window,
+// replace the oldest portion with a real LLM-generated summary — the same
+// strategy opencode uses. Persisting the summary in history_ (rather than
+// only rewriting the wire request) keeps every subsequent turn within
+// budget; without that, history would keep growing and we'd re-"compact"
+// the same head on every send.
+//
+// Flow:
+//   1. StartCompletion → MaybeCompactThenSend. If history fits the budget,
+//      return false → caller proceeds to DoSendActualRequest.
+//   2. Over budget: pick the most recent user message as the split point.
+//      Head = history_[0..split), tail = history_[split..] stays intact
+//      (so we never break tool_call / tool_result pairs).
+//   3. Fire an async summary request on `request_` with the summary
+//      callbacks (OnSummaryStreamData / OnSummaryStreamDone). The UI
+//      shows a notice so the extra round-trip doesn't look like a hang.
+//   4. ApplyCompaction (on the GUI thread, after the summary returns)
+//      replaces the head with a single isSummary user-role message,
+//      persists, and calls DoSendActualRequest to fire the real request.
+//   5. historyCompactBaseCount_ is bumped to the post-compaction size so
+//      MaybeCompactThenSend won't re-compact until enough new messages
+//      have accumulated.
+// ---------------------------------------------------------------------------
+
+bool ChatFrame::MaybeCompactThenSend() {
+    int histSize = (int)history_.size();
+
+    // Hysteresis: require some growth since last compaction before retrying.
+    // Without this, every subsequent over-budget request would fire its own
+    // summary call even though history hasn't meaningfully grown.
+    int growth = histSize - historyCompactBaseCount_;
+    if (growth < 5 && historyCompactBaseCount_ > 0) return false;
+
+    // ~4 chars per token. Walk history summing content + reasoning + tool
+    // call argument strings; this is the same heuristic the request builder
+    // ends up implicitly using when serializing.
+    size_t totalChars = 0;
+    for (const auto& m : history_) {
+        if (!m.is_object()) continue;
+        if (m.contains("content") && m["content"].is_string())
+            totalChars += m["content"].get_ref<const std::string&>().size();
+        if (m.contains("reasoning_content") && m["reasoning_content"].is_string())
+            totalChars += m["reasoning_content"].get_ref<const std::string&>().size();
+        if (m.contains("tool_calls") && m["tool_calls"].is_array()) {
+            for (const auto& tc : m["tool_calls"]) {
+                if (tc.is_object() && tc.contains("function")
+                    && tc["function"].is_object()
+                    && tc["function"].contains("arguments")
+                    && tc["function"]["arguments"].is_string()) {
+                    totalChars += tc["function"]["arguments"]
+                                    .get_ref<const std::string&>().size();
+                }
+            }
+        }
+    }
+    // Fixed overhead for the system prompt + tool definitions (~8K tokens
+    // worth: enough to cover both the seeded prompt and the JSON tool defs).
+    totalChars += 32000;
+    int estTokens = (int)(totalChars / 4);
+
+    ModelRoute route = RouteFor(currentModel_);
+    // Reserve room for the response. route.maxTokens is the *upper-bound*
+    // per-request cap (e.g. 384K for DeepSeek) — larger than the entire
+    // context window for some models — so it can't be used as a reservation.
+    // 32K is a realistic ceiling for what any single turn actually produces;
+    // anything bigger gets server-clipped anyway.
+    constexpr int kResponseReserve = 32000;
+    int threshold = route.contextWindow - kResponseReserve - 8000;
+    if (threshold < 8000) threshold = 8000;
+
+    if (estTokens <= threshold) return false;
+
+    // Find the most recent non-summary user message — that's where the
+    // current turn starts, and everything before it is fair game to summarize.
+    // Splitting at a user message never leaves an orphan tool_call in the
+    // head or an orphan tool_result in the tail.
+    int splitIdx = -1;
+    for (int i = histSize - 1; i >= 0; --i) {
+        if (!history_[i].is_object()) continue;
+        if (history_[i].value("role", std::string{}) != "user") continue;
+        if (history_[i].value("isSummary", false)) continue;
+        splitIdx = i;
+        break;
+    }
+    // Nothing older than the current turn to summarize — give up gracefully.
+    if (splitIdx <= 0) return false;
+
+    RunSummaryThenSend(splitIdx);
+    return true;
+}
+
+void ChatFrame::RunSummaryThenSend(int splitIdx) {
+    compacting_ = true;
+    compactionSplitIdx_ = splitIdx;
+    compactionHeadCount_ = splitIdx;
+    summarySseBuf_.clear();
+    summaryText_.clear();
+
+    RenderErrorBlock(FormatU8(
+        "📦 Compacting context — summarizing {} older messages before "
+        "continuing. This usually takes a few seconds…",
+        compactionHeadCount_));
+
+    // Render the head as plain text. We feed the summary model a flat
+    // transcript rather than the raw tool_calls / tool_result structure —
+    // (a) it works identically for any wire protocol, and (b) the summary
+    // model doesn't need machine-readable tool shape, just what happened.
+    std::string headText;
+    headText.reserve(16384);
+    for (int i = 0; i < splitIdx; ++i) {
+        const auto& m = history_[i];
+        if (!m.is_object()) continue;
+        std::string role = m.value("role", std::string{});
+        if (role == "system") continue;  // omit our own seed prompt
+        headText += "--- ";
+        if (m.value("isSummary", false)) headText += "earlier summary";
+        else headText += role;
+        headText += " ---\n";
+        if (m.contains("content") && m["content"].is_string()) {
+            const auto& c = m["content"].get_ref<const std::string&>();
+            if (!c.empty()) { headText += c; headText += '\n'; }
+        }
+        if (m.contains("tool_calls") && m["tool_calls"].is_array()) {
+            for (const auto& tc : m["tool_calls"]) {
+                if (!tc.is_object() || !tc.contains("function")) continue;
+                const auto& fn = tc["function"];
+                headText += "[tool ";
+                if (fn.contains("name") && fn["name"].is_string())
+                    headText += fn["name"].get<std::string>();
+                if (fn.contains("arguments") && fn["arguments"].is_string()) {
+                    headText += ' ';
+                    headText += fn["arguments"].get<std::string>();
+                }
+                headText += "]\n";
+            }
+        }
+        headText += '\n';
+    }
+
+    // Cap the summary-call input so the summary request itself doesn't
+    // overflow. Budget = context window − response budget − prompt overhead.
+    ModelRoute route = RouteFor(currentModel_);
+    size_t maxChars = (size_t)(route.contextWindow - 6000) * 4;
+    if (maxChars < 40000) maxChars = 40000;
+    if (headText.size() > maxChars) {
+        size_t drop = headText.size() - maxChars;
+        headText = "[... much older history truncated to fit this "
+                   "summarization call ...]\n\n" + headText.substr(drop);
+    }
+
+    const std::string summarySystem =
+        "You are helping to compact a long coding-assistant conversation "
+        "so it fits within the model's context window for future turns. "
+        "Produce a detailed, faithful summary that preserves:\n"
+        "  - The user's overall goal(s) and any sub-tasks.\n"
+        "  - Concrete decisions made and their rationale.\n"
+        "  - Files touched, functions edited, and the substance of each change.\n"
+        "  - Results of commands run (build pass/fail, test outcomes, error messages).\n"
+        "  - Open questions, blockers, and what should happen next.\n"
+        "  - Any user preferences, constraints, or corrections given.\n"
+        "Write a compact past-tense narrative. Do not invent details, do "
+        "not add a sign-off, do not ask questions. Output only the summary.";
+
+    std::string summaryUser =
+        "Summarize this conversation so a fresh session can continue the "
+        "work without re-reading it:\n\n" + headText;
+
+    nlohmann::json req;
+    req["model"] = route.model;
+    req["stream"] = true;
+    req["max_tokens"] = 2500;
+    req["messages"] = nlohmann::json::array({
+        {{"role", "system"}, {"content", summarySystem}},
+        {{"role", "user"},   {"content", summaryUser}},
+    });
+
+    wxString apiKey;
+    if (route.needsApiKey) {
+        apiKey = Preferences::GetApiKey(route.provider);
+        if (apiKey.IsEmpty()) {
+            // No key for the summary — fall back to dropping the head
+            // without a summary, then send the actual request. The user
+            // already saw the compaction notice; ApplyCompaction will add
+            // a follow-up explaining the fallback.
+            ApplyCompaction(false, std::string{}, "no API key configured");
+            return;
+        }
+    }
+
+    std::string body = req.dump(-1, ' ', false,
+                                nlohmann::json::error_handler_t::replace);
+
+    WebRequestSpec spec;
+    spec.url = route.url;
+    spec.method = "POST";
+    spec.body = std::move(body);
+    spec.bodyContentType = "application/json";
+    spec.headers.push_back({"Accept", "text/event-stream"});
+    if (route.needsApiKey) {
+        spec.headers.push_back({"Authorization",
+                                "Bearer " + std::string(apiKey.utf8_string())});
+    }
+    spec.idleTimeoutSeconds = 60;
+
+    request_ = StreamingWebRequest(
+        this, std::move(spec),
+        [this](std::string_view chunk) { OnSummaryStreamData(chunk); },
+        [this](WebResponse resp) { OnSummaryStreamDone(std::move(resp)); });
+}
+
+void ChatFrame::OnSummaryStreamData(std::string_view chunk) {
+    if (chunk.empty()) return;
+    summarySseBuf_.append(chunk.data(), chunk.size());
+
+    size_t pos;
+    while ((pos = summarySseBuf_.find("\n\n")) != std::string::npos) {
+        std::string event = summarySseBuf_.substr(0, pos);
+        summarySseBuf_.erase(0, pos + 2);
+        std::istringstream stream(event);
+        std::string line;
+        while (std::getline(stream, line)) {
+            if (!line.empty() && line.back() == '\r') line.pop_back();
+            if (line.rfind("data: ", 0) != 0) continue;
+            std::string payload = line.substr(6);
+            if (payload == "[DONE]") continue;
+            try {
+                auto j = nlohmann::json::parse(payload);
+                if (!j.contains("choices") || j["choices"].empty()) continue;
+                const auto& choice = j["choices"][0];
+                if (!choice.contains("delta")) continue;
+                const auto& delta = choice["delta"];
+                if (delta.contains("content") && delta["content"].is_string()) {
+                    summaryText_ += delta["content"].get<std::string>();
+                }
+            } catch (...) {
+                // Tolerate keepalives / partial JSON / malformed events.
+            }
+        }
+    }
+}
+
+void ChatFrame::OnSummaryStreamDone(WebResponse resp) {
+    if (quitRequested_) { Close(); return; }
+    // User hit Escape during the summary call — abort the whole turn rather
+    // than dropping the head with no summary and continuing.
+    if (!resp.ok && resp.error == "cancelled") {
+        compacting_ = false;
+        compactionSplitIdx_ = -1;
+        compactionHeadCount_ = 0;
+        summaryText_.clear();
+        summarySseBuf_.clear();
+        RenderErrorBlock("Cancelled.");
+        FinalizeTurn(true);
+        return;
+    }
+    if (!resp.ok) {
+        std::string err = resp.error.empty() ? "HTTP error" : resp.error;
+        ApplyCompaction(false, std::string{}, err);
+        return;
+    }
+    ApplyCompaction(!summaryText_.empty(), summaryText_, std::string{});
+}
+
+void ChatFrame::ApplyCompaction(bool success, const std::string& summary,
+                                const std::string& error) {
+    int splitIdx = compactionSplitIdx_;
+    int origHeadCount = compactionHeadCount_;
+    compactionSplitIdx_ = -1;
+    compactionHeadCount_ = 0;
+    summaryText_.clear();
+    summarySseBuf_.clear();
+
+    // Defensive: history could have changed shape under us (shouldn't on
+    // the GUI thread, but be safe).
+    if (splitIdx <= 0 || splitIdx > (int)history_.size()) {
+        compacting_ = false;
+        DoSendActualRequest();
+        return;
+    }
+
+    std::string summaryBody;
+    if (success) {
+        summaryBody =
+            "[Prior conversation summary — the earlier turns have been "
+            "compacted into this summary to fit the model's context "
+            "window. Treat it as authoritative background for continuing "
+            "the current task.]\n\n" + summary;
+        RenderErrorBlock(FormatU8(
+            "📦 Context compacted: {} older messages replaced by a summary.",
+            origHeadCount));
+    } else {
+        // Fallback — even a failed summary should shrink history,
+        // otherwise the very next request would hit the same overflow.
+        // historyCompactBaseCount_ still gates re-entry.
+        summaryBody =
+            "[Prior conversation context was dropped to fit the model's "
+            "context window. Summary unavailable" +
+            (error.empty() ? std::string{} : (": " + error)) + ".]";
+        RenderErrorBlock(FormatU8(
+            "⚠️ Compaction summary failed{} — dropping {} older messages "
+            "without a summary so the next request can fit.",
+            error.empty() ? std::string{} : (" (" + error + ")"),
+            origHeadCount));
+    }
+
+    nlohmann::json summaryMsg = {
+        {"role", "user"},
+        {"content", std::move(summaryBody)},
+        {"isSummary", true},
+    };
+
+    nlohmann::json newHist = nlohmann::json::array();
+    newHist.push_back(std::move(summaryMsg));
+    for (int i = splitIdx; i < (int)history_.size(); ++i) {
+        newHist.push_back(std::move(history_[i]));
+    }
+    history_ = std::move(newHist);
+    historyCompactBaseCount_ = (int)history_.size();
+    PersistActive();
+
+    compacting_ = false;
+    DoSendActualRequest();
 }
