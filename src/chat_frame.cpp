@@ -65,19 +65,19 @@ ModelRoute RouteFor(ModelChoice m) {
     case ModelChoice::OpencodeFree:
         return {"https://opencode.ai/zen/v1/chat/completions",
                 "minimax-m2.5-free", false, Preferences::Provider::DeepSeek,
-                384000, 192000};
+                384000, 204800};
     case ModelChoice::DeepseekFlash:
         return {"https://api.deepseek.com/chat/completions",
                 "deepseek-v4-flash", true, Preferences::Provider::DeepSeek,
-                384000, 128000};
+                384000, 1000000};
     case ModelChoice::DeepseekPro:
         return {"https://api.deepseek.com/chat/completions",
                 "deepseek-v4-pro", true, Preferences::Provider::DeepSeek,
-                384000, 128000};
+                384000, 1000000};
     }
     return {"https://opencode.ai/zen/v1/chat/completions",
             "minimax-m2.5-free", false, Preferences::Provider::DeepSeek,
-            384000, 192000};
+            384000, 204800};
 }
 
 // chdir() into the session's directory so tool subprocesses (bash,

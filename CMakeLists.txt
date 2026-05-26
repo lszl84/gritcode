@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.28 FATAL_ERROR)
 
-project(wx_gritcode LANGUAGES CXX)
+project(wx_gritcode VERSION 0.0.1-alpha LANGUAGES CXX)
 
 include(FetchContent)
 
@@ -187,3 +187,22 @@ if(UNIX AND NOT APPLE)
         endif()
     ")
 endif()
+
+# ---- CPack ----
+set(CPACK_PACKAGE_NAME "wx_gritcode")
+set(CPACK_PACKAGE_VENDOR "gritcode")
+set(CPACK_PACKAGE_DESCRIPTION_SUMMARY "Native wxWidgets AI coding assistant")
+set(CPACK_PACKAGE_HOMEPAGE_URL "https://github.com/lszl84/wx_gritcode")
+set(CPACK_PACKAGE_CONTACT "luke@devmindscape.com")
+set(CPACK_RESOURCE_FILE_LICENSE "${CMAKE_CURRENT_SOURCE_DIR}/LICENSE")
+set(CPACK_PACKAGE_INSTALL_DIRECTORY "wx_gritcode")
+set(CPACK_STRIP_FILES ON)
+
+# Linux: DEB + tarball.
+set(CPACK_GENERATOR "DEB;TGZ")
+set(CPACK_DEBIAN_PACKAGE_MAINTAINER "Lukasz Sromek <luke@devmindscape.com>")
+set(CPACK_DEBIAN_PACKAGE_SECTION "devel")
+set(CPACK_DEBIAN_PACKAGE_HOMEPAGE "${CPACK_PACKAGE_HOMEPAGE_URL}")
+set(CPACK_DEBIAN_PACKAGE_SHLIBDEPS ON)
+
+include(CPack)
