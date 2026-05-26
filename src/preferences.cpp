@@ -31,7 +31,7 @@ const SecretSchema kSecretSchema = {
     SECRET_SCHEMA_NONE,
     {
         { "provider", SECRET_SCHEMA_ATTRIBUTE_STRING },
-        { NULL, 0 }
+        { NULL, SECRET_SCHEMA_ATTRIBUTE_STRING }
     }
 };
 #endif
