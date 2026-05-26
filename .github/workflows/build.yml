@@ -76,6 +76,8 @@ jobs:
     permissions:
       contents: write
     steps:
+      - uses: actions/checkout@v6
+
       - uses: actions/download-artifact@v8
         with:
           path: artifacts
@@ -86,10 +88,6 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          # Delete any existing release(s) for this tag (draft or published)
-          # so we always start clean. Don't touch the git tag itself.
-          gh api "/repos/${{ github.repository }}/releases/tags/${{ github.ref_name }}" \
-            --silent 2>/dev/null && \
           gh release delete "${{ github.ref_name }}" --yes 2>/dev/null || true
 
       - name: Publish
