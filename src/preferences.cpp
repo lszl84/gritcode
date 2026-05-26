@@ -1,7 +1,9 @@
 #include "preferences.h"
 #include <wx/config.h>
 #include <wx/fileconf.h>
+#if wxUSE_SECRETSTORE
 #include <wx/secretstore.h>
+#endif
 
 namespace {
 
@@ -12,6 +14,9 @@ const wxString kServicePrefix = "wx_gritcode/";
 const wxString kUsername      = "api_key";
 
 const char* kModelIndexKey = "/UI/LastModelIndex";
+
+// Fallback config-path keys when wxSecretStore is unavailable.
+const char* kApiKeyFallbackKey = "/Secrets/ApiKey";
 
 wxString ServiceFor(Preferences::Provider p) {
     switch (p) {
@@ -49,6 +54,7 @@ void Preferences::SetLastModelIndex(int idx) {
 }
 
 wxString Preferences::GetApiKey(Provider p) {
+#if wxUSE_SECRETSTORE
     wxSecretStore store = wxSecretStore::GetDefault();
     if (!store.IsOk()) return wxString();
     wxString username;
@@ -56,18 +62,33 @@ wxString Preferences::GetApiKey(Provider p) {
     if (!store.Load(ServiceFor(p), username, value)) return wxString();
     if (!value.IsOk()) return wxString();
     return value.GetAsString();
+#else
+    // Fallback: read from plaintext config file.
+    auto* cfg = wxConfigBase::Get();
+    return cfg->Read(kApiKeyFallbackKey, wxString());
+#endif
 }
 
 bool Preferences::SetApiKey(Provider p, const wxString& key) {
+#if wxUSE_SECRETSTORE
     wxSecretStore store = wxSecretStore::GetDefault();
     if (!store.IsOk()) return false;
     if (key.IsEmpty()) {
-        // Treat empty as deletion. If nothing was stored Delete returns false
-        // but that's a no-op success from the caller's POV.
         store.Delete(ServiceFor(p));
         return true;
     }
     return store.Save(ServiceFor(p), kUsername, wxSecretValue(key));
+#else
+    // Fallback: store in plaintext config file.
+    auto* cfg = wxConfigBase::Get();
+    if (key.IsEmpty()) {
+        cfg->DeleteEntry(kApiKeyFallbackKey);
+    } else {
+        cfg->Write(kApiKeyFallbackKey, key);
+    }
+    cfg->Flush();
+    return true;
+#endif
 }
 
 bool Preferences::HasApiKey(Provider p) {
