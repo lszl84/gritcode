@@ -1,136 +1,117 @@
-# wx_gritcode
+# Gritcode
 
-A minimal cross-platform chat client for [opencode.ai/zen](https://opencode.ai/zen),
-written in C++20 with [wxWidgets](https://www.wxwidgets.org/).
+A native desktop AI coding assistant. Built with [wxWidgets](https://www.wxwidgets.org/),
+backed by [DeepSeek V4](https://deepseek.com) — or run for free through
+[OpenCode Zen](https://opencode.ai/zen).
 
-It is a much-simplified port of the rendering ideas from
-[gritcode](https://github.com/lszl84/gritcode), built on top of native widgets:
-a single custom-painted `wxScrolledCanvas` for the transcript, and stock
-`wxTextCtrl` / `wxButton` for input. Markdown is parsed in a streaming fashion
-but only emitted to the view at block boundaries, so finalized blocks are
-immutable and the per-token cost is essentially zero. While a block is in flight
-the canvas shows an animated thinking-dots indicator instead of mutating text.
+## Why Gritcode?
 
-The default model is `minimax-m2.5-free` over an anonymous connection — no API
-key required.
+Most AI coding tools burn tokens on chat UI and agent scaffolding. Gritcode is
+a lean native client: a single custom-painted `wxScrolledCanvas` renders
+streaming markdown block-by-block, a stock `wxTextCtrl` handles input, and
+everything else is just C++20 talking to an LLM API. No Electron, no browser
+tab, no 300 MB download.
+
+### Building On Cheap
+
+DeepSeek V4 Flash costs **$0.20/M input** and **$0.80/M output** — roughly
+1/15th of GPT-4.1 and 1/20th of Claude Sonnet 4.5. For daily coding loops,
+that translates to cents per hour, not dollars.
+
+| Model | Provider | API Key | Pricing |
+|---|---|---|---|
+| **OpenCode Free** | opencode.ai/zen | none | free |
+| **DeepSeek V4 Flash** | api.deepseek.com | required | $0.20 / $0.80 |
+| **DeepSeek V4 Pro** | api.deepseek.com | required | standard DeepSeek rates |
+
+The **OpenCode Free** tier uses `deepseek-v4-flash-free` with no sign-up —
+just launch and go. For heavier work, drop in a DeepSeek API key.
 
 ## Features
 
-- Streaming markdown rendering (paragraphs, headings, fenced code, inline
-  `**bold**`, `*italic*`, `` `code` ``)
-- Cross-block character-precise text selection and copy
-- Native dark/light theme tracking via `wxSystemSettings` (recomputed only on
-  `wxEVT_SYS_COLOUR_CHANGED`, not per paint)
-- Update-region-aware repaint — scrolling only repaints the newly exposed strip
-- Tiny-rect refresh for the thinking-dots animation (no full-canvas invalidate
-  during streaming)
+- Streaming markdown — paragraphs, headings, fenced code blocks,
+  inline `**bold**`, `*italic*`, `` `code` ``, tables, and tool-call cards
+- Multi-session history with SQLite persistence and FTS5 full-text search
+  across projects (`grit_history_search` / `grit_history_fetch`)
+- Cross-block character-precise text selection, double-click word selection,
+  and per-cell table selection
+- Tool calls — the AI can execute bash commands, read/write/edit files,
+  list directories, glob, grep, and fetch URLs
+- Collapsible tool-call cards showing arguments and results inline
+- Thinking/reasoning blocks (collapsed by default)
+- Native dark/light theme tracking
+- MCP stdio server — external agents can introspect selection, blocks, and
+  session state; `grit_history_search` and `grit_history_fetch` are also
+  exposed as MCP tools
 
-## What it doesn't do
+## Download
 
-This is a deliberately small prototype. There is no session chooser, no API-key
-handling, no Claude ACP, no model picker, no tool calls, no syntax highlighting,
-no list/table/blockquote rendering, no soft-wrap inside code blocks, and no
-caret (selection-only, read-only).
+Pre-built installers are available on the
+[Releases](https://github.com/lszl84/wx_gritcode/releases) page:
 
-## Build
+| Platform | Format |
+|---|---|
+| Linux | `.deb`, `.tar.gz`, `.AppImage` |
+| macOS | `.dmg` |
+| Windows | `.exe` (NSIS installer) |
 
-The project uses CMake + Ninja. nlohmann/json v3.11.3 is always fetched via
-`FetchContent`. wxWidgets is detected via `find_package` first; if no system
-install is found, v3.2.6 is fetched and built statically. On Linux libcurl is
-required (used by `wxWebRequest`'s backend) and is taken from the system.
+## Build from source
 
-If wxWidgets is fetched from source, the first configure takes **5–15 minutes**
-depending on your machine. Installing the system wxWidgets package skips that
-step entirely.
+The build uses CMake with the Ninja generator. nlohmann/json is fetched
+automatically. wxWidgets is detected via `find_package`; if not found,
+v3.2.6 is built statically from source.
 
-The build and install commands below are identical on every platform — that's
-the whole point of using CMake. Only the dependency-install step differs.
-
-### Install dependencies
-
-The `wx*` package on each platform is optional but recommended — install it and
-the build will use it directly instead of compiling wxWidgets from source.
-
-#### Arch / Manjaro
+### Linux
 
 ```bash
-sudo pacman -S --needed base-devel cmake ninja git curl gtk3 pkgconf wxwidgets-gtk3
+# Install deps (Ubuntu/Debian)
+sudo apt install build-essential cmake ninja-build pkg-config \
+    libwxgtk3.2-dev libgtk-3-dev libcurl4-openssl-dev \
+    libsqlite3-dev libsecret-1-dev
+
+# Arch
+sudo pacman -S base-devel cmake ninja git curl gtk3 pkgconf \
+    wxwidgets-gtk3 sqlite3 libsecret
+
+# Fedora
+sudo dnf install gcc-c++ cmake ninja-build git libcurl-devel \
+    gtk3-devel wxGTK-devel sqlite-devel libsecret-devel
+
+# Build
+cmake --preset release
+cmake --build --preset release
+./build/wx_gritcode
 ```
 
-#### Fedora / RHEL / Rocky
+### macOS
 
 ```bash
-sudo dnf install gcc-c++ cmake ninja-build git libcurl-devel gtk3-devel wxGTK-devel
+brew install cmake ninja wxwidgets
+cmake --preset release
+cmake --build --preset release
+open ./build/wx_gritcode.app
 ```
 
-#### Debian / Ubuntu / Pop!\_OS / Mint
+### Windows (MSYS2 CLANG64)
 
 ```bash
-sudo apt update
-sudo apt install build-essential cmake ninja-build git pkg-config \
-    libcurl4-openssl-dev libgtk-3-dev libwxgtk3.2-dev
+pacman -S mingw-w64-clang-x86_64-toolchain \
+    mingw-w64-clang-x86_64-cmake \
+    mingw-w64-clang-x86_64-ninja \
+    mingw-w64-clang-x86_64-wxwidgets3.2-msw
+cmake --preset release
+cmake --build --preset release
+./build/wx_gritcode.exe
 ```
 
-#### macOS
+Or open the CMakeLists.txt in Visual Studio 2022 with the C++ CMake tools
+component installed.
 
-Requires the Xcode command-line tools (`xcode-select --install`) and
-[Homebrew](https://brew.sh/).
+## API keys
 
-```bash
-brew install cmake ninja curl
-```
-
-The build produces a proper `.app` bundle thanks to the `MACOSX_BUNDLE` target
-flag in `CMakeLists.txt`.
-
-#### Windows
-
-Requires [Visual Studio 2022](https://visualstudio.microsoft.com/) with the
-"Desktop development with C++" workload (which includes MSVC, the Windows SDK,
-and CMake), plus [Git for Windows](https://git-scm.com/download/win) and
-[Ninja](https://github.com/ninja-build/ninja/releases) on `PATH`.
-
-The simplest way to get libcurl is via [vcpkg](https://vcpkg.io/) in manifest
-mode, or you can rely on the curl that ships with recent Windows 10/11. Run the
-build from the **"x64 Native Tools Command Prompt for VS 2022"**.
-
-If you use vcpkg, append
-`-DCMAKE_TOOLCHAIN_FILE=%VCPKG_ROOT%\scripts\buildsystems\vcpkg.cmake` to the
-`cmake -S . -B build` line below. Otherwise point CMake at a libcurl install
-via `-DCURL_ROOT=C:\path\to\curl`.
-
-### Configure, build, install
-
-```bash
-git clone https://github.com/lszl84/wx_gritcode.git
-cd wx_gritcode
-cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
-cmake --build build
-```
-
-To install to a per-user prefix (Linux/macOS):
-
-```bash
-cmake --install build --prefix ~/.local
-```
-
-That puts the binary at `~/.local/bin/wx_gritcode` (or the `.app` bundle at
-`~/.local/wx_gritcode.app` on macOS — pass `--prefix ~/Applications` instead if
-you want it discoverable by Spotlight/Finder).
-
-On Windows, install to a user-writable prefix and add its `bin\` to `%PATH%`:
-
-```bat
-cmake --install build --prefix %LOCALAPPDATA%\Programs\wx_gritcode
-```
-
-To run without installing:
-
-```bash
-cmake --build build --target wx_gritcode
-./build/wx_gritcode          # Linux / Windows (use build\wx_gritcode.exe on cmd)
-open ./build/wx_gritcode.app # macOS
-```
+Set your DeepSeek API key in Settings (`Ctrl+,`). The key is stored in your
+OS keyring (libsecret on Linux, Keychain on macOS, Credential Manager on
+Windows). The OpenCode Free model needs no key.
 
 ## License
 
