@@ -557,8 +557,10 @@ ChatFrame::~ChatFrame() {
     if (toolWorker_.joinable()) {
         if (auto tok = currentToolToken_) {
             tok->cancelled.store(true);
+#ifndef _WIN32
             int pgid = tok->activePgid.load();
             if (pgid > 0) ::kill(-pgid, SIGTERM);
+#endif
         }
         toolWorker_.join();
     }
@@ -691,8 +693,10 @@ void ChatFrame::RequestCancel() {
     // to notice — important when bash is blocked on something slow.
     if (auto tok = currentToolToken_) {
         tok->cancelled.store(true);
+#ifndef _WIN32
         int pgid = tok->activePgid.load();
         if (pgid > 0) ::kill(-pgid, SIGTERM);
+#endif
     }
 }
 
@@ -824,7 +828,12 @@ void ChatFrame::PersistActive() {
     // history. Cheap in absolute terms (a 500-turn rebuild is sub-100ms).
     if (memory_.IsOpen()) {
         auto now = []{
-            std::time_t t = std::time(nullptr); std::tm tm; localtime_r(&t, &tm);
+            std::time_t t = std::time(nullptr); std::tm tm;
+#ifdef _WIN32
+            localtime_s(&tm, &t);
+#else
+            localtime_r(&t, &tm);
+#endif
             char buf[32]; std::strftime(buf, sizeof(buf), "%Y-%m-%dT%H:%M:%S", &tm);
             return std::string(buf);
         }();
