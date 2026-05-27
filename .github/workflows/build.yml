@@ -68,9 +68,71 @@ jobs:
           name: linux-appimage
           path: wx_gritcode-*.AppImage
 
+  macos:
+    name: macOS
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install build deps
+        run: brew install wxwidgets
+
+      - name: Configure
+        run: cmake --preset release
+
+      - name: Build
+        run: cmake --build --preset release
+
+      - name: Package
+        working-directory: build
+        run: cpack
+
+      - name: Upload installer
+        uses: actions/upload-artifact@v7
+        with:
+          name: macos-installer
+          path: build/wx_gritcode-*.dmg
+
+  windows:
+    name: Windows (mingw-clang)
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: msys2 {0}
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Set up MSYS2 (CLANG64)
+        uses: msys2/setup-msys2@v2
+        with:
+          msystem: CLANG64
+          update: true
+          install: >-
+            mingw-w64-clang-x86_64-toolchain
+            mingw-w64-clang-x86_64-cmake
+            mingw-w64-clang-x86_64-ninja
+            mingw-w64-clang-x86_64-wxwidgets3.2-msw
+            mingw-w64-clang-x86_64-nsis
+
+      - name: Configure
+        run: cmake --preset release
+
+      - name: Build
+        run: cmake --build --preset release
+
+      - name: Package
+        working-directory: build
+        run: cpack
+
+      - name: Upload installer
+        uses: actions/upload-artifact@v7
+        with:
+          name: windows-installer
+          path: build/wx_gritcode-*.exe
+
   release:
     name: Publish GitHub Release
-    needs: [linux]
+    needs: [linux, macos, windows]
     if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-24.04
     permissions:

@@ -81,7 +81,24 @@ if(APPLE)
     set_source_files_properties(${ASSET_ICON_FILES} PROPERTIES
         MACOSX_PACKAGE_LOCATION "Resources/icons"
     )
-    add_executable(wx_gritcode MACOSX_BUNDLE ${SRCS} ${ASSET_ICON_FILES})
+
+    # Compile the app icon from the iconset into a single .icns at build time
+    # using Apple's iconutil. The .icns lands in the .app's Resources/ and
+    # Info.plist's CFBundleIconFile picks it up.
+    set(WXG_ICNS ${CMAKE_CURRENT_BINARY_DIR}/wx_gritcode.icns)
+    file(GLOB WXG_ICONSET_PNGS
+         ${CMAKE_CURRENT_SOURCE_DIR}/packaging/wx_gritcode.iconset/*.png)
+    add_custom_command(
+        OUTPUT ${WXG_ICNS}
+        COMMAND iconutil -c icns
+                ${CMAKE_CURRENT_SOURCE_DIR}/packaging/wx_gritcode.iconset
+                -o ${WXG_ICNS}
+        DEPENDS ${WXG_ICONSET_PNGS}
+        COMMENT "Generating wx_gritcode.icns")
+    set_source_files_properties(${WXG_ICNS} PROPERTIES
+        MACOSX_PACKAGE_LOCATION Resources)
+
+    add_executable(wx_gritcode MACOSX_BUNDLE ${SRCS} ${ASSET_ICON_FILES} ${WXG_ICNS})
 
     set_target_properties(wx_gritcode PROPERTIES
         MACOSX_BUNDLE_BUNDLE_NAME       "wx_gritcode"
@@ -89,21 +106,8 @@ if(APPLE)
         MACOSX_BUNDLE_BUNDLE_VERSION    "0.1.0"
         MACOSX_BUNDLE_SHORT_VERSION_STRING "0.1.0"
         MACOSX_BUNDLE_COPYRIGHT         "Copyright (c) Gritcode contributors"
+        MACOSX_BUNDLE_ICON_FILE         "wx_gritcode.icns"
     )
-
-    # Bundle the app icon if a .icns is present in packaging/. macOS doesn't
-    # render SVG app icons, so we only wire this when the icns exists.
-    if(EXISTS "${CMAKE_SOURCE_DIR}/packaging/wx_gritcode.icns")
-        set_source_files_properties("${CMAKE_SOURCE_DIR}/packaging/wx_gritcode.icns"
-            PROPERTIES MACOSX_PACKAGE_LOCATION "Resources"
-        )
-        target_sources(wx_gritcode PRIVATE
-            "${CMAKE_SOURCE_DIR}/packaging/wx_gritcode.icns"
-        )
-        set_target_properties(wx_gritcode PROPERTIES
-            MACOSX_BUNDLE_ICON_FILE "wx_gritcode.icns"
-        )
-    endif()
 elseif(WIN32)
     # Embed the Windows app icon if both packaging/wx_gritcode.rc and the .ico
     # it references are present. Without this the binary ships with the default
@@ -163,6 +167,37 @@ install(TARGETS wx_gritcode
     BUNDLE  DESTINATION .
 )
 
+if(WIN32)
+    # Ship the .ico inside the install tree so the Start Menu shortcut can
+    # reference it explicitly.
+    install(FILES packaging/wx_gritcode.ico DESTINATION ${CMAKE_INSTALL_BINDIR})
+
+    # Walk the installed .exe's PE imports and copy non-system runtime DLLs
+    # into bin/ alongside the executable.
+    if(DEFINED ENV{MINGW_PREFIX})
+        set(_wxg_dll_search_dirs "$ENV{MINGW_PREFIX}/bin")
+    else()
+        set(_wxg_dll_search_dirs "")
+    endif()
+    install(CODE "
+        cmake_policy(SET CMP0207 NEW)
+        file(GET_RUNTIME_DEPENDENCIES
+            EXECUTABLES \"\${CMAKE_INSTALL_PREFIX}/${CMAKE_INSTALL_BINDIR}/$<TARGET_FILE_NAME:wx_gritcode>\"
+            RESOLVED_DEPENDENCIES_VAR _resolved
+            UNRESOLVED_DEPENDENCIES_VAR _unresolved
+            PRE_EXCLUDE_REGEXES \"api-ms-.*\" \"ext-ms-.*\"
+            POST_EXCLUDE_REGEXES \".*[Ss]ystem32.*\" \".*WINDOWS.*\"
+            DIRECTORIES \"${_wxg_dll_search_dirs}\"
+        )
+        foreach(_dep \${_resolved})
+            file(INSTALL \"\${_dep}\" DESTINATION \"\${CMAKE_INSTALL_PREFIX}/${CMAKE_INSTALL_BINDIR}\")
+        endforeach()
+        if(_unresolved)
+            message(WARNING \"Unresolved runtime deps: \${_unresolved}\")
+        endif()
+    ")
+endif()
+
 if(UNIX AND NOT APPLE)
     install(DIRECTORY assets/icons
         DESTINATION ${CMAKE_INSTALL_DATADIR}/wx_gritcode
@@ -204,11 +239,31 @@ set(CPACK_RESOURCE_FILE_LICENSE "${CMAKE_CURRENT_SOURCE_DIR}/LICENSE")
 set(CPACK_PACKAGE_INSTALL_DIRECTORY "wx_gritcode")
 set(CPACK_STRIP_FILES ON)
 
-# Linux: DEB + tarball.
-set(CPACK_GENERATOR "DEB;TGZ")
-set(CPACK_DEBIAN_PACKAGE_MAINTAINER "Lukasz Sromek <luke@devmindscape.com>")
-set(CPACK_DEBIAN_PACKAGE_SECTION "devel")
-set(CPACK_DEBIAN_PACKAGE_HOMEPAGE "${CPACK_PACKAGE_HOMEPAGE_URL}")
-set(CPACK_DEBIAN_PACKAGE_SHLIBDEPS ON)
+if(WIN32)
+    set(CPACK_GENERATOR "NSIS")
+    set(CPACK_NSIS_MUI_ICON   "${CMAKE_CURRENT_SOURCE_DIR}/packaging/wx_gritcode.ico")
+    set(CPACK_NSIS_MUI_UNIICON "${CMAKE_CURRENT_SOURCE_DIR}/packaging/wx_gritcode.ico")
+    set(CPACK_NSIS_INSTALLED_ICON_NAME "bin\\\\wx_gritcode.exe")
+    set(CPACK_NSIS_DISPLAY_NAME "wx_gritcode")
+    set(CPACK_NSIS_PACKAGE_NAME "wx_gritcode")
+    set(CPACK_NSIS_URL_INFO_ABOUT "${CPACK_PACKAGE_HOMEPAGE_URL}")
+    set(CPACK_NSIS_CONTACT "${CPACK_PACKAGE_CONTACT}")
+    set(CPACK_NSIS_ENABLE_UNINSTALL_BEFORE_INSTALL ON)
+    set(CPACK_NSIS_MODIFY_PATH OFF)
+    set(CPACK_NSIS_CREATE_ICONS_EXTRA
+        "CreateShortCut '$SMPROGRAMS\\\\$STARTMENU_FOLDER\\\\wx_gritcode.lnk' '$INSTDIR\\\\bin\\\\wx_gritcode.exe' '' '$INSTDIR\\\\bin\\\\wx_gritcode.ico'")
+    set(CPACK_NSIS_DELETE_ICONS_EXTRA
+        "Delete '$SMPROGRAMS\\\\$STARTMENU_FOLDER\\\\wx_gritcode.lnk'")
+elseif(APPLE)
+    set(CPACK_GENERATOR "DragNDrop")
+    set(CPACK_DMG_VOLUME_NAME "wx_gritcode")
+else()
+    # Linux: DEB + tarball.
+    set(CPACK_GENERATOR "DEB;TGZ")
+    set(CPACK_DEBIAN_PACKAGE_MAINTAINER "Lukasz Sromek <luke@devmindscape.com>")
+    set(CPACK_DEBIAN_PACKAGE_SECTION "devel")
+    set(CPACK_DEBIAN_PACKAGE_HOMEPAGE "${CPACK_PACKAGE_HOMEPAGE_URL}")
+    set(CPACK_DEBIAN_PACKAGE_SHLIBDEPS ON)
+endif()
 
 include(CPack)
