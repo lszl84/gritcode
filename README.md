@@ -6,11 +6,10 @@ backed by [DeepSeek V4](https://deepseek.com) — or run for free through
 
 ## Why Gritcode?
 
-Most AI coding tools burn tokens on chat UI and agent scaffolding. Gritcode is
-a lean native client: a single custom-painted `wxScrolledCanvas` renders
-streaming markdown block-by-block, a stock `wxTextCtrl` handles input, and
-everything else is just C++20 talking to an LLM API. No Electron, no browser
-tab, no 300 MB download.
+Gritcode is a lean native desktop client — a custom-painted `wxScrolledCanvas`
+for streaming markdown, a stock `wxTextCtrl` for input, and C++20 talking
+directly to an LLM API. No Electron, no browser tab, no 300 MB download.
+It starts instantly and stays out of your way.
 
 ### Building On Cheap
 
