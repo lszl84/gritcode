@@ -16,11 +16,14 @@
 #include <sstream>
 #include <string>
 #include <system_error>
+
+#ifndef _WIN32
 #include <fcntl.h>
 #include <poll.h>
 #include <signal.h>
 #include <sys/wait.h>
 #include <unistd.h>
+#endif
 
 namespace {
 
@@ -116,6 +119,13 @@ std::string ToolEditFile(const nlohmann::json& args) {
     return "Edited " + path;
 }
 
+#ifdef _WIN32
+// Bash tool is not supported on Windows — fork/exec/signal are POSIX-only.
+// A future port could use CreateProcess + named pipes.
+std::string ToolBash(const nlohmann::json&, ToolCancelToken*) {
+    return "Error: bash tool is not supported on Windows.";
+}
+#else
 // fork+exec instead of popen so we can put the child in its own process group
 // and SIGTERM the whole group on Escape. popen() doesn't expose the child PID
 // and can't be interrupted from another thread. The pipe is O_CLOEXEC so the
@@ -126,7 +136,10 @@ std::string ToolBash(const nlohmann::json& args, ToolCancelToken* token) {
     if (token && token->cancelled.load()) return "[cancelled]";
 
     int pfd[2];
-    if (pipe2(pfd, O_CLOEXEC) < 0) return "Error: pipe failed";
+    if (pipe(pfd) < 0) return "Error: pipe failed";
+    // Set close-on-exec so the child's exec'd program doesn't inherit our fd.
+    fcntl(pfd[0], F_SETFD, FD_CLOEXEC);
+    fcntl(pfd[1], F_SETFD, FD_CLOEXEC);
 
     pid_t pid = fork();
     if (pid < 0) {
@@ -233,6 +246,7 @@ std::string ToolBash(const nlohmann::json& args, ToolCancelToken* token) {
 
     return out;
 }
+#endif  // _WIN32
 
 std::string ToolListDirectory(const nlohmann::json& args) {
     std::string path = GetStringArg(args, "path");

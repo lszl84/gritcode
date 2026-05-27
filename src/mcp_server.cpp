@@ -1,5 +1,6 @@
 #include "mcp_server.h"
 
+#ifndef _WIN32
 #include <cstdio>
 #include <cstring>
 #include <fcntl.h>
@@ -96,7 +97,6 @@ void MCPServer::HandleClient(int clientFd) {
         int ret = poll(&pfd, 1, 500);
         if (ret < 0) break;
         if (ret == 0) {
-            // Drop idle clients after 30s so others can connect.
             if (++idleTicks > 60) break;
             continue;
         }
@@ -240,3 +240,13 @@ json MCPServer::HandleRequest(const json& request) {
     }
     return err(-32601, "unknown method: " + method);
 }
+
+#else  // _WIN32
+// MCP server is not yet ported to Windows (uses POSIX sockets/poll).
+// The callback system still works; only the TCP listener is absent.
+
+MCPServer::MCPServer() {}
+MCPServer::~MCPServer() {}
+void MCPServer::Start(MCPCallbacks) {}
+void MCPServer::Stop() {}
+#endif  // _WIN32
