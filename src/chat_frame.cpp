@@ -21,7 +21,12 @@
 #include <thread>
 #include <cstdlib>
 #include <signal.h>
+#ifndef _WIN32
 #include <unistd.h>
+#else
+#include <direct.h>
+#define chdir _chdir
+#endif
 
 // Posted from the tool-dispatch worker thread when a batch completes.
 // Payload is a shared_ptr<vector<ToolBatchEntry>> — shared_ptr so wxThreadEvent's
@@ -148,11 +153,39 @@ wxBitmapBundle LoadThemedSvgIcon(const wxString& name, const wxSize& size,
         reinterpret_cast<const wxByte*>(utf8.data()), utf8.size(), size);
 }
 
+// Load the application icon. Tries the installed hicolor theme path first
+// (used by DEB and AppImage), then the source-tree packaging directory.
+wxIconBundle LoadAppIcon() {
+    wxString path = wxStandardPaths::Get().GetResourcesDir()
+                    + "/../../icons/hicolor/scalable/apps/wx_gritcode.svg";
+    wxFileName fn(path);
+    fn.Normalize();
+    if (!fn.FileExists()) {
+        // Dev fallback: source-tree packaging directory.
+        fn.Assign(wxString(WXG_ASSETS_DIR) + "/../packaging/wx_gritcode.svg");
+        fn.Normalize();
+    }
+    if (fn.FileExists()) {
+        wxBitmapBundle bb = wxBitmapBundle::FromSVGFile(fn.GetFullPath(), wxSize(64, 64));
+        if (bb.IsOk()) {
+            wxIconBundle icons;
+            icons.AddIcon(bb.GetIcon(wxSize(16, 16)));
+            icons.AddIcon(bb.GetIcon(wxSize(32, 32)));
+            icons.AddIcon(bb.GetIcon(wxSize(48, 48)));
+            icons.AddIcon(bb.GetIcon(wxSize(64, 64)));
+            return icons;
+        }
+    }
+    return wxIconBundle();
+}
+
 }  // namespace
 
 ChatFrame::ChatFrame()
     : wxFrame(nullptr, wxID_ANY, "wx_gritcode",
               wxDefaultPosition, wxSize(600, 850)) {
+
+    SetIcons(LoadAppIcon());
 
     auto* panel = new wxPanel(this);
     auto* outer = new wxBoxSizer(wxVERTICAL);
