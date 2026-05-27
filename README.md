@@ -13,15 +13,18 @@ It starts instantly and stays out of your way.
 
 ### Building On Cheap
 
-DeepSeek V4 Flash costs a fraction of premium models — roughly **1/25th the cost
-of Claude Opus 4.7** per token. For daily coding loops, that translates to
-cents per hour, not dollars.
+DeepSeek V4 Flash costs **$0.14/M input** and **$0.28/M output**. Claude Opus 4.7
+charges **$5/M input** and **$25/M output**. That's **1/36th the input cost**
+and **1/89th the output cost** — for daily coding loops, cents per hour
+instead of dollars.
 
-| Model | Provider | API Key | Pricing |
-|---|---|---|---|
-| **OpenCode Free** | opencode.ai/zen | none | free |
-| **DeepSeek V4 Flash** | api.deepseek.com | required | $0.20 / $0.80 |
-| **DeepSeek V4 Pro** | api.deepseek.com | required | standard DeepSeek rates |
+| Model | Provider | API Key | Input $/M | Output $/M |
+|---|---|---|---|---|
+| **OpenCode Free** | opencode.ai/zen | none | free | free |
+| **DeepSeek V4 Flash** | api.deepseek.com | required | $0.14 | $0.28 |
+| **DeepSeek V4 Pro** | api.deepseek.com | required | $0.44¹ | $0.87¹ |
+
+¹ 75% promo through 2026-05-31. List price: $1.74 / $3.48.
 
 The **OpenCode Free** tier uses `deepseek-v4-flash-free` with no sign-up —
 just launch and go. For heavier work, drop in a DeepSeek API key.
