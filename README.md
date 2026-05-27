@@ -13,9 +13,9 @@ It starts instantly and stays out of your way.
 
 ### Building On Cheap
 
-DeepSeek V4 Flash costs **$0.20/M input** and **$0.80/M output** — roughly
-1/15th of GPT-4.1 and 1/20th of Claude Sonnet 4.5. For daily coding loops,
-that translates to cents per hour, not dollars.
+DeepSeek V4 Flash costs a fraction of premium models — roughly **1/25th the cost
+of Claude Opus 4.7** per token. For daily coding loops, that translates to
+cents per hour, not dollars.
 
 | Model | Provider | API Key | Pricing |
 |---|---|---|---|
