@@ -83,6 +83,44 @@ jobs:
       - name: Build
         run: cmake --build --preset release
 
+      - name: Bundle dylibs into .app
+        run: |
+          # Copy wx (and other Homebrew) dylibs into the .app bundle so it
+          # runs on machines without Homebrew. Uses install_name_tool to
+          # rewrite load commands to @executable_path/../Frameworks.
+          app="build/wx_gritcode.app"
+          bin="$app/Contents/MacOS/wx_gritcode"
+          fwdir="$app/Contents/Frameworks"
+          mkdir -p "$fwdir"
+
+          # Collect every Homebrew dylib the binary links.
+          libs=$(otool -L "$bin" | grep -E '/opt/homebrew|/usr/local' | awk '{print $1}')
+
+          for lib in $libs; do
+            name=$(basename "$lib")
+            dest="$fwdir/$name"
+            if [ ! -f "$dest" ]; then
+              cp "$lib" "$dest"
+              chmod 755 "$dest"
+              install_name_tool -id "@executable_path/../Frameworks/$name" "$dest"
+            fi
+            install_name_tool -change "$lib" "@executable_path/../Frameworks/$name" "$bin"
+          done
+
+          # Fix inter-lib references within Frameworks.
+          for lib in $libs; do
+            name=$(basename "$lib")
+            dest="$fwdir/$name"
+            for other in $libs; do
+              other_name=$(basename "$other")
+              [ "$name" != "$other_name" ] || continue
+              install_name_tool -change "$other" "@executable_path/../Frameworks/$other_name" "$dest" 2>/dev/null || true
+            done
+          done
+
+          echo "Bundled libraries:"
+          ls "$fwdir"
+
       - name: Package
         working-directory: build
         run: cpack
