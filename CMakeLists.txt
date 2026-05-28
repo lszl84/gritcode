@@ -176,7 +176,6 @@ if(WIN32)
         DESTINATION ${CMAKE_INSTALL_BINDIR}/icons
         FILES_MATCHING PATTERN "*.svg"
     )
-endif()
 
     # Walk the installed .exe's PE imports and copy non-system runtime DLLs
     # into bin/ alongside the executable.
