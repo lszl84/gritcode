@@ -120,12 +120,110 @@ std::string ToolEditFile(const nlohmann::json& args) {
 }
 
 #ifdef _WIN32
-// Bash tool is not supported on Windows — fork/exec/signal are POSIX-only.
-// A future port could use CreateProcess + named pipes.
-std::string ToolBash(const nlohmann::json&, ToolCancelToken*) {
-    return "Error: bash tool is not supported on Windows.";
+
+#include <windows.h>
+
+std::string ToolBash(const nlohmann::json& args, ToolCancelToken* token) {
+    std::string cmd = GetStringArg(args, "command");
+    if (cmd.empty()) return "Error: missing 'command' argument";
+    if (token && token->cancelled.load()) return "[cancelled]";
+
+    // Wrap in cmd /c so we get shell builtins (dir, cd, set, etc.).
+    std::string fullCmd = "cmd /c \"";
+    fullCmd += cmd;
+    fullCmd += "\"";
+
+    // Create a pipe for stdout+stderr.
+    HANDLE hRead = nullptr, hWrite = nullptr;
+    SECURITY_ATTRIBUTES sa{sizeof(sa), nullptr, TRUE};  // inheritable
+    if (!CreatePipe(&hRead, &hWrite, &sa, 0))
+        return "Error: CreatePipe failed";
+
+    // Don't inherit the read end into the child.
+    SetHandleInformation(hRead, HANDLE_FLAG_INHERIT, 0);
+
+    STARTUPINFOA si{sizeof(si)};
+    si.dwFlags = STARTF_USESTDHANDLES;
+    si.hStdOutput = hWrite;
+    si.hStdError  = hWrite;
+
+    PROCESS_INFORMATION pi{};
+    std::vector<char> cmdBuf(fullCmd.begin(), fullCmd.end());
+    cmdBuf.push_back('\0');
+
+    if (!CreateProcessA(nullptr, cmdBuf.data(), nullptr, nullptr, TRUE,
+                        CREATE_NO_WINDOW, nullptr, nullptr, &si, &pi)) {
+        CloseHandle(hRead);
+        CloseHandle(hWrite);
+        return "Error: CreateProcess failed (" + std::to_string(GetLastError()) + ")";
+    }
+    CloseHandle(hWrite);
+
+    if (token) token->activePgid.store(GetProcessId(pi.hProcess));
+
+    std::string out;
+    bool truncated = false;
+    auto append = [&](const char* data, size_t n) {
+        if (out.size() >= kMaxOutput) { truncated = true; return; }
+        out.append(data, n);
+        if (out.size() > kMaxOutput) { out.resize(kMaxOutput); truncated = true; }
+    };
+
+    auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(30);
+    bool timedOut = false;
+
+    for (;;) {
+        if (token && token->cancelled.load()) {
+            TerminateProcess(pi.hProcess, 1);
+            break;
+        }
+
+        // Check if child has exited.
+        DWORD exitCode = STILL_ACTIVE;
+        if (!GetExitCodeProcess(pi.hProcess, &exitCode)) break;
+        if (exitCode != STILL_ACTIVE) {
+            // Drain remaining pipe data.
+            for (;;) {
+                char buf[4096];
+                DWORD n = 0;
+                if (!ReadFile(hRead, buf, sizeof(buf), &n, nullptr) || n == 0) break;
+                append(buf, n);
+            }
+            break;
+        }
+
+        // Check timeout.
+        if (std::chrono::steady_clock::now() >= deadline) {
+            TerminateProcess(pi.hProcess, 1);
+            timedOut = true;
+            break;
+        }
+
+        // Read available data.
+        char buf[4096];
+        DWORD n = 0;
+        if (PeekNamedPipe(hRead, nullptr, 0, nullptr, &n, nullptr) && n > 0) {
+            if (ReadFile(hRead, buf, sizeof(buf), &n, nullptr) && n > 0)
+                append(buf, n);
+        } else {
+            Sleep(50);  // avoid busy-spin
+        }
+    }
+
+    if (token) token->activePgid.store(0);
+    CloseHandle(hRead);
+    CloseHandle(pi.hProcess);
+    CloseHandle(pi.hThread);
+
+    if (token && token->cancelled.load()) return "[cancelled]";
+    if (truncated) out += "\n[output truncated]";
+    if (out.empty()) out = "(no output)";
+    if (timedOut) out += "\n[timed out after 30s]";
+
+    return out;
 }
-#else
+
+#else  // !_WIN32
 // fork+exec instead of popen so we can put the child in its own process group
 // and SIGTERM the whole group on Escape. popen() doesn't expose the child PID
 // and can't be interrupted from another thread. The pipe is O_CLOEXEC so the
