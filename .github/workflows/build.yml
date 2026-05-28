@@ -83,6 +83,45 @@ jobs:
       - name: Build
         run: cmake --build --preset release
 
+      - name: Bundle dylibs into .app
+        run: |
+          app="build/wx_gritcode.app"
+          bin="$app/Contents/MacOS/wx_gritcode"
+          fwdir="$app/Contents/Frameworks"
+          mkdir -p "$fwdir"
+
+          # Collect every Homebrew dylib the binary links.
+          libs=$(otool -L "$bin" | grep -E '/opt/homebrew|/usr/local' | awk '{print $1}')
+
+          for lib in $libs; do
+            name=$(basename "$lib")
+            dest="$fwdir/$name"
+            [ -f "$dest" ] && continue
+            cp "$lib" "$dest"
+            chmod 755 "$dest"
+            install_name_tool -id "@executable_path/../Frameworks/$name" "$dest"
+            install_name_tool -change "$lib" "@executable_path/../Frameworks/$name" "$bin"
+          done
+
+          # Fix inter-lib references.
+          for lib in $libs; do
+            name=$(basename "$lib")
+            dest="$fwdir/$name"
+            for other in $libs; do
+              other_name=$(basename "$other")
+              [ "$name" = "$other_name" ] && continue
+              install_name_tool -change "$other" \
+                "@executable_path/../Frameworks/$other_name" "$dest" 2>/dev/null || true
+            done
+          done
+
+          # Ad-hoc sign inner items first, then the bundle.
+          for dylib in "$fwdir"/*.dylib; do
+            codesign --force --sign - "$dylib"
+          done
+          codesign --force --sign - "$bin"
+          codesign --force --sign - "$app"
+
       - name: Package
         working-directory: build
         run: cpack
