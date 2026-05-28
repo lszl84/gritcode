@@ -90,32 +90,23 @@ jobs:
           fwdir="$app/Contents/Frameworks"
           mkdir -p "$fwdir"
 
-          # Collect every Homebrew dylib the binary links.
-          libs=$(otool -L "$bin" | grep -E '/opt/homebrew|/usr/local' | awk '{print $1}')
-
-          for lib in $libs; do
-            name=$(basename "$lib")
-            dest="$fwdir/$name"
-            [ -f "$dest" ] && continue
-            cp "$lib" "$dest"
-            chmod 755 "$dest"
-            install_name_tool -id "@executable_path/../Frameworks/$name" "$dest"
-            install_name_tool -change "$lib" "@executable_path/../Frameworks/$name" "$bin"
-          done
-
-          # Fix inter-lib references.
-          for lib in $libs; do
-            name=$(basename "$lib")
-            dest="$fwdir/$name"
-            for other in $libs; do
-              other_name=$(basename "$other")
-              [ "$name" = "$other_name" ] && continue
-              install_name_tool -change "$other" \
-                "@executable_path/../Frameworks/$other_name" "$dest" 2>/dev/null || true
+          # Recursively resolve and copy all non-system dylibs.
+          resolve() {
+            for dep in $(otool -L "$1" | grep -E '/opt/homebrew|/usr/local' | awk '{print $1}'); do
+              name=$(basename "$dep")
+              dest="$fwdir/$name"
+              if [ ! -f "$dest" ]; then
+                cp "$dep" "$dest"
+                chmod 755 "$dest"
+                resolve "$dest"
+              fi
+              install_name_tool -change "$dep" "@executable_path/../Frameworks/$name" "$1"
+              install_name_tool -id "@executable_path/../Frameworks/$name" "$dest" 2>/dev/null || true
             done
-          done
+          }
+          resolve "$bin"
 
-          # Ad-hoc sign inner items first, then the bundle.
+          # Ad-hoc sign inner-to-outer.
           for dylib in "$fwdir"/*.dylib; do
             codesign --force --sign - "$dylib"
           done
