@@ -1,12 +1,15 @@
-// Windows resource file. Embeds the executable icon and version info.
-// Drop a packaging/wx_gritcode.ico next to this file before building on Windows.
+// Windows resource file. Embeds the executable icon, version info,
+// Common Controls v6 manifest (modern flat theming), and DPI awareness.
+#define wxUSE_DPI_AWARE_MANIFEST 2
+#include <wx/msw/wx.rc>
+
 IDI_APPICON ICON "wx_gritcode.ico"
 
 #include <winver.h>
 
 VS_VERSION_INFO VERSIONINFO
-FILEVERSION    0,1,0,0
-PRODUCTVERSION 0,1,0,0
+FILEVERSION    0,2,0,0
+PRODUCTVERSION 0,2,0,0
 FILEFLAGSMASK  0x3fL
 FILEFLAGS      0x0L
 FILEOS         VOS__WINDOWS32
@@ -19,11 +22,11 @@ BEGIN
         BEGIN
             VALUE "CompanyName",      "Gritcode"
             VALUE "FileDescription",  "Gritcode"
-            VALUE "FileVersion",      "0.1.0.0"
+            VALUE "FileVersion",      "0.2.0.0"
             VALUE "InternalName",     "wx_gritcode"
             VALUE "OriginalFilename", "wx_gritcode.exe"
             VALUE "ProductName",      "Gritcode"
-            VALUE "ProductVersion",   "0.1.0.0"
+            VALUE "ProductVersion",   "0.2.0.0"
         END
     END
     BLOCK "VarFileInfo"
