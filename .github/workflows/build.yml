@@ -121,6 +121,11 @@ jobs:
           echo "Bundled libraries:"
           ls "$fwdir"
 
+          # Ad-hoc sign everything after modifying dylibs — install_name_tool
+          # invalidates existing signatures and cpack DragNDrop refuses
+          # unsigned bundles.
+          codesign --force --deep -s - "$app"
+
       - name: Package
         working-directory: build
         run: cpack
