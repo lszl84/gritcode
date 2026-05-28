@@ -20,14 +20,7 @@ FetchContent_Declare(
 FetchContent_MakeAvailable(nlohmann_json)
 
 # ---- wxWidgets: try system first, fall back to FetchContent ----
-# 3.2.8+ is required on Windows MSYS2 CLANG64 (libc++). 3.2.4's
-# wx/ustring.h hits an undefined std::char_traits<unsigned int>.
-# On Linux/macOS 3.2.4 is fine.
-if(WIN32)
-    find_package(wxWidgets 3.2.8 QUIET COMPONENTS core base)
-else()
-    find_package(wxWidgets QUIET COMPONENTS core base)
-endif()
+find_package(wxWidgets QUIET COMPONENTS core base)
 
 if(NOT wxWidgets_FOUND)
     message(STATUS "wxWidgets not found — building from source (FetchContent)")
