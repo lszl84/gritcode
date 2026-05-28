@@ -844,6 +844,19 @@ void ChatFrame::PersistActive() {
 }
 
 void ChatFrame::SeedSystemPrompt() {
+    std::string platformInfo;
+#ifdef _WIN32
+    platformInfo = "You are running on Windows. The shell tool uses cmd /c — "
+                   "use Windows commands (dir, type, findstr, del, etc.). "
+                   "Path separators are backslashes.";
+#elif defined(__APPLE__)
+    platformInfo = "You are running on macOS. The shell tool uses bash. "
+                   "Use Unix commands. Path separators are forward slashes.";
+#else
+    platformInfo = "You are running on Linux. The shell tool uses bash. "
+                   "Use Unix commands. Path separators are forward slashes.";
+#endif
+
     history_.push_back({
         {"role", "system"},
         {"content",
@@ -852,10 +865,11 @@ void ChatFrame::SeedSystemPrompt() {
          "reading files, running shell commands, or fetching web pages. "
          "Prefer concrete actions over speculation. Use markdown for "
          "formatting and fenced code blocks for code.\n\n"
+         + platformInfo + "\n\n"
          "Cross-project memory: use grit_history_search whenever the user "
          "references any prior work (\"last time\", \"once again\", \"we "
          "had\", \"how did we\", \"in <project>\"). It searches the "
-         "transcripts of every past wx_gritcode session across all "
+         "transcripts of every past gritcode session across all "
          "projects and returns short snippets with session_id + "
          "turn_index. Follow up with grit_history_fetch(session_id, "
          "turn_index) to read full turns. Start with ONE broad keyword "

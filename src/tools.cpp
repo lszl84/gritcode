@@ -390,9 +390,16 @@ std::string ToolListDirectory(const nlohmann::json& args) {
 WebRequestSpec MakeWebSpec(const std::string& url) {
     WebRequestSpec spec;
     spec.url = url;
+#ifdef _WIN32
+    const char* platformUA = "Windows NT 10.0; Win64; x64";
+#elif defined(__APPLE__)
+    const char* platformUA = "Macintosh; Intel Mac OS X 10_15_7";
+#else
+    const char* platformUA = "X11; Linux x86_64";
+#endif
     spec.headers.push_back({"User-Agent",
-        "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
-        "(KHTML, like Gecko) Chrome/120.0 Safari/537.36 wx_gritcode"});
+        std::string("Mozilla/5.0 (") + platformUA +
+        ") AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36 gritcode"});
     spec.headers.push_back({"Accept", "*/*"});
     return spec;
 }
@@ -664,7 +671,12 @@ nlohmann::json GetToolDefinitions() {
 
     tools.push_back(ToolDef(
         "bash",
-        "Run a bash command. Captures stdout+stderr, 30 second timeout, runs in the application's cwd.",
+        "Run a shell command. Captures stdout+stderr, 30 second timeout, runs in the application's cwd."
+#ifdef _WIN32
+        " On Windows, uses cmd /c.",
+#else
+        " Uses bash.",
+#endif
         {{"type", "object"},
          {"properties", {{"command", StrParam("Shell command to execute.")}}},
          {"required", {"command"}}}));
