@@ -30,6 +30,11 @@ void ApplySpec(CURL* curl, const WebRequestSpec& spec, struct curl_slist*& outHe
         curl_easy_setopt(curl, CURLOPT_LOW_SPEED_TIME, (long)spec.idleTimeoutSeconds);
     }
     curl_easy_setopt(curl, CURLOPT_ACCEPT_ENCODING, "");
+#ifdef _WIN32
+    // Use the Windows certificate store instead of a CA bundle file.
+    // MSYS2 libcurl ships without a usable default CA path on stock Windows.
+    curl_easy_setopt(curl, CURLOPT_SSL_OPTIONS, CURLSSLOPT_NATIVE_CA);
+#endif
 
     if (spec.method == "POST") {
         curl_easy_setopt(curl, CURLOPT_POST, 1L);
