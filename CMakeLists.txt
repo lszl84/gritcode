@@ -170,6 +170,14 @@ if(WIN32)
     # reference it explicitly.
     install(FILES packaging/wx_gritcode.ico DESTINATION ${CMAKE_INSTALL_BINDIR})
 
+    # Icons go next to the exe — wxStandardPaths::GetResourcesDir returns
+    # the exe directory on Windows.
+    install(DIRECTORY assets/icons
+        DESTINATION ${CMAKE_INSTALL_BINDIR}/icons
+        FILES_MATCHING PATTERN "*.svg"
+    )
+endif()
+
     # Walk the installed .exe's PE imports and copy non-system runtime DLLs
     # into bin/ alongside the executable.
     if(DEFINED ENV{MINGW_PREFIX})
