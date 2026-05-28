@@ -82,9 +82,7 @@ if(APPLE)
         MACOSX_PACKAGE_LOCATION "Resources/icons"
     )
 
-    # Compile the app icon from the iconset into a single .icns at build time
-    # using Apple's iconutil. The .icns lands in the .app's Resources/ and
-    # Info.plist's CFBundleIconFile picks it up.
+    # Compile the app icon from the iconset into a single .icns at build time.
     set(WXG_ICNS ${CMAKE_CURRENT_BINARY_DIR}/wx_gritcode.icns)
     file(GLOB WXG_ICONSET_PNGS
          ${CMAKE_CURRENT_SOURCE_DIR}/packaging/wx_gritcode.iconset/*.png)
@@ -107,7 +105,17 @@ if(APPLE)
         MACOSX_BUNDLE_SHORT_VERSION_STRING "0.1.0"
         MACOSX_BUNDLE_COPYRIGHT         "Copyright (c) Gritcode contributors"
         MACOSX_BUNDLE_ICON_FILE         "wx_gritcode.icns"
+        # Ensure the binary can find wx dylibs in the bundle's Frameworks dir.
+        INSTALL_RPATH "@executable_path/../Frameworks"
     )
+
+    # After install, copy non-system dylibs into the .app bundle so it's
+    # self-contained — users don't need Homebrew wx installed.
+    install(CODE "
+        include(BundleUtilities)
+        fixup_bundle(\"\${CMAKE_INSTALL_PREFIX}/wx_gritcode.app\"
+                     \"\" \"\")
+    ")
 elseif(WIN32)
     # Embed the Windows app icon if both packaging/wx_gritcode.rc and the .ico
     # it references are present. Without this the binary ships with the default
