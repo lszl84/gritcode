@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.28 FATAL_ERROR)
 
-project(wx_gritcode VERSION 0.0.2 LANGUAGES CXX)
+project(wx_gritcode VERSION 0.0.3 LANGUAGES CXX)
 
 include(FetchContent)
 

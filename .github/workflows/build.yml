@@ -58,6 +58,9 @@ jobs:
           curl -L -o linuxdeploy-plugin-gtk.sh \
             https://raw.githubusercontent.com/linuxdeploy/linuxdeploy-plugin-gtk/master/linuxdeploy-plugin-gtk.sh
           chmod +x linuxdeploy-x86_64.AppImage linuxdeploy-plugin-gtk.sh
+          # The official plugin hardcodes GDK_BACKEND=x11. Patch to prefer
+          # Wayland with X11 fallback.
+          sed -i 's/GDK_BACKEND=x11/GDK_BACKEND=wayland,x11/' linuxdeploy-plugin-gtk.sh
           OUTPUT="wx_gritcode-${version}-x86_64.AppImage" \
             ./linuxdeploy-x86_64.AppImage \
               --appdir AppDir \
