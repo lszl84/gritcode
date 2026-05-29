@@ -73,9 +73,11 @@ class App : public wxApp {
 public:
     bool OnInit() override {
         SetAppName("wx_gritcode");
+#if wxCHECK_VERSION(3, 3, 0)
         // On Windows, wx 3.3 defaults to light mode — the app must
         // explicitly opt in to follow the system appearance.
         SetAppearance(Appearance::System);
+#endif
         Preferences::Init();
 
         // Pull PATH and friends from the user's login shell so tool subprocesses
