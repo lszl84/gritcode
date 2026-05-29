@@ -2,6 +2,7 @@
 
 #include <curl/curl.h>
 #include <wx/event.h>
+#include <wx/stdpaths.h>
 
 #include <cctype>
 #include <cstring>
@@ -31,9 +32,14 @@ void ApplySpec(CURL* curl, const WebRequestSpec& spec, struct curl_slist*& outHe
     }
     curl_easy_setopt(curl, CURLOPT_ACCEPT_ENCODING, "");
 #ifdef _WIN32
-    // Use the Windows certificate store instead of a CA bundle file.
-    // MSYS2 libcurl ships without a usable default CA path on stock Windows.
-    curl_easy_setopt(curl, CURLOPT_SSL_OPTIONS, CURLSSLOPT_NATIVE_CA);
+    // MSYS2 libcurl uses OpenSSL backend, not Schannel. Point at the
+    // bundled cacert.pem installed next to the exe.
+    static std::string caPath;
+    if (caPath.empty()) {
+        caPath = wxStandardPaths::Get().GetResourcesDir()
+                 .Append("cacert.pem").ToStdString();
+    }
+    curl_easy_setopt(curl, CURLOPT_CAINFO, caPath.c_str());
 #endif
 
     if (spec.method == "POST") {
