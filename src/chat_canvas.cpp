@@ -10,6 +10,9 @@
 #ifdef __WXGTK__
 #include <gtk/gtk.h>
 #endif
+#ifdef __WXMSW__
+#include <wx/msw/registry.h>
+#endif
 
 namespace {
 
@@ -29,10 +32,22 @@ constexpr int kToolPadY      = 6;
 constexpr int kToolGap       = 4;    // space between header and body (when expanded)
 
 bool IsDarkMode() {
-    // wxWidgets 3.2: explicit dark-mode signal where the platform exposes one.
     auto appearance = wxSystemSettings::GetAppearance();
     if (appearance.IsDark()) return true;
     if (appearance.IsUsingDarkBackground()) return true;
+
+#ifdef __WXMSW__
+    // wx 3.3 may not detect dark mode on Windows unless the app
+    // explicitly opts in. Fall back to reading the registry directly.
+    // AppsUseLightTheme: 0 = dark, 1 = light.
+    wxRegKey key(wxRegKey::HKCU,
+        "Software\\Microsoft\\Windows\\CurrentVersion\\Themes\\Personalize");
+    if (key.Exists() && key.Open(wxRegKey::Read)) {
+        long v = 1;
+        if (key.QueryValue("AppsUseLightTheme", &v) && v == 0) return true;
+    }
+#endif
+
     // Fallback: compare luminance of the system window background.
     wxColour winBg = wxSystemSettings::GetColour(wxSYS_COLOUR_WINDOW);
     int lum = (winBg.Red() * 299 + winBg.Green() * 587 + winBg.Blue() * 114) / 1000;
