@@ -973,7 +973,23 @@ void ChatCanvas::OnPaint(wxPaintEvent&) {
     // pixels, so the blit was upscaled and text came out pixelated.
     wxAutoBufferedPaintDC dc(this);
 
-    RenderViewport(dc, viewY, sz.x, sz.y, selStart, selEnd);
+    // Use Direct2D on Windows for anti-aliased circles and proper
+    // font fallback (emoji, Unicode). Falls back to plain wxDC if
+    // Direct2D isn't available.
+    wxDC* paintDC = &dc;
+#ifdef __WXMSW__
+    wxGCDC* gdc = nullptr;
+    wxGraphicsRenderer* d2d = wxGraphicsRenderer::GetDirect2DRenderer();
+    if (d2d) {
+        wxGraphicsContext* gc = d2d->CreateContext(dc);
+        if (gc) {
+            gdc = new wxGCDC(gc);
+            paintDC = gdc;
+        }
+    }
+#endif
+
+    RenderViewport(*paintDC, viewY, sz.x, sz.y, selStart, selEnd);
 
     if (thinking_) {
         int contentW = std::min(sz.x - 2 * kSideMargin, kMaxContentW);
@@ -990,6 +1006,9 @@ void ChatCanvas::OnPaint(wxPaintEvent&) {
     }
 
     PERF_LOG("Paint viewY=%d", viewY);
+#ifdef __WXMSW__
+    delete gdc;
+#endif
 }
 
 // Draw a right-pointing or down-pointing chevron triangle.
