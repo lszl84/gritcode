@@ -130,6 +130,7 @@ const wxString& GetAssetsDir() {
             exeDir + "/../share/wx_gritcode",           // Linux installed
             exeDir + "/../Resources",                   // macOS .app bundle
             exeDir + "/../../share/wx_gritcode",        // NSIS with bin/ subdir
+            exeDir + "/..",                             // NSIS: exe at root, icons/
             wxString(WXG_ASSETS_DIR),                   // dev fallback
         };
         for (const auto& d : candidates) {
