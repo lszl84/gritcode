@@ -246,6 +246,7 @@ set(CPACK_STRIP_FILES ON)
 
 if(WIN32)
     set(CPACK_GENERATOR "NSIS")
+    set(CPACK_NSIS_MANIFEST_DPI_AWARE TRUE)
     set(CPACK_NSIS_MUI_ICON   "${CMAKE_CURRENT_SOURCE_DIR}/packaging/wx_gritcode.ico")
     set(CPACK_NSIS_MUI_UNIICON "${CMAKE_CURRENT_SOURCE_DIR}/packaging/wx_gritcode.ico")
     set(CPACK_NSIS_INSTALLED_ICON_NAME "bin\\\\wx_gritcode.exe")
