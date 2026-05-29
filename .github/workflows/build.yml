@@ -48,16 +48,7 @@ jobs:
           APPIMAGE_EXTRACT_AND_RUN: '1'
         run: |
           version=$(grep -oP 'project\(wx_gritcode VERSION \K[0-9a-z.-]+' CMakeLists.txt)
-          # Build a self-contained install tree with wx 3.3.2 (FetchContent).
-          # The .deb uses system wx for shared-library deps; the AppImage
-          # bundles its own private copy so it can ship a newer wx.
-          cmake -S . -B build-appimage -G Ninja \
-            -DCMAKE_BUILD_TYPE=Release \
-            -DCMAKE_C_COMPILER=clang \
-            -DCMAKE_CXX_COMPILER=clang++ \
-            -DCMAKE_INSTALL_PREFIX=/usr
-          cmake --build build-appimage
-          cmake --install build-appimage --prefix AppDir/usr
+          cmake --install build --prefix AppDir/usr
           curl -L -o linuxdeploy-x86_64.AppImage \
             https://github.com/linuxdeploy/linuxdeploy/releases/download/continuous/linuxdeploy-x86_64.AppImage
           curl -L -o linuxdeploy-plugin-gtk.sh \

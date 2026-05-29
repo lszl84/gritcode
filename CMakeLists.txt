@@ -33,7 +33,7 @@ if(NOT wxWidgets_FOUND)
     FetchContent_Declare(
         wxWidgets
         GIT_REPOSITORY https://github.com/wxWidgets/wxWidgets.git
-        GIT_TAG v3.3.2
+        GIT_TAG v3.2.8
         GIT_SHALLOW ON
         EXCLUDE_FROM_ALL
     )
