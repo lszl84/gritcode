@@ -32,6 +32,9 @@ bool IsDarkMode() {
     auto appearance = wxSystemSettings::GetAppearance();
     if (appearance.IsDark()) return true;
     if (appearance.IsUsingDarkBackground()) return true;
+    // On Windows, IsDark() may return false if SetAppearance() wasn't
+    // called. IsSystemDark() checks system-wide setting regardless.
+    if (appearance.IsSystemDark()) return true;
     // Fallback: compare luminance of the system window background.
     wxColour winBg = wxSystemSettings::GetColour(wxSYS_COLOUR_WINDOW);
     int lum = (winBg.Red() * 299 + winBg.Green() * 587 + winBg.Blue() * 114) / 1000;
