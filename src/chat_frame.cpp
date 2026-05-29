@@ -120,21 +120,37 @@ wxString DisplayPath(const std::string& cwd) {
     return wxString::FromUTF8(cwd);
 }
 
-// Resolve the assets directory. Installed builds put SVGs under
-// <prefix>/share/wx_gritcode/icons (Linux) or <exedir>/icons (Windows).
-// Dev builds fall back to the source tree path baked in at compile time.
+// Resolve the assets directory.
 const wxString& GetAssetsDir() {
     static wxString cached = []() -> wxString {
         wxString exeDir = wxStandardPaths::Get().GetResourcesDir();
-        // Installed layout: icons/ alongside or below the exe.
-        if (wxFileName::DirExists(exeDir + "/icons"))
-            return exeDir;
-        // Linux: <prefix>/share/wx_gritcode/icons
-        wxString shareDir = exeDir + "/../share/wx_gritcode";
-        if (wxFileName::DirExists(shareDir + "/icons"))
-            return shareDir;
+
+        // Check several possible locations for the icons directory.
+        wxString candidates[] = {
+            exeDir + "/icons",                         // next to exe (Windows)
+            exeDir + "/../share/wx_gritcode/icons",    // Linux installed
+            exeDir + "/../Resources/icons",             // macOS .app bundle
+            exeDir + "/../../share/wx_gritcode/icons", // NSIS with bin/ subdir
+        };
+        for (const auto& d : candidates) {
+            if (wxFileName::DirExists(d)) return d;
+        }
+
         // Dev fallback: source tree at compile time.
         return wxString(WXG_ASSETS_DIR);
+    }();
+    return cached;
+}
+
+wxString GetCacertPath() {
+    static wxString cached = []() -> wxString {
+        wxString exeDir = wxStandardPaths::Get().GetResourcesDir();
+        // Try next to exe first, then one level up.
+        if (wxFileName::FileExists(exeDir + "/cacert.pem"))
+            return exeDir + "/cacert.pem";
+        if (wxFileName::FileExists(exeDir + "/../cacert.pem"))
+            return exeDir + "/../cacert.pem";
+        return exeDir + "/cacert.pem";  // fall back, let curl report the error
     }();
     return cached;
 }

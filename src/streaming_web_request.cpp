@@ -2,6 +2,7 @@
 
 #include <curl/curl.h>
 #include <wx/event.h>
+#include <wx/filename.h>
 #include <wx/stdpaths.h>
 
 #include <cctype>
@@ -36,8 +37,13 @@ void ApplySpec(CURL* curl, const WebRequestSpec& spec, struct curl_slist*& outHe
     // bundled cacert.pem installed next to the exe.
     static std::string caPath;
     if (caPath.empty()) {
-        caPath = wxStandardPaths::Get().GetResourcesDir()
-                 .Append("cacert.pem").ToStdString();
+        wxString exeDir = wxStandardPaths::Get().GetResourcesDir();
+        if (wxFileName::FileExists(exeDir + "/cacert.pem"))
+            caPath = (exeDir + "/cacert.pem").ToStdString();
+        else if (wxFileName::FileExists(exeDir + "/../cacert.pem"))
+            caPath = (exeDir + "/../cacert.pem").ToStdString();
+        else
+            caPath = (exeDir + "/cacert.pem").ToStdString();
     }
     curl_easy_setopt(curl, CURLOPT_CAINFO, caPath.c_str());
 #endif
