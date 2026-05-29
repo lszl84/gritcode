@@ -49,13 +49,10 @@ jobs:
         run: |
           version=$(grep -oP 'project\(wx_gritcode VERSION \K[0-9a-z.-]+' CMakeLists.txt)
           cmake --install build --prefix AppDir/usr
-          # Convert SVG app icon to PNG for the .DirIcon (AppImage requires
-          # a raster icon; linuxdeploy can't render SVGs on its own).
-          sudo apt-get install -y librsvg2-bin
-          rsvg-convert -w 256 -h 256 \
-            packaging/wx_gritcode.svg \
-            -o AppDir/wx_gritcode.png
-          cp AppDir/wx_gritcode.png AppDir/.DirIcon
+          # linuxdeploy needs a PNG for .DirIcon (can't rasterize SVGs).
+          # The PNG is pre-rendered and stored in the repo.
+          cp packaging/wx_gritcode.png AppDir/wx_gritcode.png
+          cp packaging/wx_gritcode.png AppDir/.DirIcon
           curl -L -o linuxdeploy-x86_64.AppImage \
             https://github.com/linuxdeploy/linuxdeploy/releases/download/continuous/linuxdeploy-x86_64.AppImage
           curl -L -o linuxdeploy-plugin-gtk.sh \
