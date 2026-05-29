@@ -61,6 +61,11 @@ jobs:
           # The official plugin hardcodes GDK_BACKEND=x11. Patch to prefer
           # Wayland with X11 fallback.
           sed -i 's/GDK_BACKEND=x11/GDK_BACKEND=wayland,x11/' linuxdeploy-plugin-gtk.sh
+          # GNOME Wayland uses CSD — the AppImage needs Adwaita icons for
+          # window buttons (close/minimize/maximize) or they render blank.
+          mkdir -p AppDir/usr/share/icons
+          cp -r /usr/share/icons/Adwaita AppDir/usr/share/icons/ 2>/dev/null || \
+          cp -r /usr/share/icons/default AppDir/usr/share/icons/ 2>/dev/null || true
           OUTPUT="wx_gritcode-${version}-x86_64.AppImage" \
             ./linuxdeploy-x86_64.AppImage \
               --appdir AppDir \
