@@ -121,13 +121,19 @@ wxString DisplayPath(const std::string& cwd) {
 }
 
 // Resolve the assets directory. Installed builds put SVGs under
-// <prefix>/share/wx_gritcode (resolved via wxStandardPaths::GetResourcesDir,
-// which derives the prefix from the executable path). Dev builds fall back to
-// the source tree path baked in at compile time.
+// <prefix>/share/wx_gritcode/icons (Linux) or <exedir>/icons (Windows).
+// Dev builds fall back to the source tree path baked in at compile time.
 const wxString& GetAssetsDir() {
     static wxString cached = []() -> wxString {
-        wxString installed = wxStandardPaths::Get().GetResourcesDir();
-        if (wxFileName::DirExists(installed + "/icons")) return installed;
+        wxString exeDir = wxStandardPaths::Get().GetResourcesDir();
+        // Installed layout: icons/ alongside or below the exe.
+        if (wxFileName::DirExists(exeDir + "/icons"))
+            return exeDir;
+        // Linux: <prefix>/share/wx_gritcode/icons
+        wxString shareDir = exeDir + "/../share/wx_gritcode";
+        if (wxFileName::DirExists(shareDir + "/icons"))
+            return shareDir;
+        // Dev fallback: source tree at compile time.
         return wxString(WXG_ASSETS_DIR);
     }();
     return cached;

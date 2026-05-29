@@ -194,14 +194,14 @@ void ChatCanvas::RebuildPalette() {
 
 void ChatCanvas::EnsureFonts() {
     if (fontsReady_) return;
-    fontBody_ = wxFont(wxFontInfo(11).Family(wxFONTFAMILY_DEFAULT));
-    fontBodyBold_ = wxFont(wxFontInfo(11).Family(wxFONTFAMILY_DEFAULT).Bold());
-    fontBodyItalic_ = wxFont(wxFontInfo(11).Family(wxFONTFAMILY_DEFAULT).Italic());
-    fontBodyBoldItalic_ = wxFont(wxFontInfo(11).Family(wxFONTFAMILY_DEFAULT).Bold().Italic());
-    fontCode_ = wxFont(wxFontInfo(10).Family(wxFONTFAMILY_TELETYPE));
-    fontThinking_ = wxFont(wxFontInfo(10).Family(wxFONTFAMILY_DEFAULT).Italic());
+    fontBody_ = wxFont(wxFontInfo(12).Family(wxFONTFAMILY_DEFAULT));
+    fontBodyBold_ = wxFont(wxFontInfo(12).Family(wxFONTFAMILY_DEFAULT).Bold());
+    fontBodyItalic_ = wxFont(wxFontInfo(12).Family(wxFONTFAMILY_DEFAULT).Italic());
+    fontBodyBoldItalic_ = wxFont(wxFontInfo(12).Family(wxFONTFAMILY_DEFAULT).Bold().Italic());
+    fontCode_ = wxFont(wxFontInfo(11).Family(wxFONTFAMILY_TELETYPE));
+    fontThinking_ = wxFont(wxFontInfo(11).Family(wxFONTFAMILY_DEFAULT).Italic());
 
-    static const int hSizes[6] = {20, 17, 14, 13, 12, 11};
+    static const int hSizes[6] = {22, 19, 16, 14, 13, 12};
     for (int i = 0; i < 6; ++i) {
         fontH_[i]  = wxFont(wxFontInfo(hSizes[i]).Family(wxFONTFAMILY_DEFAULT).Bold());
         fontHB_[i] = wxFont(wxFontInfo(hSizes[i]).Family(wxFONTFAMILY_DEFAULT).Bold());
