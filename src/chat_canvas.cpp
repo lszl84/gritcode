@@ -3,6 +3,7 @@
 #include <wx/dcbuffer.h>
 #include <wx/clipbrd.h>
 #include <wx/dataobj.h>
+#include <wx/dcgraph.h>
 #include <wx/settings.h>
 #include <algorithm>
 #include <cmath>
@@ -465,11 +466,9 @@ void ChatCanvas::LayoutBlock(wxDC& dc, Block& b, int contentWidth, int /*topSpac
 
         dc.SetFont(fontThinking_);
         int lineH = dc.GetCharHeight();
-        // Pre-compute chevron width once (used in multi-line modes).
+        // Chevron size for the expand/collapse triangle (drawn, not text).
         b.toolChevStr = wxString(b.toolExpanded ? L'▾' : L'▸') + " ";
-        wxCoord cw = 0, ch = 0;
-        dc.GetTextExtent(b.toolChevStr, &cw, &ch);
-        b.toolChevW = cw;
+        b.toolChevW = dc.GetCharHeight();
 
         if (b.thinkingSingleLine) {
             // Single line — height = padding + lineH.
@@ -505,9 +504,7 @@ void ChatCanvas::LayoutBlock(wxDC& dc, Block& b, int contentWidth, int /*topSpac
         // for write_file/edit_file calls toolArgs can be 1000+ chars, and
         // calling GetPartialTextExtents on that every paint costs ~35ms.
         b.toolChevStr = wxString(b.toolExpanded ? L'▾' : L'▸') + " ";
-        wxCoord cw = 0, ch = 0;
-        dc.GetTextExtent(b.toolChevStr, &cw, &ch);
-        b.toolChevW = cw;
+        b.toolChevW = dc.GetCharHeight();
         wxCoord nw = 0, nh = 0;
         dc.GetTextExtent(b.toolName, &nw, &nh);
         b.toolNameW = nw;
@@ -973,8 +970,10 @@ void ChatCanvas::OnPaint(wxPaintEvent&) {
     // the bitmap was sized in logical pixels but the screen has more physical
     // pixels, so the blit was upscaled and text came out pixelated.
     wxAutoBufferedPaintDC dc(this);
+    // Use GDI+/Cairo/CoreGraphics for anti-aliased rendering (circles, lines).
+    wxGCDC gdc(dc);
 
-    RenderViewport(dc, viewY, sz.x, sz.y, selStart, selEnd);
+    RenderViewport(gdc, viewY, sz.x, sz.y, selStart, selEnd);
 
     if (thinking_) {
         int contentW = std::min(sz.x - 2 * kSideMargin, kMaxContentW);
@@ -985,12 +984,33 @@ void ChatCanvas::OnPaint(wxPaintEvent&) {
         int dotsClientY = dotsCanvasY - viewY;
         dotsRect_ = wxRect(xLeft, dotsCanvasY, 16 * 3 + 8, 16);
         dotsRectValid_ = true;
-        PaintThinkingDots(dc, xLeft, dotsClientY);
+        PaintThinkingDots(gdc, xLeft, dotsClientY);
     } else {
         dotsRectValid_ = false;
     }
 
     PERF_LOG("Paint viewY=%d", viewY);
+}
+
+// Draw a right-pointing or down-pointing chevron triangle.
+// Unicode ▸/▾ often render as boxes on Windows; drawing them
+// as filled polygons works everywhere and looks sharper.
+static void DrawChevron(wxDC& dc, int x, int y, int size, bool expanded) {
+    wxPoint pts[3];
+    if (expanded) {
+        // ▼ down-pointing triangle
+        pts[0] = {x, y};
+        pts[1] = {x + size, y};
+        pts[2] = {x + size / 2, y + size};
+    } else {
+        // ▶ right-pointing triangle
+        pts[0] = {x, y};
+        pts[1] = {x + size, y + size / 2};
+        pts[2] = {x, y + size};
+    }
+    dc.SetPen(*wxTRANSPARENT_PEN);
+    dc.SetBrush(dc.GetTextForeground());
+    dc.DrawPolygon(3, pts);
 }
 
 void ChatCanvas::PaintBlock(wxDC& dc, const Block& b, int yTop, BlockPos selStart, BlockPos selEnd, int blockIdx) const {
@@ -1169,12 +1189,13 @@ void ChatCanvas::PaintBlock(wxDC& dc, const Block& b, int yTop, BlockPos selStar
             return;
         }
 
-        // Multi-line modes: draw the "▸ Thinking" / "▾ Thinking" header.
+        // Multi-line modes: draw the chevron + "Thinking" header.
         const int textY = yTop + kToolPadY;
         const int xChev = blockX + kToolPadX;
-        const int xLabel = xChev + b.toolChevW;
+        const int chevSize = b.toolChevW > 0 ? b.toolChevW : 12;
+        const int xLabel = xChev + chevSize + 4;
         dc.SetTextForeground(pal.thinkingAccent);
-        dc.DrawText(b.toolChevStr, xChev, textY);
+        DrawChevron(dc, xChev, textY + 2, chevSize, b.toolExpanded);
         dc.DrawText("Thinking", xLabel, textY);
 
         if (b.toolExpanded) {
@@ -1306,7 +1327,7 @@ void ChatCanvas::PaintBlock(wxDC& dc, const Block& b, int yTop, BlockPos selStar
         }
 
         dc.SetTextForeground(pal.toolAccent);
-        dc.DrawText(b.toolChevStr, xChev, textY);
+        DrawChevron(dc, xChev, textY + 2, b.toolChevW > 0 ? b.toolChevW : 12, b.toolExpanded);
         dc.DrawText(b.toolName, xName, textY);
 
         dc.SetTextForeground(pal.codeFg);
