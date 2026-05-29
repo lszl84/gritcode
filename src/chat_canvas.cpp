@@ -467,8 +467,10 @@ void ChatCanvas::LayoutBlock(wxDC& dc, Block& b, int contentWidth, int /*topSpac
         dc.SetFont(fontThinking_);
         int lineH = dc.GetCharHeight();
         // Chevron size for the expand/collapse triangle (drawn, not text).
+        // Sized to ~2/3 of char height so it looks like a small indicator,
+        // not a giant triangle.
         b.toolChevStr = wxString(b.toolExpanded ? L'▾' : L'▸') + " ";
-        b.toolChevW = dc.GetCharHeight();
+        b.toolChevW = lineH * 2 / 3;
 
         if (b.thinkingSingleLine) {
             // Single line — height = padding + lineH.
@@ -504,7 +506,7 @@ void ChatCanvas::LayoutBlock(wxDC& dc, Block& b, int contentWidth, int /*topSpac
         // for write_file/edit_file calls toolArgs can be 1000+ chars, and
         // calling GetPartialTextExtents on that every paint costs ~35ms.
         b.toolChevStr = wxString(b.toolExpanded ? L'▾' : L'▸') + " ";
-        b.toolChevW = dc.GetCharHeight();
+        b.toolChevW = dc.GetCharHeight() * 2 / 3;
         wxCoord nw = 0, nh = 0;
         dc.GetTextExtent(b.toolName, &nw, &nh);
         b.toolNameW = nw;

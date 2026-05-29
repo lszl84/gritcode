@@ -125,20 +125,19 @@ const wxString& GetAssetsDir() {
     static wxString cached = []() -> wxString {
         wxString exeDir = wxStandardPaths::Get().GetResourcesDir();
 
-        // Check several possible locations. Each candidate is the
-        // parent directory — the caller appends "/icons/name.svg".
         wxString candidates[] = {
             exeDir,                                     // next to exe (Windows)
             exeDir + "/../share/wx_gritcode",           // Linux installed
             exeDir + "/../Resources",                   // macOS .app bundle
             exeDir + "/../../share/wx_gritcode",        // NSIS with bin/ subdir
+            wxString(WXG_ASSETS_DIR),                   // dev fallback
         };
         for (const auto& d : candidates) {
             if (wxFileName::DirExists(d + "/icons")) return d;
         }
-
-        // Dev fallback: source tree at compile time.
-        return wxString(WXG_ASSETS_DIR);
+        // Last resort: return exe dir even if icons/ isn't there.
+        // LoadThemedSvgIcon will handle the missing file gracefully.
+        return exeDir;
     }();
     return cached;
 }
