@@ -972,10 +972,8 @@ void ChatCanvas::OnPaint(wxPaintEvent&) {
     // the bitmap was sized in logical pixels but the screen has more physical
     // pixels, so the blit was upscaled and text came out pixelated.
     wxAutoBufferedPaintDC dc(this);
-    // Use GDI+/Cairo/CoreGraphics for anti-aliased rendering (circles, lines).
-    wxGCDC gdc(dc);
 
-    RenderViewport(gdc, viewY, sz.x, sz.y, selStart, selEnd);
+    RenderViewport(dc, viewY, sz.x, sz.y, selStart, selEnd);
 
     if (thinking_) {
         int contentW = std::min(sz.x - 2 * kSideMargin, kMaxContentW);
@@ -986,7 +984,7 @@ void ChatCanvas::OnPaint(wxPaintEvent&) {
         int dotsClientY = dotsCanvasY - viewY;
         dotsRect_ = wxRect(xLeft, dotsCanvasY, 16 * 3 + 8, 16);
         dotsRectValid_ = true;
-        PaintThinkingDots(gdc, xLeft, dotsClientY);
+        PaintThinkingDots(dc, xLeft, dotsClientY);
     } else {
         dotsRectValid_ = false;
     }
