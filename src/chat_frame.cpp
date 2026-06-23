@@ -123,21 +123,23 @@ wxString DisplayPath(const std::string& cwd) {
 // Resolve the assets directory.
 const wxString& GetAssetsDir() {
     static wxString cached = []() -> wxString {
-        wxString exeDir = wxStandardPaths::Get().GetResourcesDir();
+        wxFileName exe(wxStandardPaths::Get().GetResourcesDir(), "");
+        wxString exeDir = exe.GetPath();
 
         wxString candidates[] = {
             exeDir,                                     // next to exe (Windows)
             exeDir + "/../share/wx_gritcode",           // Linux installed
             exeDir + "/../Resources",                   // macOS .app bundle
             exeDir + "/../../share/wx_gritcode",        // NSIS with bin/ subdir
-            exeDir + "/..",                             // NSIS: exe at root, icons/
+            exeDir + "/..",                             // NSIS: exe at root
             wxString(WXG_ASSETS_DIR),                   // dev fallback
         };
         for (const auto& d : candidates) {
-            if (wxFileName::DirExists(d + "/icons")) return d;
+            wxFileName test(d + "/icons", "");
+            test.Normalize();
+            if (test.DirExists()) return test.GetPath();
         }
         // Last resort: return exe dir even if icons/ isn't there.
-        // LoadThemedSvgIcon will handle the missing file gracefully.
         return exeDir;
     }();
     return cached;
