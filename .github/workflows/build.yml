@@ -49,32 +49,19 @@ jobs:
         run: |
           version=$(grep -oP 'project\(wx_gritcode VERSION \K[0-9a-z.-]+' CMakeLists.txt)
           cmake --install build --prefix AppDir/usr
-          # linuxdeploy needs a PNG for .DirIcon (can't rasterize SVGs).
-          # The PNG is pre-rendered and stored in the repo.
           cp packaging/wx_gritcode.png AppDir/wx_gritcode.png
           cp packaging/wx_gritcode.png AppDir/.DirIcon
           curl -L -o linuxdeploy-x86_64.AppImage \
             https://github.com/linuxdeploy/linuxdeploy/releases/download/continuous/linuxdeploy-x86_64.AppImage
-          curl -L -o linuxdeploy-plugin-gtk.sh \
-            https://raw.githubusercontent.com/linuxdeploy/linuxdeploy-plugin-gtk/master/linuxdeploy-plugin-gtk.sh
-          chmod +x linuxdeploy-x86_64.AppImage linuxdeploy-plugin-gtk.sh
-          # The official plugin hardcodes GDK_BACKEND=x11. Patch to prefer
-          # Wayland with X11 fallback.
-          sed -i 's/GDK_BACKEND=x11/GDK_BACKEND=wayland,x11/' linuxdeploy-plugin-gtk.sh
-          # Disable GTK client-side decorations so GNOME/mutter provides
-          # native window decorations (SSD) on Wayland.
-          sed -i '/GTK_THEME=/a export GTK_CSD=0' linuxdeploy-plugin-gtk.sh
-          # Bundle the system icon theme so window buttons have icons.
-          # linuxdeploy-plugin-gtk.sh bundles the GTK theme but not the
-          # icon theme that provides close/minimize/maximize glyphs.
-          if [ -d /usr/share/icons/Adwaita ]; then
-            cp -r /usr/share/icons/Adwaita AppDir/usr/share/icons/
-            gtk-update-icon-cache AppDir/usr/share/icons/Adwaita 2>/dev/null || true
-          fi
+          chmod +x linuxdeploy-x86_64.AppImage
+          # Don't use --plugin gtk. The plugin bundles a second copy of GTK3
+          # that overrides the host's theme and breaks window decorations.
+          # On Linux, GTK3 is a universal desktop dependency — let the host
+          # system provide it (same as the .deb does). Only wx and curl libs
+          # need bundling.
           OUTPUT="wx_gritcode-${version}-x86_64.AppImage" \
             ./linuxdeploy-x86_64.AppImage \
               --appdir AppDir \
-              --plugin gtk \
               --desktop-file AppDir/usr/share/applications/wx_gritcode.desktop \
               --icon-file AppDir/wx_gritcode.png \
               --output appimage
