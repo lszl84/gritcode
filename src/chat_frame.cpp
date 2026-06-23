@@ -147,7 +147,6 @@ wxBitmapBundle LoadThemedSvgIcon(const wxString& name, const wxSize& size,
     if (!f.IsOpened() || !f.ReadAll(&svg)) {
         return wxBitmapBundle::FromSVGFile(memPath, size);
     }
-    }
     wxString hex = FormatU8("#{:02X}{:02X}{:02X}",
                             accent.Red(), accent.Green(), accent.Blue());
     svg.Replace("#FFFFFF", hex, true);
@@ -158,7 +157,7 @@ wxBitmapBundle LoadThemedSvgIcon(const wxString& name, const wxSize& size,
 }
 
 // Load the application icon. Tries the installed hicolor theme path first
-// (used by DEB and AppImage), then the source-tree packaging directory.
+// (DEB and AppImage install it there), then falls back to empty.
 wxIconBundle LoadAppIcon() {
     wxString path = wxStandardPaths::Get().GetResourcesDir()
                     + "/../../icons/hicolor/scalable/apps/wx_gritcode.svg";
@@ -166,7 +165,8 @@ wxIconBundle LoadAppIcon() {
     fn.Normalize();
     if (!fn.FileExists()) {
         // Dev fallback: source-tree packaging directory.
-        fn.Assign(wxString(WXG_ASSETS_DIR) + "/../packaging/wx_gritcode.svg");
+        fn.Assign(wxString::FromUTF8(
+            __FILE__ "/../../packaging/wx_gritcode.svg"));
         fn.Normalize();
     }
     if (fn.FileExists()) {

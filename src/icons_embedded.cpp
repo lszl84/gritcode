@@ -3,7 +3,7 @@
 // on every platform with zero path lookup.
 
 #include <wx/filesys.h>
-#include <wx/memfs.h>
+#include <wx/fs_mem.h>
 
 namespace {
 
