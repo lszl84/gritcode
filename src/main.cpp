@@ -73,6 +73,9 @@ class App : public wxApp {
 public:
     bool OnInit() override {
         SetAppName("wx_gritcode");
+        // Register embedded icon SVGs into the memory: virtual filesystem.
+        // Must happen after wx is initialized, before any icon loading.
+        RegisterEmbeddedIcons();
 #if wxCHECK_VERSION(3, 3, 0)
         // On Windows, wx 3.3 defaults to light mode — the app must
         // explicitly opt in to follow the system appearance.

@@ -120,31 +120,6 @@ wxString DisplayPath(const std::string& cwd) {
     return wxString::FromUTF8(cwd);
 }
 
-// Resolve the assets directory.
-const wxString& GetAssetsDir() {
-    static wxString cached = []() -> wxString {
-        wxFileName exe(wxStandardPaths::Get().GetResourcesDir(), "");
-        wxString exeDir = exe.GetPath();
-
-        wxString candidates[] = {
-            exeDir,                                     // next to exe (Windows)
-            exeDir + "/../share/wx_gritcode",           // Linux installed
-            exeDir + "/../Resources",                   // macOS .app bundle
-            exeDir + "/../../share/wx_gritcode",        // NSIS with bin/ subdir
-            exeDir + "/..",                             // NSIS: exe at root
-            wxString(WXG_ASSETS_DIR),                   // dev fallback
-        };
-        for (const auto& d : candidates) {
-            wxFileName test(d + "/icons", "");
-            test.Normalize();
-            if (test.DirExists()) return test.GetPath();
-        }
-        // Last resort: return exe dir even if icons/ isn't there.
-        return exeDir;
-    }();
-    return cached;
-}
-
 wxString GetCacertPath() {
     static wxString cached = []() -> wxString {
         wxString exeDir = wxStandardPaths::Get().GetResourcesDir();
@@ -158,16 +133,20 @@ wxString GetCacertPath() {
     return cached;
 }
 
-// Load an SVG icon from disk and recolor its #FFFFFF fills with `accent`.
-// The original assets were authored white for dark mode; substituting at load
-// time lets the icons follow the system theme without shipping a second set.
+// Icons are embedded in the binary via icons_embedded.cpp.
+// Use the memory: virtual filesystem — works everywhere, no path lookup.
+extern void RegisterEmbeddedIcons();
+
+// Load an SVG icon from the embedded memory filesystem and recolor
+// its #FFFFFF fills with `accent`.
 wxBitmapBundle LoadThemedSvgIcon(const wxString& name, const wxSize& size,
                                  const wxColour& accent) {
-    wxString path = GetAssetsDir() + "/icons/" + name;
-    wxFile f(path);
+    wxString memPath = "memory:icons/" + name;
+    wxFile f(memPath);
     wxString svg;
     if (!f.IsOpened() || !f.ReadAll(&svg)) {
-        return wxBitmapBundle::FromSVGFile(path, size);  // fallback
+        return wxBitmapBundle::FromSVGFile(memPath, size);
+    }
     }
     wxString hex = FormatU8("#{:02X}{:02X}{:02X}",
                             accent.Red(), accent.Green(), accent.Blue());
