@@ -133,10 +133,6 @@ wxString GetCacertPath() {
     return cached;
 }
 
-// Icons are embedded in the binary via icons_embedded.cpp.
-// Use the memory: virtual filesystem — works everywhere, no path lookup.
-extern void RegisterEmbeddedIcons();
-
 // Load an SVG icon from the embedded memory filesystem and recolor
 // its #FFFFFF fills with `accent`.
 wxBitmapBundle LoadThemedSvgIcon(const wxString& name, const wxSize& size,

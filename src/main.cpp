@@ -5,6 +5,9 @@
 #include "memory.h"
 #include "mcp_stdio.h"
 
+// From icons_embedded.cpp
+extern void RegisterEmbeddedIcons();
+
 #include <nlohmann/json.hpp>
 #include <cstdio>
 #include <cstring>
