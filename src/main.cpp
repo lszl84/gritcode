@@ -5,9 +5,6 @@
 #include "memory.h"
 #include "mcp_stdio.h"
 
-// From icons_embedded.cpp
-extern void RegisterEmbeddedIcons();
-
 #include <nlohmann/json.hpp>
 #include <cstdio>
 #include <cstring>
@@ -76,9 +73,6 @@ class App : public wxApp {
 public:
     bool OnInit() override {
         SetAppName("wx_gritcode");
-        // Register embedded icon SVGs into the memory: virtual filesystem.
-        // Must happen after wx is initialized, before any icon loading.
-        RegisterEmbeddedIcons();
 #if wxCHECK_VERSION(3, 3, 0)
         // On Windows, wx 3.3 defaults to light mode — the app must
         // explicitly opt in to follow the system appearance.

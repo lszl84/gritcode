@@ -120,6 +120,19 @@ wxString DisplayPath(const std::string& cwd) {
     return wxString::FromUTF8(cwd);
 }
 
+// Resolve the assets directory using wxStandardPaths — the standard
+// wxWidgets way to find installed data files cross-platform.
+// Dev builds fall back to the source tree path baked in at compile time.
+const wxString& GetAssetsDir() {
+    static wxString cached = []() -> wxString {
+        wxString res = wxStandardPaths::Get().GetResourcesDir();
+        if (wxFileName::DirExists(res + "/icons")) return res;
+        // Dev fallback: source tree at compile time.
+        return wxString(WXG_ASSETS_DIR);
+    }();
+    return cached;
+}
+
 wxString GetCacertPath() {
     static wxString cached = []() -> wxString {
         wxString exeDir = wxStandardPaths::Get().GetResourcesDir();
@@ -133,15 +146,16 @@ wxString GetCacertPath() {
     return cached;
 }
 
-// Load an SVG icon from the embedded memory filesystem and recolor
-// its #FFFFFF fills with `accent`.
+// Load an SVG icon from disk and recolor its #FFFFFF fills with `accent`.
+// The original assets were authored white for dark mode; substituting at load
+// time lets the icons follow the system theme without shipping a second set.
 wxBitmapBundle LoadThemedSvgIcon(const wxString& name, const wxSize& size,
                                  const wxColour& accent) {
-    wxString memPath = "memory:icons/" + name;
-    wxFile f(memPath);
+    wxString path = GetAssetsDir() + "/icons/" + name;
+    wxFile f(path);
     wxString svg;
     if (!f.IsOpened() || !f.ReadAll(&svg)) {
-        return wxBitmapBundle::FromSVGFile(memPath, size);
+        return wxBitmapBundle::FromSVGFile(path, size);  // fallback
     }
     wxString hex = FormatU8("#{:02X}{:02X}{:02X}",
                             accent.Red(), accent.Green(), accent.Blue());
@@ -153,7 +167,7 @@ wxBitmapBundle LoadThemedSvgIcon(const wxString& name, const wxSize& size,
 }
 
 // Load the application icon. Tries the installed hicolor theme path first
-// (DEB and AppImage install it there), then falls back to empty.
+// (used by DEB and AppImage), then the source-tree packaging directory.
 wxIconBundle LoadAppIcon() {
     wxString path = wxStandardPaths::Get().GetResourcesDir()
                     + "/../../icons/hicolor/scalable/apps/wx_gritcode.svg";
@@ -161,8 +175,7 @@ wxIconBundle LoadAppIcon() {
     fn.Normalize();
     if (!fn.FileExists()) {
         // Dev fallback: source-tree packaging directory.
-        fn.Assign(wxString::FromUTF8(
-            __FILE__ "/../../packaging/wx_gritcode.svg"));
+        fn.Assign(wxString(WXG_ASSETS_DIR) + "/../packaging/wx_gritcode.svg");
         fn.Normalize();
     }
     if (fn.FileExists()) {

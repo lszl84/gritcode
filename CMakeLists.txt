@@ -62,7 +62,6 @@ set(SRCS
     src/chat_canvas.cpp
     src/md_parser.cpp
     src/inline_parser.cpp
-    src/icons_embedded.cpp
     src/tools.cpp
     src/mcp_server.cpp
     src/mcp_stdio.cpp
@@ -145,6 +144,13 @@ endif()
 
 target_compile_options(wx_gritcode PRIVATE -Wall -Wextra -Wno-unused-parameter)
 
+# Source-tree asset path baked in for dev builds. At runtime the loader prefers
+# wxStandardPaths::GetResourcesDir() (which derives <prefix>/share/wx_gritcode
+# from the executable's actual location) and falls back to this if that path
+# isn't populated — i.e., when running straight out of the build tree.
+target_compile_definitions(wx_gritcode PRIVATE
+    WXG_ASSETS_DIR="${CMAKE_SOURCE_DIR}/assets"
+)
 
 include(GNUInstallDirs)
 
@@ -164,7 +170,12 @@ if(WIN32)
     # reference it explicitly.
     install(FILES packaging/wx_gritcode.ico DESTINATION ${CMAKE_INSTALL_BINDIR})
 
-    # CA cert bundles next to the exe for libcurl on Windows.
+    # Icons and CA cert go next to the exe — wxStandardPaths::GetResourcesDir
+    # returns the exe directory on Windows.
+    install(DIRECTORY assets/icons
+        DESTINATION ${CMAKE_INSTALL_BINDIR}/icons
+        FILES_MATCHING PATTERN "*.svg"
+    )
     install(FILES assets/cacert.pem DESTINATION ${CMAKE_INSTALL_BINDIR})
 
     # Walk the installed .exe's PE imports and copy non-system runtime DLLs
@@ -194,6 +205,10 @@ if(WIN32)
 endif()
 
 if(UNIX AND NOT APPLE)
+    install(DIRECTORY assets/icons
+        DESTINATION ${CMAKE_INSTALL_DATADIR}/wx_gritcode
+        FILES_MATCHING PATTERN "*.svg"
+    )
     install(FILES packaging/wx_gritcode.desktop
         DESTINATION ${CMAKE_INSTALL_DATADIR}/applications
     )
