@@ -135,13 +135,16 @@ const wxString& GetAssetsDir() {
 
 wxString GetCacertPath() {
     static wxString cached = []() -> wxString {
+#ifdef _WIN32
         wxString exeDir = wxStandardPaths::Get().GetResourcesDir();
-        // Try next to exe first, then one level up.
         if (wxFileName::FileExists(exeDir + "/cacert.pem"))
             return exeDir + "/cacert.pem";
         if (wxFileName::FileExists(exeDir + "/../cacert.pem"))
             return exeDir + "/../cacert.pem";
-        return exeDir + "/cacert.pem";  // fall back, let curl report the error
+        return exeDir + "/cacert.pem";
+#else
+        return wxString();  // Linux/macOS use system cert store
+#endif
     }();
     return cached;
 }
