@@ -64,6 +64,13 @@ jobs:
           # Disable GTK client-side decorations so GNOME/mutter provides
           # native window decorations (SSD) on Wayland.
           sed -i '/GTK_THEME=/a export GTK_CSD=0' linuxdeploy-plugin-gtk.sh
+          # Bundle the system icon theme so window buttons have icons.
+          # linuxdeploy-plugin-gtk.sh bundles the GTK theme but not the
+          # icon theme that provides close/minimize/maximize glyphs.
+          if [ -d /usr/share/icons/Adwaita ]; then
+            cp -r /usr/share/icons/Adwaita AppDir/usr/share/icons/
+            gtk-update-icon-cache AppDir/usr/share/icons/Adwaita 2>/dev/null || true
+          fi
           OUTPUT="wx_gritcode-${version}-x86_64.AppImage" \
             ./linuxdeploy-x86_64.AppImage \
               --appdir AppDir \
