@@ -170,7 +170,7 @@ wxBitmapBundle LoadThemedSvgIcon(const wxString& name, const wxSize& size,
 }
 
 // Load the application icon. Tries the installed hicolor theme path first
-// (used by DEB and AppImage), then the source-tree packaging directory.
+// (used by DEB and Snap), then the source-tree packaging directory.
 wxIconBundle LoadAppIcon() {
     wxString path = wxStandardPaths::Get().GetResourcesDir()
                     + "/../../icons/hicolor/scalable/apps/wx_gritcode.svg";

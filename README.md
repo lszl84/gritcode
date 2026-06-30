@@ -48,14 +48,14 @@ just launch and go. For heavier work, drop in a DeepSeek API key.
 
 ## Download
 
-Pre-built installers are available on the
+Pre-built packages are available on the
 [Releases](https://github.com/lszl84/wx_gritcode/releases) page:
 
 | Platform | Format |
 |---|---|
-| Linux | `.deb`, `.tar.gz`, `.AppImage` |
+| Ubuntu / Debian | `.deb` |
+| Ubuntu / Debian | [Snap Store](https://snapcraft.io/wx-gritcode) |
 | macOS | `.dmg` |
-| Windows | `.exe` (NSIS installer) |
 
 ## Build from source
 
@@ -94,26 +94,11 @@ cmake --build --preset release
 open ./build/wx_gritcode.app
 ```
 
-### Windows (MSYS2 CLANG64)
-
-```bash
-pacman -S mingw-w64-clang-x86_64-toolchain \
-    mingw-w64-clang-x86_64-cmake \
-    mingw-w64-clang-x86_64-ninja \
-    mingw-w64-clang-x86_64-wxwidgets3.2-msw
-cmake --preset release
-cmake --build --preset release
-./build/wx_gritcode.exe
-```
-
-Or open the CMakeLists.txt in Visual Studio 2022 with the C++ CMake tools
-component installed.
-
 ## API keys
 
 Set your DeepSeek API key in Settings (`Ctrl+,`). The key is stored in your
-OS keyring (libsecret on Linux, Keychain on macOS, Credential Manager on
-Windows). The OpenCode Free model needs no key.
+OS keyring (libsecret on Linux, Keychain on macOS). The OpenCode Free model
+needs no key.
 
 ## License
 

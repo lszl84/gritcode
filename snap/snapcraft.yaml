@@ -1,0 +1,55 @@
+name: wx-gritcode
+base: core24
+version: '0.0.7'
+summary: Native desktop AI coding assistant
+description: |
+  A native desktop AI coding assistant. Built with wxWidgets, backed by
+  DeepSeek V4 — or run for free through OpenCode Zen.
+
+  Features:
+  - Streaming markdown with code blocks, tables, and tool-call cards
+  - Multi-session history with SQLite persistence and FTS5 search
+  - Tool calls — the AI can run bash, read/write/edit files, and fetch URLs
+  - Native dark/light theme tracking
+
+grade: stable
+confinement: strict
+
+apps:
+  wx-gritcode:
+    command: bin/wx_gritcode
+    plugs:
+      - home
+      - network
+      - desktop
+      - desktop-legacy
+      - wayland
+      - x11
+      - unity7
+      - network-status
+      - process-control
+      - ssh-keys
+
+parts:
+  wx-gritcode:
+    plugin: cmake
+    source: .
+    cmake-parameters:
+      - -DCMAKE_BUILD_TYPE=Release
+      - -DCMAKE_INSTALL_PREFIX=/usr
+    build-packages:
+      - build-essential
+      - cmake
+      - ninja-build
+      - pkg-config
+      - libwxgtk3.2-dev
+      - libgtk-3-dev
+      - libcurl4-openssl-dev
+      - libsqlite3-dev
+      - libsecret-1-dev
+    stage-packages:
+      - libwxgtk3.2-1
+      - libgtk-3-0
+      - libcurl4t64
+      - libsqlite3-0
+      - libsecret-1-0

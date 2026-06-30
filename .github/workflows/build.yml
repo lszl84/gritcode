@@ -35,42 +35,11 @@ jobs:
         working-directory: build
         run: cpack
 
-      - name: Upload installers
+      - name: Upload .deb
         uses: actions/upload-artifact@v7
         with:
-          name: linux-installers
-          path: |
-            build/wx_gritcode-*.deb
-            build/wx_gritcode-*.tar.gz
-
-      - name: Build AppImage
-        env:
-          APPIMAGE_EXTRACT_AND_RUN: '1'
-        run: |
-          version=$(grep -oP 'project\(wx_gritcode VERSION \K[0-9a-z.-]+' CMakeLists.txt)
-          cmake --install build --prefix AppDir/usr
-          cp packaging/wx_gritcode.png AppDir/wx_gritcode.png
-          cp packaging/wx_gritcode.png AppDir/.DirIcon
-          curl -L -o linuxdeploy-x86_64.AppImage \
-            https://github.com/linuxdeploy/linuxdeploy/releases/download/continuous/linuxdeploy-x86_64.AppImage
-          chmod +x linuxdeploy-x86_64.AppImage
-          # Don't use --plugin gtk. The plugin bundles a second copy of GTK3
-          # that overrides the host's theme and breaks window decorations.
-          # On Linux, GTK3 is a universal desktop dependency — let the host
-          # system provide it (same as the .deb does). Only wx and curl libs
-          # need bundling.
-          OUTPUT="wx_gritcode-${version}-x86_64.AppImage" \
-            ./linuxdeploy-x86_64.AppImage \
-              --appdir AppDir \
-              --desktop-file AppDir/usr/share/applications/wx_gritcode.desktop \
-              --icon-file AppDir/wx_gritcode.png \
-              --output appimage
-
-      - name: Upload AppImage
-        uses: actions/upload-artifact@v7
-        with:
-          name: linux-appimage
-          path: wx_gritcode-*.AppImage
+          name: linux-deb
+          path: build/wx_gritcode-*.deb
 
   macos:
     name: macOS
@@ -121,52 +90,31 @@ jobs:
         working-directory: build
         run: cpack
 
-      - name: Upload installer
+      - name: Upload .dmg
         uses: actions/upload-artifact@v7
         with:
-          name: macos-installer
+          name: macos-dmg
           path: build/wx_gritcode-*.dmg
 
-  windows:
-    name: Windows (mingw-clang)
-    runs-on: windows-latest
-    defaults:
-      run:
-        shell: msys2 {0}
+  snap:
+    name: Snap
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v6
 
-      - name: Set up MSYS2 (CLANG64)
-        uses: msys2/setup-msys2@v2
-        with:
-          msystem: CLANG64
-          update: true
-          install: >-
-            mingw-w64-clang-x86_64-toolchain
-            mingw-w64-clang-x86_64-cmake
-            mingw-w64-clang-x86_64-ninja
-            mingw-w64-clang-x86_64-wxwidgets3.3-msw
-            mingw-w64-clang-x86_64-nsis
+      - name: Build snap
+        uses: snapcore/action-build@v1
+        id: snapcraft
 
-      - name: Configure
-        run: cmake --preset release
-
-      - name: Build
-        run: cmake --build --preset release
-
-      - name: Package
-        working-directory: build
-        run: cpack
-
-      - name: Upload installer
+      - name: Upload .snap
         uses: actions/upload-artifact@v7
         with:
-          name: windows-installer
-          path: build/wx_gritcode-*.exe
+          name: snap
+          path: ${{ steps.snapcraft.outputs.snap }}
 
   release:
     name: Publish GitHub Release
-    needs: [linux, macos, windows]
+    needs: [linux, macos, snap]
     if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-24.04
     permissions:

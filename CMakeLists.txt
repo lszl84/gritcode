@@ -106,17 +106,6 @@ if(APPLE)
         MACOSX_BUNDLE_COPYRIGHT         "Copyright (c) Gritcode contributors"
         MACOSX_BUNDLE_ICON_FILE         "wx_gritcode.icns"
     )
-elseif(WIN32)
-    # Embed the Windows app icon if both packaging/wx_gritcode.rc and the .ico
-    # it references are present. Without this the binary ships with the default
-    # executable icon.
-    set(WIN_RC  "${CMAKE_SOURCE_DIR}/packaging/wx_gritcode.rc")
-    set(WIN_ICO "${CMAKE_SOURCE_DIR}/packaging/wx_gritcode.ico")
-    if(EXISTS "${WIN_RC}" AND EXISTS "${WIN_ICO}")
-        add_executable(wx_gritcode WIN32 ${SRCS} "${WIN_RC}")
-    else()
-        add_executable(wx_gritcode WIN32 ${SRCS})
-    endif()
 else()
     add_executable(wx_gritcode ${SRCS})
 endif()
@@ -165,45 +154,6 @@ install(TARGETS wx_gritcode
     BUNDLE  DESTINATION .
 )
 
-if(WIN32)
-    # Ship the .ico inside the install tree so the Start Menu shortcut can
-    # reference it explicitly.
-    install(FILES packaging/wx_gritcode.ico DESTINATION ${CMAKE_INSTALL_BINDIR})
-
-    # Icons and CA cert go next to the exe — wxStandardPaths::GetResourcesDir
-    # returns the exe directory on Windows.
-    install(DIRECTORY assets/icons
-        DESTINATION ${CMAKE_INSTALL_BINDIR}/icons
-        FILES_MATCHING PATTERN "*.svg"
-    )
-    install(FILES assets/cacert.pem DESTINATION ${CMAKE_INSTALL_BINDIR})
-
-    # Walk the installed .exe's PE imports and copy non-system runtime DLLs
-    # into bin/ alongside the executable.
-    if(DEFINED ENV{MINGW_PREFIX})
-        set(_wxg_dll_search_dirs "$ENV{MINGW_PREFIX}/bin")
-    else()
-        set(_wxg_dll_search_dirs "")
-    endif()
-    install(CODE "
-        cmake_policy(SET CMP0207 NEW)
-        file(GET_RUNTIME_DEPENDENCIES
-            EXECUTABLES \"\${CMAKE_INSTALL_PREFIX}/${CMAKE_INSTALL_BINDIR}/$<TARGET_FILE_NAME:wx_gritcode>\"
-            RESOLVED_DEPENDENCIES_VAR _resolved
-            UNRESOLVED_DEPENDENCIES_VAR _unresolved
-            PRE_EXCLUDE_REGEXES \"api-ms-.*\" \"ext-ms-.*\"
-            POST_EXCLUDE_REGEXES \".*[Ss]ystem32.*\" \".*WINDOWS.*\"
-            DIRECTORIES \"${_wxg_dll_search_dirs}\"
-        )
-        foreach(_dep \${_resolved})
-            file(INSTALL \"\${_dep}\" DESTINATION \"\${CMAKE_INSTALL_PREFIX}/${CMAKE_INSTALL_BINDIR}\")
-        endforeach()
-        if(_unresolved)
-            message(WARNING \"Unresolved runtime deps: \${_unresolved}\")
-        endif()
-    ")
-endif()
-
 if(UNIX AND NOT APPLE)
     install(DIRECTORY assets/icons
         DESTINATION ${CMAKE_INSTALL_DATADIR}/wx_gritcode
@@ -245,28 +195,12 @@ set(CPACK_RESOURCE_FILE_LICENSE "${CMAKE_CURRENT_SOURCE_DIR}/LICENSE")
 set(CPACK_PACKAGE_INSTALL_DIRECTORY "wx_gritcode")
 set(CPACK_STRIP_FILES ON)
 
-if(WIN32)
-    set(CPACK_GENERATOR "NSIS")
-    set(CPACK_NSIS_MANIFEST_DPI_AWARE TRUE)
-    set(CPACK_NSIS_MUI_ICON   "${CMAKE_CURRENT_SOURCE_DIR}/packaging/wx_gritcode.ico")
-    set(CPACK_NSIS_MUI_UNIICON "${CMAKE_CURRENT_SOURCE_DIR}/packaging/wx_gritcode.ico")
-    set(CPACK_NSIS_INSTALLED_ICON_NAME "bin\\\\wx_gritcode.exe")
-    set(CPACK_NSIS_DISPLAY_NAME "wx_gritcode")
-    set(CPACK_NSIS_PACKAGE_NAME "wx_gritcode")
-    set(CPACK_NSIS_URL_INFO_ABOUT "${CPACK_PACKAGE_HOMEPAGE_URL}")
-    set(CPACK_NSIS_CONTACT "${CPACK_PACKAGE_CONTACT}")
-    set(CPACK_NSIS_ENABLE_UNINSTALL_BEFORE_INSTALL ON)
-    set(CPACK_NSIS_MODIFY_PATH OFF)
-    set(CPACK_NSIS_CREATE_ICONS_EXTRA
-        "CreateShortCut '$SMPROGRAMS\\\\$STARTMENU_FOLDER\\\\wx_gritcode.lnk' '$INSTDIR\\\\bin\\\\wx_gritcode.exe' '' '$INSTDIR\\\\bin\\\\wx_gritcode.ico'")
-    set(CPACK_NSIS_DELETE_ICONS_EXTRA
-        "Delete '$SMPROGRAMS\\\\$STARTMENU_FOLDER\\\\wx_gritcode.lnk'")
-elseif(APPLE)
+if(APPLE)
     set(CPACK_GENERATOR "DragNDrop")
     set(CPACK_DMG_VOLUME_NAME "wx_gritcode")
 else()
-    # Linux: DEB + tarball.
-    set(CPACK_GENERATOR "DEB;TGZ")
+    # Linux: DEB only.
+    set(CPACK_GENERATOR "DEB")
     set(CPACK_DEBIAN_PACKAGE_MAINTAINER "Lukasz Sromek <luke@devmindscape.com>")
     set(CPACK_DEBIAN_PACKAGE_SECTION "devel")
     set(CPACK_DEBIAN_PACKAGE_HOMEPAGE "${CPACK_PACKAGE_HOMEPAGE_URL}")
