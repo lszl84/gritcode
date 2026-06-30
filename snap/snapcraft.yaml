@@ -13,22 +13,11 @@ description: |
   - Native dark/light theme tracking
 
 grade: stable
-confinement: strict
+confinement: classic
 
 apps:
   wx-gritcode:
     command: bin/wx_gritcode
-    plugs:
-      - home
-      - network
-      - desktop
-      - desktop-legacy
-      - wayland
-      - x11
-      - unity7
-      - network-status
-      - process-control
-      - ssh-keys
 
 parts:
   wx-gritcode:
