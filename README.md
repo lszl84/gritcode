@@ -54,7 +54,6 @@ Pre-built packages are available on the
 | Platform | Format |
 |---|---|
 | Ubuntu / Debian | `.deb` |
-| Ubuntu / Debian | [Snap Store](https://snapcraft.io/wx-gritcode) |
 | macOS | `.dmg` |
 
 ## Build from source
