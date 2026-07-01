@@ -5,6 +5,7 @@
 #include <wx/dataobj.h>
 #include <wx/dcgraph.h>
 #include <wx/settings.h>
+#include <wx/utils.h>
 #include <algorithm>
 #include <cmath>
 
@@ -63,6 +64,7 @@ Palette MakePalette() {
         p.thinkingBg    = wxColour( 42,  42,  48);
         p.thinkingText  = wxColour(180, 180, 190);
         p.thinkingAccent= wxColour(150, 155, 170);
+        p.linkColour    = wxColour(100, 180, 255);
     } else {
         p.bg            = wxColour(248, 248, 248);
         p.text          = wxColour( 28,  28,  32);
@@ -80,6 +82,7 @@ Palette MakePalette() {
         p.thinkingBg    = wxColour(242, 242, 246);
         p.thinkingText  = wxColour( 90,  90, 100);
         p.thinkingAccent= wxColour(120, 125, 140);
+        p.linkColour    = wxColour( 20,  80, 180);
     }
     return p;
 }
@@ -139,7 +142,7 @@ std::vector<Tok> Tokenize(const std::vector<InlineRun>& runs) {
 
 // True if two run-styles match in formatting (text content ignored).
 bool SameStyle(const InlineRun& a, const InlineRun& b) {
-    return a.bold == b.bold && a.italic == b.italic && a.code == b.code;
+    return a.bold == b.bold && a.italic == b.italic && a.code == b.code && a.link == b.link;
 }
 
 enum {
@@ -1132,9 +1135,16 @@ void ChatCanvas::PaintBlock(wxDC& dc, const Block& b, int yTop, BlockPos selStar
                         const auto& run = wl.runs[ri];
                         const wxFont& f = FontFor(run, BlockType::Paragraph, 0);
                         dc.SetFont(f);
-                        dc.SetTextForeground(run.code ? pal.codeFg : pal.text);
+                        bool isLink = !run.link.IsEmpty();
+                        dc.SetTextForeground(isLink ? pal.linkColour
+                                                    : (run.code ? pal.codeFg : pal.text));
                         int xr = xBase + (ri < wl.runX.size() ? wl.runX[ri] : 0);
                         dc.DrawText(run.text, xr, yLine);
+                        if (isLink) {
+                            wxCoord rw = 0, rh = 0;
+                            dc.GetTextExtent(run.text, &rw, &rh);
+                            dc.DrawLine(xr, yLine + rh, xr + rw, yLine + rh);
+                        }
                     }
                     yLine += wl.height;
                 }
@@ -1464,9 +1474,16 @@ void ChatCanvas::PaintBlock(wxDC& dc, const Block& b, int yTop, BlockPos selStar
             const auto& r = wl.runs[ri];
             const wxFont& f = FontFor(r, b.type, b.headingLevel);
             dc.SetFont(f);
-            dc.SetTextForeground(r.code ? pal.codeFg : pal.text);
+            bool isLink = !r.link.IsEmpty();
+            dc.SetTextForeground(isLink ? pal.linkColour
+                                        : (r.code ? pal.codeFg : pal.text));
             int xr = textXLeft + (ri < wl.runX.size() ? wl.runX[ri] : 0);
             dc.DrawText(r.text, xr, yLine);
+            if (isLink) {
+                wxCoord rw = 0, rh = 0;
+                dc.GetTextExtent(r.text, &rw, &rh);
+                dc.DrawLine(xr, yLine + rh, xr + rw, yLine + rh);
+            }
         }
         yLine += wl.height;
     }
@@ -1846,12 +1863,37 @@ void ChatCanvas::FindWordBounds(const BlockPos& pos, BlockPos& wordStart, BlockP
     }
 }
 
+wxString ChatCanvas::LinkUrlAt(const BlockPos& pos) const {
+    if (pos.block < 0 || pos.block >= (int)blocks_.size()) return {};
+    const Block& b = blocks_[pos.block];
+    // Only Paragraph, Heading, and UserPrompt blocks contain inline-run links.
+    if (b.type != BlockType::Paragraph && b.type != BlockType::Heading
+        && b.type != BlockType::UserPrompt)
+        return {};
+    int off = 0;
+    for (const auto& r : b.runs) {
+        int len = (int)r.text.size();
+        if (pos.offset >= off && pos.offset < off + len) {
+            return r.link;
+        }
+        off += len;
+    }
+    return {};
+}
+
 void ChatCanvas::OnLeftDown(wxMouseEvent& e) {
     SetFocus();
     wxPoint p = e.GetPosition();
     CalcUnscrolledPosition(p.x, p.y, &p.x, &p.y);
     BlockPos hp = HitTest(p);
     if (!hp.IsValid()) return;
+
+    // Link click: open in browser, don't start a selection.
+    wxString linkUrl = LinkUrlAt(hp);
+    if (!linkUrl.IsEmpty()) {
+        wxLaunchDefaultBrowser(linkUrl);
+        return;
+    }
 
     // Tool-call blocks: only the chevron region toggles expansion. The
     // rest of the header (toolName + args) and the body (when expanded)
@@ -1994,11 +2036,17 @@ BlockPos ChatCanvas::ApplyDragSnap(BlockPos hp, const wxPoint& /*canvasPt*/,
 }
 
 void ChatCanvas::OnMotion(wxMouseEvent& e) {
-    if (!selecting_) return;
+    // Change cursor to hand when hovering a link.
     wxPoint p = e.GetPosition();
     CalcUnscrolledPosition(p.x, p.y, &p.x, &p.y);
     BlockPos hp = HitTest(p);
-    if (!hp.IsValid()) return;
+    if (hp.IsValid() && !LinkUrlAt(hp).IsEmpty()) {
+        SetCursor(wxCURSOR_HAND);
+    } else {
+        SetCursor(wxNullCursor);
+    }
+
+    if (!selecting_) return;
     hp = ApplyDragSnap(hp, p, selAnchor_);
     if (hp == selCaret_) return;
     selCaret_ = hp;

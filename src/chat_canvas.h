@@ -21,6 +21,7 @@ struct Palette {
     wxColour thinkingBg;     // uniform background for thinking blocks
     wxColour thinkingText;   // body text color for thinking blocks (slightly dim)
     wxColour thinkingAccent; // chevron + "Thinking" label color
+    wxColour linkColour;       // hyperlink text colour (blue, underlined)
 };
 
 // Custom-painted scrolling canvas that owns a vector<Block> and renders it
@@ -188,6 +189,9 @@ private:
 
     // Find word boundaries around a given BlockPos for double-click selection.
     void FindWordBounds(const BlockPos& pos, BlockPos& wordStart, BlockPos& wordEnd) const;
+
+    // Return the link URL (if any) at a given BlockPos. Empty string if none.
+    wxString LinkUrlAt(const BlockPos& pos) const;
 
     // Paint helpers.
     void PaintBlock(wxDC& dc, const Block& b, int yTop, BlockPos selStart, BlockPos selEnd, int blockIdx) const;

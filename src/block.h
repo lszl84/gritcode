@@ -16,11 +16,13 @@ enum class TableAlign { Left, Center, Right };
 
 // Inline styling — produced by the inline parser when a block is committed.
 // Markdown markers are stripped; `text` is the visible substring.
+// `link` is non-empty when the run is a hyperlink (parsed from [text](url)).
 struct InlineRun {
     wxString text;
     bool bold   = false;
     bool italic = false;
     bool code   = false;
+    wxString link;
 };
 
 // One visual line after wrapping. `runs` carry the styling for paint;
