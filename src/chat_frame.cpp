@@ -3,6 +3,7 @@
 #include "inline_parser.h"
 #include "tools.h"
 #include "preferences.h"
+#include "run_config_store.h"
 #include "settings_dialog.h"
 #include <wx/sizer.h>
 #include <wx/wrapsizer.h>
@@ -43,6 +44,7 @@ constexpr int ID_QUEUE_CLEAR    = wxID_HIGHEST + 4;
 constexpr int ID_SESSION  = wxID_HIGHEST + 10;
 constexpr int ID_MODEL    = wxID_HIGHEST + 11;
 constexpr int ID_SETTINGS = wxID_HIGHEST + 12;
+constexpr int ID_PLAY     = wxID_HIGHEST + 13;
 
 // Per-model routing config. Resolved fresh at each StartCompletion so a model
 // change during a tool-call loop applies on the next request.
@@ -232,11 +234,18 @@ ChatFrame::ChatFrame()
                                       wxBORDER_NONE);
     settingsBtn_->SetToolTip(wxString::FromUTF8("Settings…"));
 
+    wxBitmapBundle bbPlay = LoadThemedSvgIcon("play.svg", kIconSize, accent);
+    playBtn_ = new wxBitmapButton(panel, ID_PLAY, bbPlay,
+                                  wxDefaultPosition, kBtnSize,
+                                  wxBORDER_NONE);
+    playBtn_->SetToolTip(wxString::FromUTF8("Run project"));
+
     toolbarRow->Add(sessionLabel, 0, wxALIGN_CENTER_VERTICAL | wxRIGHT, 6);
     // Session and model both get a small proportion so they share resize delta;
     // the stretch spacer absorbs most of it. Once the spacer collapses (narrow
     // window) both dropdowns shrink toward their MinSize.
-    toolbarRow->Add(sessionChoice_, 1, wxALIGN_CENTER_VERTICAL | wxRIGHT, 12);
+    toolbarRow->Add(sessionChoice_, 1, wxALIGN_CENTER_VERTICAL | wxRIGHT, 2);
+    toolbarRow->Add(playBtn_, 0, wxALIGN_CENTER_VERTICAL | wxRIGHT, 8);
     toolbarRow->Add(modelLabel, 0, wxALIGN_CENTER_VERTICAL | wxRIGHT, 6);
     toolbarRow->Add(modelChoice_, 1, wxALIGN_CENTER_VERTICAL);
     toolbarRow->AddStretchSpacer(8);
@@ -315,6 +324,7 @@ ChatFrame::ChatFrame()
     Bind(wxEVT_CHAR_HOOK, &ChatFrame::OnCharHook, this);
     Bind(wxEVT_CLOSE_WINDOW, &ChatFrame::OnClose, this);
     Bind(wxEVT_BUTTON, &ChatFrame::OnSettings, this, ID_SETTINGS);
+    Bind(wxEVT_BUTTON, &ChatFrame::OnPlay, this, ID_PLAY);
     Bind(wxEVT_TOOL_BATCH_DONE, &ChatFrame::OnToolBatchDone, this);
     sessionChoice_->Bind(wxEVT_CHOICE, &ChatFrame::OnSessionChoice, this);
     modelChoice_->Bind(wxEVT_CHOICE, &ChatFrame::OnModelChoice, this);
@@ -720,6 +730,7 @@ void ChatFrame::ReloadToolbarIcons() {
     const wxSize kIconSize(20, 20);
     wxColour accent = wxSystemSettings::GetColour(wxSYS_COLOUR_WINDOWTEXT);
     settingsBtn_->SetBitmap(LoadThemedSvgIcon("settings.svg", kIconSize, accent));
+    playBtn_->SetBitmap(LoadThemedSvgIcon("play.svg", kIconSize, accent));
 }
 
 void ChatFrame::RefreshSessionChoice() {
@@ -974,6 +985,24 @@ void ChatFrame::OnModelChoice(wxCommandEvent& evt) {
     Preferences::SetLastModelIndex(sel);
 }
 
+
+void ChatFrame::OnPlay(wxCommandEvent&) {
+    if (streaming_) return;
+    auto cfg = RunConfigStore::Get(activeCwd_);
+    wxString prompt;
+    if (cfg) {
+        prompt = "Run the project";
+    } else {
+        prompt = "Configure the run command for this project. "
+                 "Use run_project to set it up after analyzing the project.";
+    }
+    input_->SetValue(prompt);
+    wxCommandEvent ev(wxEVT_BUTTON, ID_SEND);
+    CallAfter([this]() {
+        wxCommandEvent ev(wxEVT_BUTTON, ID_SEND);
+        OnSend(ev);
+    });
+}
 void ChatFrame::OnSettings(wxCommandEvent&) {
     SettingsDialog dlg(this);
     dlg.ShowModal();
@@ -1409,7 +1438,7 @@ void ChatFrame::HandleCompletion(const wxString& errorIfFailed) {
     // a non-blocking handoff that lets us reuse the std::thread slot without
     // detaching (detach makes destructor cleanup impossible).
     if (toolWorker_.joinable()) toolWorker_.join();
-    toolWorker_ = std::thread([this, jobs, token, excludeSid]() {
+    toolWorker_ = std::thread([this, jobs, token, excludeSid, cwd = activeCwd_]() {
         auto results = std::make_shared<std::vector<ToolBatchEntry>>();
         results->reserve(jobs->size());
         for (auto& job : *jobs) {
@@ -1420,7 +1449,7 @@ void ChatFrame::HandleCompletion(const wxString& errorIfFailed) {
                 r = std::move(job.parseError);
             } else {
                 r = DispatchTool(job.name, job.argsParsed, token.get(),
-                                 &memory_, excludeSid);
+                                 &memory_, excludeSid, cwd);
             }
             results->push_back({std::move(job.id), std::move(job.name),
                                 std::move(job.argsJson), std::move(r)});

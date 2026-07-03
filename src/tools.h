@@ -33,4 +33,5 @@ std::string DispatchTool(const std::string& name,
                          const nlohmann::json& args,
                          ToolCancelToken* token = nullptr,
                          MemoryDB* memory = nullptr,
-                         const std::string& currentSessionId = {});
+                         const std::string& currentSessionId = {},
+                         const std::string& currentCwd = {});

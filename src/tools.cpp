@@ -1,6 +1,7 @@
 #include "tools.h"
 #include "format_u8.h"
 #include "memory.h"
+#include "run_config_store.h"
 #include "streaming_web_request.h"
 
 #include <algorithm>
@@ -740,10 +741,64 @@ nlohmann::json GetToolDefinitions() {
          }},
          {"required", {"session_id", "turn_index"}}}));
 
+    tools.push_back(ToolDef(
+        "run_project",
+        "Get or set the command used to run the current project. "
+        "Use this to store how to build/run the project so the user can "
+        "trigger it with the Play button. "
+        "Actions: 'get' (returns current config), 'set' (stores a run command), "
+        "'forget' (removes the config). "
+        "Call 'get' first to see if a command already exists.",
+        {{"type", "object"},
+         {"properties", {
+             {"action", {{"type", "string"},
+                         {"description", "One of: get, set, forget."}}},
+             {"command", StrParam("Shell command to build and run the project (required for set).")},
+             {"cwd", StrParam("Project directory. Defaults to the current session's cwd.")},
+         }},
+         {"required", {"action"}}}));
+
     return tools;
 }
 
 namespace {
+
+std::string ToolRunProject(const nlohmann::json& args, const std::string& currentCwd) {
+    std::string action = GetStringArg(args, "action");
+    if (action.empty()) return "Error: 'action' is required (get, set, or forget).";
+
+    if (action == "get") {
+        std::string cwd = GetStringArg(args, "cwd");
+        if (cwd.empty()) cwd = currentCwd;
+        auto cfg = RunConfigStore::Get(cwd);
+        if (cfg) {
+            return "Run config for " + cwd + ":\n"
+                   "  command: " + cfg->command + "\n"
+                   "  set by: " + cfg->discoveredBy + "\n"
+                   "  last used: " + cfg->lastUsed;
+        }
+        return "No run config found for " + cwd
+             + ". Use run_project set to store one.";
+    }
+
+    if (action == "set") {
+        std::string cwd = GetStringArg(args, "cwd");
+        if (cwd.empty()) cwd = currentCwd;
+        std::string command = GetStringArg(args, "command");
+        if (command.empty()) return "Error: 'command' is required for set action.";
+        RunConfigStore::Set(cwd, command, "model");
+        return "Stored run config for " + cwd + ": " + command;
+    }
+
+    if (action == "forget") {
+        std::string cwd = GetStringArg(args, "cwd");
+        if (cwd.empty()) cwd = currentCwd;
+        RunConfigStore::Forget(cwd);
+        return "Removed run config for " + cwd;
+    }
+
+    return "Error: unknown action '" + action + "'. Use get, set, or forget.";
+}
 
 std::string ToolGritHistorySearch(const nlohmann::json& args, MemoryDB* memory,
                                   const std::string& currentSessionId) {
@@ -782,7 +837,8 @@ std::string ToolGritHistoryFetch(const nlohmann::json& args, MemoryDB* memory) {
 std::string DispatchTool(const std::string& name, const nlohmann::json& args,
                          ToolCancelToken* token,
                          MemoryDB* memory,
-                         const std::string& currentSessionId) {
+                         const std::string& currentSessionId,
+                         const std::string& currentCwd) {
     if (token && token->cancelled.load()) return "[cancelled]";
     try {
         if (name == "read_file")     return CapOutput(ToolReadFile(args));
@@ -796,6 +852,8 @@ std::string DispatchTool(const std::string& name, const nlohmann::json& args,
             return ToolGritHistorySearch(args, memory, currentSessionId);
         if (name == "grit_history_fetch")
             return ToolGritHistoryFetch(args, memory);
+        if (name == "run_project")
+            return CapOutput(ToolRunProject(args, currentCwd));
         return "Error: unknown tool '" + name + "'";
     } catch (const std::exception& e) {
         return std::string("Error: tool threw exception: ") + e.what();

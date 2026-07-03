@@ -58,6 +58,7 @@ private:
     // dropdowns and a gear button on the right.
     wxChoice* sessionChoice_ = nullptr;
     wxChoice* modelChoice_ = nullptr;
+    wxBitmapButton* playBtn_ = nullptr;
     wxBitmapButton* settingsBtn_ = nullptr;
 
     // On-disk session persistence. Sessions are keyed by working directory
@@ -165,6 +166,7 @@ private:
     void OnSessionChoice(wxCommandEvent&);
     void OnModelChoice(wxCommandEvent&);
     void OnSettings(wxCommandEvent&);
+    void OnPlay(wxCommandEvent&);
 
     // Repopulate the session choice from store_.List() with the leading
     // "New Session…" entry, then restore the active selection.

@@ -71,6 +71,7 @@ set(SRCS
     src/preferences.cpp
     src/settings_dialog.cpp
     src/streaming_web_request.cpp
+    src/run_config_store.cpp
 )
 
 if(APPLE)
