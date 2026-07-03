@@ -56,6 +56,20 @@ jobs:
       - name: Build
         run: cmake --build --preset release
 
+      - name: Import signing certificate
+        env:
+          CERT_BASE64: ${{ secrets.APPLE_DEVELOPER_CERTIFICATE }}
+          CERT_PASS: ${{ secrets.APPLE_DEVELOPER_CERTIFICATE_PASSWORD }}
+        run: |
+          echo "$CERT_BASE64" | base64 -d > developer-id.p12
+          security create-keychain -p temp temp.keychain
+          security default-keychain -s temp.keychain
+          security unlock-keychain -p temp temp.keychain
+          security import developer-id.p12 -k temp.keychain -P "$CERT_PASS" -T /usr/bin/codesign
+          security set-key-partition-list -S apple-tool:,apple: -s -k temp temp.keychain
+          security list-keychains -d user -s temp.keychain $(security list-keychains -d user | sed 's/"//g')
+          rm developer-id.p12
+
       - name: Bundle dylibs into .app
         run: |
           app="build/wx_gritcode.app"
@@ -63,7 +77,6 @@ jobs:
           fwdir="$app/Contents/Frameworks"
           mkdir -p "$fwdir"
 
-          # Recursively resolve and copy all non-system dylibs.
           resolve() {
             for dep in $(otool -L "$1" | grep -E '/opt/homebrew|/usr/local' | awk '{print $1}'); do
               name=$(basename "$dep")
@@ -79,16 +92,47 @@ jobs:
           }
           resolve "$bin"
 
-          # Ad-hoc sign inner-to-outer.
+      - name: Sign binaries with Developer ID
+        run: |
+          IDENTITY=$(security find-identity -v -p codesigning temp.keychain | grep "Developer ID Application" | head -1 | awk -F'"' '{print $2}')
+          echo "Signing with: $IDENTITY"
+          app="build/wx_gritcode.app"
+          bin="$app/Contents/MacOS/wx_gritcode"
+          fwdir="$app/Contents/Frameworks"
+
           for dylib in "$fwdir"/*.dylib; do
-            codesign --force --sign - "$dylib"
+            codesign --force --sign "$IDENTITY" --options runtime --timestamp "$dylib"
           done
-          codesign --force --sign - "$bin"
-          codesign --force --sign - "$app"
+          codesign --force --sign "$IDENTITY" --options runtime --timestamp "$bin"
+          codesign --force --sign "$IDENTITY" --options runtime --timestamp "$app"
 
       - name: Package
         working-directory: build
         run: cpack
+
+      - name: Sign .dmg
+        run: |
+          IDENTITY=$(security find-identity -v -p codesigning temp.keychain | grep "Developer ID Application" | head -1 | awk -F'"' '{print $2}')
+          DMG=$(ls build/wx_gritcode-*.dmg | head -1)
+          codesign --force --sign "$IDENTITY" --options runtime --timestamp "$DMG"
+
+      - name: Notarize .dmg
+        env:
+          APPLE_ID: luke@devmindscape.com
+          TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          NOTARY_PASS: ${{ secrets.APPLE_NOTARY_PASSWORD }}
+        run: |
+          DMG=$(ls build/wx_gritcode-*.dmg | head -1)
+          xcrun notarytool submit "$DMG" \
+            --apple-id "$APPLE_ID" \
+            --team-id "$TEAM_ID" \
+            --password "$NOTARY_PASS" \
+            --wait
+
+      - name: Staple notarization ticket
+        run: |
+          DMG=$(ls build/wx_gritcode-*.dmg | head -1)
+          xcrun stapler staple "$DMG"
 
       - name: Upload .dmg
         uses: actions/upload-artifact@v7
