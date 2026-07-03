@@ -61,13 +61,17 @@ jobs:
           CERT_BASE64: ${{ secrets.APPLE_DEVELOPER_CERTIFICATE }}
           CERT_PASS: ${{ secrets.APPLE_DEVELOPER_CERTIFICATE_PASSWORD }}
         run: |
+          set -e
           echo "$CERT_BASE64" | base64 -d > developer-id.p12
+          echo "p12 file size: $(wc -c < developer-id.p12) bytes"
           security create-keychain -p temp temp.keychain
           security default-keychain -s temp.keychain
           security unlock-keychain -p temp temp.keychain
           security import developer-id.p12 -k temp.keychain -P "$CERT_PASS" -T /usr/bin/codesign
           security set-key-partition-list -S apple-tool:,apple: -s -k temp temp.keychain
           security list-keychains -d user -s temp.keychain $(security list-keychains -d user | sed 's/"//g')
+          echo "Imported identities:"
+          security find-identity -v -p codesigning temp.keychain
           rm developer-id.p12
 
       - name: Bundle dylibs into .app
