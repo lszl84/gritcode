@@ -40,12 +40,12 @@ const SecretSchema kSecretSchema = {
 
 void Preferences::Init() {
     if (wxConfigBase::Get(false) != nullptr) return;
-    // wxFileConfig path: ~/.config/wx_gritcode.conf on Linux (XDG-respecting
-    // when wxCONFIG_USE_SUBDIR is not set; the default file lives next to
-    // other dotconfigs). Vendor name kept empty so the path is short.
+    // wxFileConfig path with wxCONFIG_USE_SUBDIR: stores inside
+    // wxStandardPaths::GetUserDataDir() as ~/.wx_gritcode/wx_gritcode.conf,
+    // sharing the directory with run_configs.json and the memory DB.
     auto* cfg = new wxFileConfig("wx_gritcode", wxEmptyString,
                                  wxEmptyString, wxEmptyString,
-                                 wxCONFIG_USE_LOCAL_FILE);
+                                 wxCONFIG_USE_SUBDIR);
     wxConfigBase::Set(cfg);
 }
 
