@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.28 FATAL_ERROR)
 
-project(wx_gritcode VERSION 0.0.10 LANGUAGES CXX)
+project(wx_gritcode VERSION 0.0.11 LANGUAGES CXX)
 
 # Human-facing version string (used for packaging, bundle metadata, etc.)
 set(WXG_VERSION "${PROJECT_VERSION}-alpha")

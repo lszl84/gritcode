@@ -202,14 +202,22 @@ void ChatCanvas::RebuildPalette() {
 
 void ChatCanvas::EnsureFonts() {
     if (fontsReady_) return;
-    fontBody_ = wxFont(wxFontInfo(12).Family(wxFONTFAMILY_DEFAULT));
-    fontBodyBold_ = wxFont(wxFontInfo(12).Family(wxFONTFAMILY_DEFAULT).Bold());
-    fontBodyItalic_ = wxFont(wxFontInfo(12).Family(wxFONTFAMILY_DEFAULT).Italic());
-    fontBodyBoldItalic_ = wxFont(wxFontInfo(12).Family(wxFONTFAMILY_DEFAULT).Bold().Italic());
-    fontCode_ = wxFont(wxFontInfo(11).Family(wxFONTFAMILY_TELETYPE));
-    fontThinking_ = wxFont(wxFontInfo(11).Family(wxFONTFAMILY_DEFAULT).Italic());
-
+#ifdef __APPLE__
+    const int bodySz = 14;
+    const int codeSz = 13;
+    static const int hSizes[6] = {24, 21, 18, 16, 15, 14};
+#else
+    const int bodySz = 12;
+    const int codeSz = 11;
     static const int hSizes[6] = {22, 19, 16, 14, 13, 12};
+#endif
+    fontBody_ = wxFont(wxFontInfo(bodySz).Family(wxFONTFAMILY_DEFAULT));
+    fontBodyBold_ = wxFont(wxFontInfo(bodySz).Family(wxFONTFAMILY_DEFAULT).Bold());
+    fontBodyItalic_ = wxFont(wxFontInfo(bodySz).Family(wxFONTFAMILY_DEFAULT).Italic());
+    fontBodyBoldItalic_ = wxFont(wxFontInfo(bodySz).Family(wxFONTFAMILY_DEFAULT).Bold().Italic());
+    fontCode_ = wxFont(wxFontInfo(codeSz).Family(wxFONTFAMILY_TELETYPE));
+    fontThinking_ = wxFont(wxFontInfo(codeSz).Family(wxFONTFAMILY_DEFAULT).Italic());
+
     for (int i = 0; i < 6; ++i) {
         fontH_[i]  = wxFont(wxFontInfo(hSizes[i]).Family(wxFONTFAMILY_DEFAULT).Bold());
         fontHB_[i] = wxFont(wxFontInfo(hSizes[i]).Family(wxFONTFAMILY_DEFAULT).Bold());
