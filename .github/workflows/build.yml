@@ -2,7 +2,6 @@ name: build
 
 on:
   push:
-    branches: [wx]
     tags: ['v*']
   pull_request:
     branches: [wx]
