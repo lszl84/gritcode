@@ -743,18 +743,22 @@ nlohmann::json GetToolDefinitions() {
 
     tools.push_back(ToolDef(
         "run_project",
-        "Get or set the command used to run the current project. "
-        "Use this to store how to build/run the project so the user can "
-        "trigger it with the Play button. "
-        "Actions: 'get' (returns current config), 'set' (stores a run command), "
+        "Get, set, or forget the command used to build and run the current project. "
+        "The stored command should compile (if needed) then run the project — the "
+        "Play button triggers it via the model. "
+        "Actions: 'get' (returns current config), 'set' (stores a build+run command), "
         "'forget' (removes the config). "
-        "Call 'get' first to see if a command already exists.",
+        "Call 'get' first to see if a command already exists. "
+        "IMPORTANT: When setting a command for a compiled project, include both "
+        "the build step (e.g. `make` / `cargo build` / `go build`) AND the run "
+        "step in a single shell command (e.g. `make && ./myapp`). "
+        "For interpreted languages the build step can be omitted.",
         {{"type", "object"},
          {"properties", {
              {"action", {{"type", "string"},
                          {"description", "One of: get, set, forget."}}},
-             {"command", StrParam("Shell command to build and run the project (required for set).")},
-             {"cwd", StrParam("Project directory. Defaults to the current session's cwd.")},
+             {"command", StrParam("Shell command that builds (if needed) and runs the project. Required for set action. Should be a single command — use && to chain build + run steps.")},
+             {"cwd", StrParam("Project directory (defaults to current session directory).")},
          }},
          {"required", {"action"}}}));
 
@@ -772,13 +776,18 @@ std::string ToolRunProject(const nlohmann::json& args, const std::string& curren
         if (cwd.empty()) cwd = currentCwd;
         auto cfg = RunConfigStore::Get(cwd);
         if (cfg) {
-            return "Run config for " + cwd + ":\n"
+            return "Build+run config for " + cwd + ":\n"
                    "  command: " + cfg->command + "\n"
                    "  set by: " + cfg->discoveredBy + "\n"
-                   "  last used: " + cfg->lastUsed;
+                   "  last used: " + cfg->lastUsed + "\n\n"
+                   "The Play button will ask the model to build (if needed) and run "
+                   "using this command. If the command doesn't include a build step "
+                   "but the project is a compiled language, the model will rebuild "
+                   "before running.";
         }
         return "No run config found for " + cwd
-             + ". Use run_project set to store one.";
+             + ". Use run_project set to store one. "
+             "Include both build and run steps for compiled projects.";
     }
 
     if (action == "set") {
@@ -787,14 +796,16 @@ std::string ToolRunProject(const nlohmann::json& args, const std::string& curren
         std::string command = GetStringArg(args, "command");
         if (command.empty()) return "Error: 'command' is required for set action.";
         RunConfigStore::Set(cwd, command, "model");
-        return "Stored run config for " + cwd + ": " + command;
+        return "Stored build+run config for " + cwd + ": " + command + "\n"
+               "The Play button will now tell the model to build (if needed) and "
+               "run the project using this command.";
     }
 
     if (action == "forget") {
         std::string cwd = GetStringArg(args, "cwd");
         if (cwd.empty()) cwd = currentCwd;
         RunConfigStore::Forget(cwd);
-        return "Removed run config for " + cwd;
+        return "Removed build+run config for " + cwd;
     }
 
     return "Error: unknown action '" + action + "'. Use get, set, or forget.";

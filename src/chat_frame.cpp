@@ -238,7 +238,7 @@ ChatFrame::ChatFrame()
     playBtn_ = new wxBitmapButton(panel, ID_PLAY, bbPlay,
                                   wxDefaultPosition, kBtnSize,
                                   wxBORDER_NONE);
-    playBtn_->SetToolTip(wxString::FromUTF8("Run project"));
+    playBtn_->SetToolTip(wxString::FromUTF8("Build and run project"));
 
     toolbarRow->Add(sessionLabel, 0, wxALIGN_CENTER_VERTICAL | wxRIGHT, 6);
     // Session and model both get a small proportion so they share resize delta;
@@ -991,13 +991,28 @@ void ChatFrame::OnPlay(wxCommandEvent&) {
     auto cfg = RunConfigStore::Get(activeCwd_);
     wxString prompt;
     if (cfg) {
-        prompt = "Run the project";
+        // If a run command is already configured, tell the model to build & run.
+        // The model will look at the project to decide whether compilation is
+        // needed (skip build for interpreted languages like Python, JS, etc.).
+        prompt = wxString::FromUTF8(
+            "Build and run the project.\n\n"
+            "1. If this is a compiled language (C, C++, Rust, Go, Java, etc.) "
+            "rebuild first using the appropriate build tool.\n"
+            "2. Then run the project using the stored command below.\n"
+            "3. If this is an interpreted language (Python, JavaScript, Ruby, "
+            "etc.) just run it — no build step needed.\n\n"
+            "Stored run command: ") + wxString::FromUTF8(cfg->command);
     } else {
-        prompt = "Configure the run command for this project. "
-                 "Use run_project to set it up after analyzing the project.";
+        // No command stored yet — ask the model to discover the project and
+        // configure both a build and run step.
+        prompt = wxString::FromUTF8(
+            "Configure the run command for this project.\n"
+            "1. Examine the project structure (list_directory, read build files).\n"
+            "2. Figure out the correct way to build and run it.\n"
+            "3. Use run_project set to store the full build+run command.\n"
+            "4. Then build and run the project.");
     }
     input_->SetValue(prompt);
-    wxCommandEvent ev(wxEVT_BUTTON, ID_SEND);
     CallAfter([this]() {
         wxCommandEvent ev(wxEVT_BUTTON, ID_SEND);
         OnSend(ev);
