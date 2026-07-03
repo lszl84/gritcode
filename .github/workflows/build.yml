@@ -14,7 +14,7 @@ on:
       macos:
         description: 'Build macOS (.dmg)'
         type: boolean
-        default: false
+        default: true
 
 jobs:
   linux:
@@ -58,7 +58,7 @@ jobs:
       - uses: actions/checkout@v6
 
       - name: Install build deps
-        run: brew install wxwidgets
+        run: brew install ninja cmake
 
       - name: Configure
         run: cmake --preset release
@@ -84,41 +84,12 @@ jobs:
           security find-identity -v -p codesigning temp.keychain
           rm developer-id.p12
 
-      - name: Bundle dylibs into .app
-        run: |
-          app="build/wx_gritcode.app"
-          bin="$app/Contents/MacOS/wx_gritcode"
-          fwdir="$app/Contents/Frameworks"
-          mkdir -p "$fwdir"
-
-          resolve() {
-            for dep in $(otool -L "$1" | grep -E '/opt/homebrew|/usr/local' | awk '{print $1}'); do
-              name=$(basename "$dep")
-              dest="$fwdir/$name"
-              if [ ! -f "$dest" ]; then
-                cp "$dep" "$dest"
-                chmod 755 "$dest"
-                resolve "$dest"
-              fi
-              install_name_tool -change "$dep" "@executable_path/../Frameworks/$name" "$1"
-              install_name_tool -id "@executable_path/../Frameworks/$name" "$dest" 2>/dev/null || true
-            done
-          }
-          resolve "$bin"
-
-      - name: Sign binaries with Developer ID
+      - name: Sign .app with Developer ID
         run: |
           IDENTITY=$(security find-identity -v -p codesigning temp.keychain | grep "Developer ID Application" | head -1 | awk -F'"' '{print $2}')
           echo "Signing with: $IDENTITY"
           app="build/wx_gritcode.app"
-          bin="$app/Contents/MacOS/wx_gritcode"
-          fwdir="$app/Contents/Frameworks"
-
-          for dylib in "$fwdir"/*.dylib; do
-            codesign --force --sign "$IDENTITY" --options runtime --timestamp "$dylib"
-          done
-          codesign --force --sign "$IDENTITY" --options runtime --timestamp "$bin"
-          codesign --force --sign "$IDENTITY" --options runtime --timestamp "$app"
+          codesign --force --sign "$IDENTITY" --options runtime --timestamp --deep "$app"
 
       - name: Package
         working-directory: build

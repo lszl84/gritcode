@@ -2,6 +2,9 @@ cmake_minimum_required(VERSION 3.28 FATAL_ERROR)
 
 project(wx_gritcode VERSION 0.0.10 LANGUAGES CXX)
 
+# Human-facing version string (used for packaging, bundle metadata, etc.)
+set(WXG_VERSION "${PROJECT_VERSION}-alpha")
+
 include(FetchContent)
 
 set(CMAKE_CXX_STANDARD 20)
@@ -19,16 +22,12 @@ FetchContent_Declare(
 )
 FetchContent_MakeAvailable(nlohmann_json)
 
-# ---- wxWidgets: try system first, fall back to FetchContent ----
-find_package(wxWidgets QUIET COMPONENTS core base)
-
-if(NOT wxWidgets_FOUND)
-    message(STATUS "wxWidgets not found — building from source (FetchContent)")
-
-    # wxWidgets 3.2.x's CMakeLists declares cmake_minimum_required < 3.5,
-    # which CMake 4+ rejects. Override the policy floor for the fetched build.
+# ---- wxWidgets ----
+# macOS: always build static from source — portable .app with no Homebrew dep.
+# Linux: try system package first, fall back to FetchContent.
+if(APPLE)
+    message(STATUS "macOS: building wxWidgets from source (static)")
     set(CMAKE_POLICY_VERSION_MINIMUM 3.5 CACHE STRING "" FORCE)
-
     set(wxBUILD_SHARED OFF)
     FetchContent_Declare(
         wxWidgets
@@ -40,20 +39,41 @@ if(NOT wxWidgets_FOUND)
     FetchContent_MakeAvailable(wxWidgets)
     set(WX_LIBS wxcore)
 else()
-    message(STATUS "Using system wxWidgets ${wxWidgets_VERSION_STRING}")
-    include(${wxWidgets_USE_FILE})
-    set(WX_LIBS ${wxWidgets_LIBRARIES})
+    find_package(wxWidgets QUIET COMPONENTS core base)
+    if(NOT wxWidgets_FOUND)
+        message(STATUS "wxWidgets not found — building from source (FetchContent)")
+        set(CMAKE_POLICY_VERSION_MINIMUM 3.5 CACHE STRING "" FORCE)
+        set(wxBUILD_SHARED OFF)
+        FetchContent_Declare(
+            wxWidgets
+            GIT_REPOSITORY https://github.com/wxWidgets/wxWidgets.git
+            GIT_TAG v3.2.8
+            GIT_SHALLOW ON
+            EXCLUDE_FROM_ALL
+        )
+        FetchContent_MakeAvailable(wxWidgets)
+        set(WX_LIBS wxcore)
+    else()
+        message(STATUS "Using system wxWidgets ${wxWidgets_VERSION_STRING}")
+        include(${wxWidgets_USE_FILE})
+        set(WX_LIBS ${wxWidgets_LIBRARIES})
+    endif()
 endif()
 
 # libcurl backs StreamingWebRequest. We use it directly — wxnet/wxWebRequest
 # is no longer linked.
 find_package(CURL REQUIRED)
 
-# SQLite FTS5 backs the cross-project memory index (memory.cpp). Use the
-# system package via pkg-config — every supported distro ships it, and we
-# need FTS5 enabled (which the Linux system builds always have).
-find_package(PkgConfig REQUIRED)
-pkg_check_modules(SQLITE3 REQUIRED IMPORTED_TARGET sqlite3)
+# SQLite FTS5 backs the cross-project memory index (memory.cpp).
+# macOS ships SQLite in the SDK (use find_package). Linux uses pkg-config.
+if(APPLE)
+    find_package(SQLite3 REQUIRED)
+    set(SQLITE_LIB SQLite::SQLite3)
+else()
+    find_package(PkgConfig REQUIRED)
+    pkg_check_modules(SQLITE3 REQUIRED IMPORTED_TARGET sqlite3)
+    set(SQLITE_LIB PkgConfig::SQLITE3)
+endif()
 
 # ---- Sources ----
 set(SRCS
@@ -102,8 +122,8 @@ if(APPLE)
     set_target_properties(wx_gritcode PROPERTIES
         MACOSX_BUNDLE_BUNDLE_NAME       "wx_gritcode"
         MACOSX_BUNDLE_GUI_IDENTIFIER    "com.gritcode.wx"
-        MACOSX_BUNDLE_BUNDLE_VERSION    "0.1.0"
-        MACOSX_BUNDLE_SHORT_VERSION_STRING "0.1.0"
+        MACOSX_BUNDLE_BUNDLE_VERSION    "${WXG_VERSION}"
+        MACOSX_BUNDLE_SHORT_VERSION_STRING "${WXG_VERSION}"
         MACOSX_BUNDLE_COPYRIGHT         "Copyright (c) Gritcode contributors"
         MACOSX_BUNDLE_ICON_FILE         "wx_gritcode.icns"
     )
@@ -115,7 +135,7 @@ target_link_libraries(wx_gritcode PRIVATE
     ${WX_LIBS}
     nlohmann_json::nlohmann_json
     CURL::libcurl
-    PkgConfig::SQLITE3
+    ${SQLITE_LIB}
 )
 
 # On GTK builds we touch GtkSettings directly to disable theme animations on
@@ -188,6 +208,7 @@ endif()
 
 # ---- CPack ----
 set(CPACK_PACKAGE_NAME "wx_gritcode")
+set(CPACK_PACKAGE_VERSION "${WXG_VERSION}")
 set(CPACK_PACKAGE_VENDOR "gritcode")
 set(CPACK_PACKAGE_DESCRIPTION_SUMMARY "Native wxWidgets AI coding assistant")
 set(CPACK_PACKAGE_HOMEPAGE_URL "https://github.com/lszl84/wx_gritcode")
