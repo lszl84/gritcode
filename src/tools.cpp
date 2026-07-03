@@ -345,6 +345,7 @@ std::string ToolBash(const nlohmann::json& args, ToolCancelToken* token) {
 
     return out;
 }
+
 #endif  // _WIN32
 
 std::string ToolListDirectory(const nlohmann::json& args) {
@@ -637,6 +638,110 @@ nlohmann::json StrParam(const char* desc) {
 }
 
 }  // namespace
+
+#ifndef _WIN32
+// No-timeout variant of ToolBash for long-running builds from the Play button.
+// Takes a command string directly, not JSON args. No 30s timeout wrapper.
+// Lives in the global scope so chat_frame.cpp can call it.
+std::string ToolBashDirect(const std::string& cmd, ToolCancelToken* token) {
+    if (cmd.empty()) return "Error: empty command";
+    if (token && token->cancelled.load()) return "[cancelled]";
+
+    int pfd[2];
+    if (pipe(pfd) < 0) return "Error: pipe failed";
+    fcntl(pfd[0], F_SETFD, FD_CLOEXEC);
+    fcntl(pfd[1], F_SETFD, FD_CLOEXEC);
+
+    pid_t pid = fork();
+    if (pid < 0) {
+        close(pfd[0]); close(pfd[1]);
+        return "Error: fork failed";
+    }
+    if (pid == 0) {
+        setpgid(0, 0);
+        dup2(pfd[1], STDOUT_FILENO);
+        dup2(pfd[1], STDERR_FILENO);
+        execlp("bash", "bash", "-c", cmd.c_str(), (char*)nullptr);
+        _exit(127);
+    }
+
+    setpgid(pid, pid);
+    if (token) token->activePgid.store(pid);
+    close(pfd[1]);
+
+    constexpr size_t kMaxBuildOutput = 100000;
+    auto append = [&](const char* data, size_t n, std::string& out, bool& truncated) {
+        if (out.size() >= kMaxBuildOutput) { truncated = true; return; }
+        out.append(data, n);
+        if (out.size() > kMaxBuildOutput) { out.resize(kMaxBuildOutput); truncated = true; }
+    };
+
+    std::string out;
+    bool truncated = false;
+    bool sentTerm = false;
+    bool sentKill = false;
+    bool pipeEof = false;
+    int status = 0;
+    char buf[4096];
+    auto killDeadline = std::chrono::steady_clock::time_point::max();
+
+    for (;;) {
+        if (token && token->cancelled.load() && !sentTerm) {
+            kill(-pid, SIGTERM);
+            sentTerm = true;
+            killDeadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(500);
+        }
+        if (sentTerm && !sentKill && std::chrono::steady_clock::now() >= killDeadline) {
+            kill(-pid, SIGKILL);
+            sentKill = true;
+        }
+
+        if (!pipeEof) {
+            struct pollfd p{pfd[0], POLLIN, 0};
+            int pr = poll(&p, 1, 100);
+            if (pr < 0 && errno != EINTR) {
+                pipeEof = true;
+            } else if (pr > 0 && (p.revents & (POLLIN | POLLHUP))) {
+                ssize_t n = read(pfd[0], buf, sizeof(buf));
+                if (n > 0) append(buf, (size_t)n, out, truncated);
+                else if (n == 0) pipeEof = true;
+                else if (errno != EINTR && errno != EAGAIN) pipeEof = true;
+            }
+        } else {
+            struct timespec ts{0, 50'000'000};
+            nanosleep(&ts, nullptr);
+        }
+
+        pid_t r = waitpid(pid, &status, WNOHANG);
+        if (r == pid) {
+            if (!pipeEof) {
+                int flags = fcntl(pfd[0], F_GETFL, 0);
+                fcntl(pfd[0], F_SETFL, flags | O_NONBLOCK);
+                for (;;) {
+                    ssize_t n = read(pfd[0], buf, sizeof(buf));
+                    if (n <= 0) break;
+                    append(buf, (size_t)n, out, truncated);
+                }
+            }
+            break;
+        }
+    }
+    close(pfd[0]);
+    if (token) token->activePgid.store(0);
+
+    if (token && token->cancelled.load()) return "[cancelled]";
+
+    if (truncated) out += "\n[output truncated]";
+    if (out.empty()) out = "(no output)";
+
+    if (WIFEXITED(status) && WEXITSTATUS(status) != 0)
+        out += "\n[exit " + std::to_string(WEXITSTATUS(status)) + "]";
+    else if (WIFSIGNALED(status))
+        out += "\n[killed by signal " + std::to_string(WTERMSIG(status)) + "]";
+
+    return out;
+}
+#endif
 
 nlohmann::json GetToolDefinitions() {
     using J = nlohmann::json;

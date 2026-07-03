@@ -6,11 +6,21 @@ on:
   pull_request:
     branches: [wx]
   workflow_dispatch:
+    inputs:
+      linux:
+        description: 'Build Linux (.deb)'
+        type: boolean
+        default: true
+      macos:
+        description: 'Build macOS (.dmg)'
+        type: boolean
+        default: false
 
 jobs:
   linux:
     name: Linux (Ubuntu 24.04)
     runs-on: ubuntu-24.04
+    if: ${{ github.event_name != 'workflow_dispatch' || inputs.linux }}
     steps:
       - uses: actions/checkout@v6
 
@@ -43,6 +53,7 @@ jobs:
   macos:
     name: macOS
     runs-on: macos-14
+    if: ${{ github.event_name != 'workflow_dispatch' || inputs.macos }}
     steps:
       - uses: actions/checkout@v6
 

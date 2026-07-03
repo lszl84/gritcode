@@ -31,7 +31,13 @@ struct ToolCancelToken {
 // "Memory index unavailable" string in that case).
 std::string DispatchTool(const std::string& name,
                          const nlohmann::json& args,
-                         ToolCancelToken* token = nullptr,
-                         MemoryDB* memory = nullptr,
-                         const std::string& currentSessionId = {},
-                         const std::string& currentCwd = {});
+                         ToolCancelToken* token,
+                         MemoryDB* memory,
+                         const std::string& currentSessionId,
+                         const std::string& currentCwd);
+
+// Run a shell command without the 30s timeout. Used by the Play button for
+// long-running builds. Same cancellation semantics as ToolBash (SIGTERM on
+// cancelled flag, SIGKILL after 500ms grace). Returns stdout+stderr.
+std::string ToolBashDirect(const std::string& command,
+                           ToolCancelToken* token = nullptr);

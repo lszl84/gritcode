@@ -989,34 +989,58 @@ void ChatFrame::OnModelChoice(wxCommandEvent& evt) {
 void ChatFrame::OnPlay(wxCommandEvent&) {
     if (streaming_) return;
     auto cfg = RunConfigStore::Get(activeCwd_);
-    wxString prompt;
     if (cfg) {
-        // If a run command is already configured, tell the model to build & run.
-        // The model will look at the project to decide whether compilation is
-        // needed (skip build for interpreted languages like Python, JS, etc.).
-        prompt = wxString::FromUTF8(
-            "Build and run the project.\n\n"
-            "1. If this is a compiled language (C, C++, Rust, Go, Java, etc.) "
-            "rebuild first using the appropriate build tool.\n"
-            "2. Then run the project using the stored command below.\n"
-            "3. If this is an interpreted language (Python, JavaScript, Ruby, "
-            "etc.) just run it — no build step needed.\n\n"
-            "Stored run command: ") + wxString::FromUTF8(cfg->command);
+        // Direct execution path — no model inference, just run the stored command.
+        wxString userMsg = wxString::FromUTF8("▶ Build and run:\n  ") + wxString::FromUTF8(cfg->command);
+        Block userBlock;
+        userBlock.type = BlockType::UserPrompt;
+        userBlock.rawText = userMsg;
+        userBlock.visibleText = userMsg;
+        userBlock.runs.push_back({userMsg, false, false});
+        canvas_->AddBlock(std::move(userBlock));
+
+        // Append to history so it persists.
+        nlohmann::json histEntry;
+        histEntry["role"] = "user";
+        histEntry["content"] = userMsg.ToStdString(wxConvUTF8);
+        history_.push_back(std::move(histEntry));
+        PersistActive();
+
+        // Run the command on a background thread. Use the same cancel-token
+        // infrastructure as the tool worker so Escape can kill runaway builds.
+        auto token = std::make_shared<ToolCancelToken>();
+        currentToolToken_ = token;
+        if (toolWorker_.joinable()) toolWorker_.join();
+        toolWorker_ = std::thread([this, cmd = cfg->command, token]() {
+            std::string result = ToolBashDirect(cmd.c_str(), token.get());
+            CallAfter([this, result, cmd]() {
+                if (destroying_.load()) return;
+                currentToolToken_.reset();
+                RenderToolBlock("bash", cmd, result);
+                history_.push_back({
+                    {"role", "tool"},
+                    {"tool_call_id", "play"},
+                    {"name", "bash"},
+                    {"content", result},
+                });
+                PersistActive();
+            });
+        });
     } else {
         // No command stored yet — ask the model to discover the project and
         // configure both a build and run step.
-        prompt = wxString::FromUTF8(
+        wxString prompt = wxString::FromUTF8(
             "Configure the run command for this project.\n"
             "1. Examine the project structure (list_directory, read build files).\n"
             "2. Figure out the correct way to build and run it.\n"
             "3. Use run_project set to store the full build+run command.\n"
             "4. Then build and run the project.");
+        input_->SetValue(prompt);
+        CallAfter([this]() {
+            wxCommandEvent ev(wxEVT_BUTTON, ID_SEND);
+            OnSend(ev);
+        });
     }
-    input_->SetValue(prompt);
-    CallAfter([this]() {
-        wxCommandEvent ev(wxEVT_BUTTON, ID_SEND);
-        OnSend(ev);
-    });
 }
 void ChatFrame::OnSettings(wxCommandEvent&) {
     SettingsDialog dlg(this);
