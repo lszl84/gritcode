@@ -743,12 +743,15 @@ nlohmann::json GetToolDefinitions() {
 
     tools.push_back(ToolDef(
         "run_project",
-        "Get, set, or forget the command used to build and run the current project. "
+        "Get, set, forget, or detect the command used to build and run the current project. "
         "The stored command should compile (if needed) then run the project — the "
         "Play button triggers it via the model. "
-        "Actions: 'get' (returns current config), 'set' (stores a build+run command), "
-        "'forget' (removes the config). "
-        "Call 'get' first to see if a command already exists. "
+        "Actions: "
+        "'get' (returns current config), "
+        "'set' (stores a build+run command), "
+        "'forget' (removes the config), "
+        "'detect' (scans the project directory for build systems and suggests commands). "
+        "Call 'get' first to see if a command already exists, or 'detect' to auto-discover. "
         "IMPORTANT: When setting a command for a compiled project, include both "
         "the build step (e.g. `make` / `cargo build` / `go build`) AND the run "
         "step in a single shell command (e.g. `make && ./myapp`). "
@@ -756,7 +759,7 @@ nlohmann::json GetToolDefinitions() {
         {{"type", "object"},
          {"properties", {
              {"action", {{"type", "string"},
-                         {"description", "One of: get, set, forget."}}},
+                         {"description", "One of: get, set, forget, detect."}}},
              {"command", StrParam("Shell command that builds (if needed) and runs the project. Required for set action. Should be a single command — use && to chain build + run steps.")},
              {"cwd", StrParam("Project directory (defaults to current session directory).")},
          }},
@@ -769,7 +772,7 @@ namespace {
 
 std::string ToolRunProject(const nlohmann::json& args, const std::string& currentCwd) {
     std::string action = GetStringArg(args, "action");
-    if (action.empty()) return "Error: 'action' is required (get, set, or forget).";
+    if (action.empty()) return "Error: 'action' is required (get, set, forget, or detect).";
 
     if (action == "get") {
         std::string cwd = GetStringArg(args, "cwd");
@@ -786,8 +789,8 @@ std::string ToolRunProject(const nlohmann::json& args, const std::string& curren
                    "before running.";
         }
         return "No run config found for " + cwd
-             + ". Use run_project set to store one. "
-             "Include both build and run steps for compiled projects.";
+             + ". Use run_project set to store one, or run_project detect "
+             "to auto-detect the build system.";
     }
 
     if (action == "set") {
@@ -808,7 +811,96 @@ std::string ToolRunProject(const nlohmann::json& args, const std::string& curren
         return "Removed build+run config for " + cwd;
     }
 
-    return "Error: unknown action '" + action + "'. Use get, set, or forget.";
+    if (action == "detect") {
+        std::string cwd = GetStringArg(args, "cwd");
+        if (cwd.empty()) cwd = currentCwd;
+
+        namespace fs = std::filesystem;
+        std::error_code ec;
+
+        // Scan for known build-system markers.
+        struct Candidate {
+            const char* marker;
+            const char* type;
+            const char* suggest;
+            bool isBuildStep;
+        };
+        static const Candidate candidates[] = {
+            {"CMakeLists.txt",        "CMake (C/C++)",       "cmake --build .",        true},
+            {"Makefile",              "Make (generic)",      "make",                   true},
+            {"Cargo.toml",            "Cargo (Rust)",        "cargo build && cargo run", true},
+            {"go.mod",                "Go modules",          "go build && ./$(basename $(pwd))", true},
+            {"package.json",          "Node.js",             "npm run build && npm start", true},
+            {"package.json",          "Node.js",             "npm start",              false},
+            {"pyproject.toml",        "Python (PEP 517)",    "pip install -e . && python -m myapp", true},
+            {"setup.py",              "Python (setuptools)", "pip install -e . && python -m myapp", true},
+            {"requirements.txt",      "Python",              "python main.py",         false},
+            {"Gemfile",               "Ruby (Bundler)",      "bundle exec ruby main.rb", false},
+            {"dub.json",              "D (Dub)",             "dub build && dub run",   true},
+            {"mix.exs",               "Elixir (Mix)",        "mix compile && mix run", true},
+            {"Project.toml",          "Julia",               "julia src/main.jl",      false},
+            {"gradlew",               "Gradle (Java/Kotlin)","gradlew build && gradlew run", true},
+            {"pom.xml",               "Maven (Java)",        "mvn compile && mvn exec:java", true},
+            {"build.gradle",          "Gradle (Groovy)",     "gradle build && gradle run", true},
+            {"SConstruct",            "SCons",               "scons && ./build/program", true},
+            {"meson.build",           "Meson",               "meson compile -C builddir && ./builddir/program", true},
+        };
+
+        std::string result;
+        result += "Detected project at " + cwd + ":\n";
+        bool found = false;
+        for (const auto& c : candidates) {
+            fs::path markerPath = fs::path(cwd) / c.marker;
+            if (fs::exists(markerPath, ec)) {
+                found = true;
+                result += "  - " + std::string(c.marker) + "  →  " + std::string(c.type) + "\n";
+                result += "    Suggested command: " + std::string(c.suggest) + "\n";
+            }
+        }
+
+        // Also check for a top-level src/ directory as a heuristic.
+        fs::path srcDir = fs::path(cwd) / "src";
+        if (!found && fs::is_directory(srcDir, ec)) {
+            // Check for common source files.
+            for (const auto& e : fs::directory_iterator(srcDir, ec)) {
+                std::string name = e.path().filename().string();
+                std::string ext = e.path().extension().string();
+                if (ext == ".cpp" || ext == ".c" || ext == ".cc" || ext == ".cxx") {
+                    result += "  - src/ directory with C/C++ files detected\n";
+                    result += "    Suggested: cmake -B build && cmake --build build && ./build/program\n";
+                    found = true;
+                    break;
+                }
+                if (ext == ".rs") {
+                    result += "  - src/ directory with Rust files detected (but no Cargo.toml)\n";
+                    result += "    Consider adding a Cargo.toml or use run_project set manually.\n";
+                    found = true;
+                    break;
+                }
+                if (ext == ".py") {
+                    result += "  - src/ directory with Python files detected\n";
+                    result += "    Suggested: python src/main.py\n";
+                    found = true;
+                    break;
+                }
+            }
+        }
+
+        if (!found) {
+            result += "  No recognized build system found.\n";
+            result += "  Suggestions:\n";
+            result += "    - Use list_directory and read_file to examine the project.\n";
+            result += "    - Then use run_project set to store the correct command.\n";
+        }
+
+        result += "\nYou can store one of the suggested commands with:\n";
+        result += "  run_project set command=\"<your command>\"\n";
+        result += "Or the model can figure it out automatically when the Play button is clicked.";
+
+        return result;
+    }
+
+    return "Error: unknown action '" + action + "'. Use get, set, forget, or detect.";
 }
 
 std::string ToolGritHistorySearch(const nlohmann::json& args, MemoryDB* memory,
