@@ -130,7 +130,7 @@ const wxString& GetAssetsDir() {
         wxString res = wxStandardPaths::Get().GetResourcesDir();
         if (wxFileName::DirExists(res + "/icons")) return res;
         // Dev fallback: source tree at compile time.
-        return wxString(WXG_ASSETS_DIR);
+        return wxString(GRITCODE_ASSETS_DIR);
     }();
     return cached;
 }
@@ -175,12 +175,12 @@ wxBitmapBundle LoadThemedSvgIcon(const wxString& name, const wxSize& size,
 // (used by DEB), then the source-tree packaging directory.
 wxIconBundle LoadAppIcon() {
     wxString path = wxStandardPaths::Get().GetResourcesDir()
-                    + "/../../icons/hicolor/scalable/apps/wx_gritcode.svg";
+                    + "/../../icons/hicolor/scalable/apps/gritcode.svg";
     wxFileName fn(path);
     fn.Normalize();
     if (!fn.FileExists()) {
         // Dev fallback: source-tree packaging directory.
-        fn.Assign(wxString(WXG_ASSETS_DIR) + "/../packaging/wx_gritcode.svg");
+        fn.Assign(wxString(GRITCODE_ASSETS_DIR) + "/../packaging/gritcode.svg");
         fn.Normalize();
     }
     if (fn.FileExists()) {
@@ -200,7 +200,7 @@ wxIconBundle LoadAppIcon() {
 }  // namespace
 
 ChatFrame::ChatFrame()
-    : wxFrame(nullptr, wxID_ANY, "wx_gritcode",
+    : wxFrame(nullptr, wxID_ANY, "gritcode",
               wxDefaultPosition, wxSize(600, 850)) {
 
     SetIcons(LoadAppIcon());
@@ -767,7 +767,7 @@ void ChatFrame::OnSessionChoice(wxCommandEvent& evt) {
         }
         if (streaming_) {
             wxMessageBox("Cannot switch sessions while streaming.",
-                         "wx_gritcode", wxOK | wxICON_INFORMATION, this);
+                         "gritcode", wxOK | wxICON_INFORMATION, this);
             return;
         }
         CreateNewSession();
@@ -786,7 +786,7 @@ void ChatFrame::OnSessionChoice(wxCommandEvent& evt) {
             }
         }
         wxMessageBox("Cannot switch sessions while streaming.",
-                     "wx_gritcode", wxOK | wxICON_INFORMATION, this);
+                     "gritcode", wxOK | wxICON_INFORMATION, this);
         return;
     }
     SwitchToCwd(target);

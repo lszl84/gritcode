@@ -4,7 +4,7 @@
 
 // Per-project "run" configuration — one command per project directory.
 // Stored as a JSON file next to the memory database:
-//   $XDG_DATA_HOME/wx_gritcode/run_configs.json
+//   $XDG_DATA_HOME/gritcode/run_configs.json
 //
 // Keyed by absolute project path. Each entry holds the shell command the
 // model discovered to build/run the project, plus metadata.

@@ -1,6 +1,6 @@
 #pragma once
 
-// Run wx_gritcode as a stdio MCP server (JSON-RPC over stdin/stdout,
+// Run gritcode as a stdio MCP server (JSON-RPC over stdin/stdout,
 // newline-delimited) exposing grit_history_search and grit_history_fetch.
 // Intended to be spawned as a child process by an MCP-aware agent client
 // (Claude CLI via --mcp-config, etc).

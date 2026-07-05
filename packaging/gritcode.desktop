@@ -2,10 +2,10 @@
 Type=Application
 Name=Gritcode
 GenericName=AI Coding Assistant
-Comment=Native wxWidgets-based AI coding assistant
-Exec=wx_gritcode
-Icon=wx_gritcode
+Comment=Native desktop AI coding assistant
+Exec=gritcode
+Icon=gritcode
 Terminal=false
 Categories=Development;IDE;
 Keywords=AI;coding;assistant;chat;LLM;
-StartupWMClass=wx_gritcode
+StartupWMClass=gritcode

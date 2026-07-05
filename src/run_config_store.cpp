@@ -10,9 +10,9 @@ std::string RunConfigStore::StoragePath() {
     if (dir.IsEmpty()) {
         // Fallback for dev builds where wx can't determine the path.
         if (const char* home = std::getenv("HOME")) {
-            dir = wxString(home) + "/.local/share/wx_gritcode";
+            dir = wxString(home) + "/.local/share/gritcode";
         } else {
-            dir = "./wx_gritcode_data";
+            dir = "./gritcode_data";
         }
     }
     return (dir + "/run_configs.json").ToStdString(wxConvUTF8);

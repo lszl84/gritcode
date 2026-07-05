@@ -4,7 +4,7 @@ on:
   push:
     tags: ['v*']
   pull_request:
-    branches: [wx]
+    branches: [main]
   workflow_dispatch:
     inputs:
       linux:
@@ -48,7 +48,7 @@ jobs:
         uses: actions/upload-artifact@v7
         with:
           name: linux-deb
-          path: build/wx_gritcode-*.deb
+          path: build/gritcode-*.deb
 
   macos:
     name: macOS
@@ -88,7 +88,7 @@ jobs:
         run: |
           IDENTITY=$(security find-identity -v -p codesigning temp.keychain | grep "Developer ID Application" | head -1 | awk -F'"' '{print $2}')
           echo "Signing with: $IDENTITY"
-          app="build/wx_gritcode.app"
+          app="build/gritcode.app"
           codesign --force --sign "$IDENTITY" --options runtime --timestamp --deep "$app"
 
       - name: Package
@@ -98,7 +98,7 @@ jobs:
       - name: Sign .dmg
         run: |
           IDENTITY=$(security find-identity -v -p codesigning temp.keychain | grep "Developer ID Application" | head -1 | awk -F'"' '{print $2}')
-          DMG=$(ls build/wx_gritcode-*.dmg | head -1)
+          DMG=$(ls build/gritcode-*.dmg | head -1)
           codesign --force --sign "$IDENTITY" --options runtime --timestamp "$DMG"
 
       - name: Notarize .dmg
@@ -107,7 +107,7 @@ jobs:
           TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
           NOTARY_PASS: ${{ secrets.APPLE_NOTARY_PASSWORD }}
         run: |
-          DMG=$(ls build/wx_gritcode-*.dmg | head -1)
+          DMG=$(ls build/gritcode-*.dmg | head -1)
           xcrun notarytool submit "$DMG" \
             --apple-id "$APPLE_ID" \
             --team-id "$TEAM_ID" \
@@ -116,14 +116,14 @@ jobs:
 
       - name: Staple notarization ticket
         run: |
-          DMG=$(ls build/wx_gritcode-*.dmg | head -1)
+          DMG=$(ls build/gritcode-*.dmg | head -1)
           xcrun stapler staple "$DMG"
 
       - name: Upload .dmg
         uses: actions/upload-artifact@v7
         with:
           name: macos-dmg
-          path: build/wx_gritcode-*.dmg
+          path: build/gritcode-*.dmg
 
   release:
     name: Publish GitHub Release

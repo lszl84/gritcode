@@ -811,7 +811,7 @@ nlohmann::json GetToolDefinitions() {
 
     tools.push_back(ToolDef(
         "grit_history_search",
-        "Search the transcripts of past wx_gritcode conversations across "
+        "Search the transcripts of past gritcode conversations across "
         "every project the user has worked on (excludes the current session). "
         "This is the AUTHORITATIVE source of prior-conversation recall — use "
         "it first whenever the user references any past work (\"last time\", "

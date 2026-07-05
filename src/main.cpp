@@ -72,7 +72,7 @@ static int RunReindex() {
 class App : public wxApp {
 public:
     bool OnInit() override {
-        SetAppName("wx_gritcode");
+        SetAppName("gritcode");
 #if wxCHECK_VERSION(3, 3, 0)
         // On Windows, wx 3.3 defaults to light mode — the app must
         // explicitly opt in to follow the system appearance.
@@ -106,7 +106,7 @@ int main(int argc, char* argv[]) {
         if (std::strcmp(argv[i], "--help") == 0 ||
             std::strcmp(argv[i], "-h") == 0) {
             std::printf(
-                "Usage: wx_gritcode [OPTIONS]\n\n"
+                "Usage: gritcode [OPTIONS]\n\n"
                 "Options:\n"
                 "  --reindex      Rebuild the memory index from session history on disk\n"
                 "  --mcp-stdio    Run as a stdio MCP server exposing grit_history_search/fetch\n"

@@ -6,7 +6,7 @@
 #include <string>
 #include <thread>
 
-// TCP JSON-RPC server for programmatic control of a running wx_gritcode
+// TCP JSON-RPC server for programmatic control of a running gritcode
 // instance. The server lives on a background thread; methods are dispatched
 // via callbacks the GUI registers, and the callbacks themselves marshal
 // onto the GUI thread via wxFrame::CallAfter when they need to mutate UI.

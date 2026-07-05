@@ -12,21 +12,21 @@ std::string MemoryDB::DefaultPath() {
     const char* xdg = std::getenv("XDG_DATA_HOME");
     std::string base;
     if (xdg && *xdg) {
-        base = std::string(xdg) + "/wx_gritcode";
+        base = std::string(xdg) + "/gritcode";
     } else {
         const char* home = std::getenv("HOME");
         if (!home) home = "/tmp";
-        base = std::string(home) + "/.local/share/wx_gritcode";
+        base = std::string(home) + "/.local/share/gritcode";
     }
     return base + "/memory.db";
 }
 
 std::string MemoryDB::SessionsDir() {
     const char* xdg = std::getenv("XDG_DATA_HOME");
-    if (xdg && *xdg) return std::string(xdg) + "/wx_gritcode/sessions";
+    if (xdg && *xdg) return std::string(xdg) + "/gritcode/sessions";
     const char* home = std::getenv("HOME");
     if (!home) home = "/tmp";
-    return std::string(home) + "/.local/share/wx_gritcode/sessions";
+    return std::string(home) + "/.local/share/gritcode/sessions";
 }
 
 bool MemoryDB::Open(const std::string& path) {

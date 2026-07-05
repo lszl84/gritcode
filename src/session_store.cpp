@@ -28,12 +28,12 @@ std::string NowIso() {
 
 std::string DataRoot() {
     if (const char* xdg = std::getenv("XDG_DATA_HOME")) {
-        if (xdg[0] != '\0') return std::string(xdg) + "/wx_gritcode";
+        if (xdg[0] != '\0') return std::string(xdg) + "/gritcode";
     }
     if (const char* home = std::getenv("HOME")) {
-        return std::string(home) + "/.local/share/wx_gritcode";
+        return std::string(home) + "/.local/share/gritcode";
     }
-    return ".wx_gritcode";  // fallback (shouldn't happen on Linux/macOS)
+    return ".gritcode";  // fallback (shouldn't happen on Linux/macOS)
 }
 
 void AtomicWrite(const std::string& path, const std::string& content) {

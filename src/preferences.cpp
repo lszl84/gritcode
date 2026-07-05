@@ -12,7 +12,7 @@ namespace {
 // Service identifier used in the OS keyring. Per-provider suffix keeps each
 // key in its own entry so adding a future provider doesn't churn existing
 // stored keys.
-const wxString kServicePrefix = "wx_gritcode/";
+const wxString kServicePrefix = "gritcode/";
 const wxString kUsername      = "api_key";
 
 const char* kModelIndexKey = "/UI/LastModelIndex";
@@ -27,7 +27,7 @@ wxString ServiceFor(Preferences::Provider p) {
 #if !wxUSE_SECRETSTORE
 // libsecret schema for our keyring entries.
 const SecretSchema kSecretSchema = {
-    "wx_gritcode.ApiKey",
+    "gritcode.ApiKey",
     SECRET_SCHEMA_NONE,
     {
         { "provider", SECRET_SCHEMA_ATTRIBUTE_STRING },
@@ -41,9 +41,9 @@ const SecretSchema kSecretSchema = {
 void Preferences::Init() {
     if (wxConfigBase::Get(false) != nullptr) return;
     // wxFileConfig path with wxCONFIG_USE_SUBDIR: stores inside
-    // wxStandardPaths::GetUserDataDir() as ~/.wx_gritcode/wx_gritcode.conf,
+    // wxStandardPaths::GetUserDataDir() as ~/.gritcode/gritcode.conf,
     // sharing the directory with run_configs.json and the memory DB.
-    auto* cfg = new wxFileConfig("wx_gritcode", wxEmptyString,
+    auto* cfg = new wxFileConfig("gritcode", wxEmptyString,
                                  wxEmptyString, wxEmptyString,
                                  wxCONFIG_USE_SUBDIR);
     wxConfigBase::Set(cfg);

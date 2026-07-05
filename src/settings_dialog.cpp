@@ -84,7 +84,7 @@ void SettingsDialog::OnSave(wxCommandEvent& evt) {
             "Could not save the API key to the system keyring.\n\n"
             "If you're running headless or without a keyring daemon, the "
             "secret store may be unavailable.",
-            "wx_gritcode", wxOK | wxICON_ERROR, this);
+            "gritcode", wxOK | wxICON_ERROR, this);
         return;  // keep dialog open
     }
     evt.Skip();  // let default handler close with wxID_OK

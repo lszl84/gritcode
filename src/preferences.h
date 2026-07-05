@@ -3,7 +3,7 @@
 
 // Facade over wxConfig (plaintext app prefs) and wxSecretStore (OS-backed
 // secrets). Non-secret state — last selected model, future UI toggles — goes
-// through wxConfig at ~/.config/wx_gritcode.conf. API keys go through
+// through wxConfig at ~/.config/gritcode.conf. API keys go through
 // wxSecretStore, which on Linux talks to libsecret (gnome-keyring/kwallet).
 //
 // All methods are safe to call before Init(); the wxConfig calls just

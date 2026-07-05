@@ -6,8 +6,8 @@
 
 // On-disk persistence for chat sessions, keyed by working directory (one
 // session per folder). Storage layout mirrors gritcode:
-//   ~/.local/share/wx_gritcode/sessions/<hash>.json   (per-session)
-//   ~/.local/share/wx_gritcode/sessions.json          (index of cwds)
+//   ~/.local/share/gritcode/sessions/<hash>.json   (per-session)
+//   ~/.local/share/gritcode/sessions.json          (index of cwds)
 // Writes are atomic (temp file then rename) so a crash mid-write can't
 // corrupt the index or any session file.
 class SessionStore {
@@ -51,7 +51,7 @@ public:
     void RegisterCwd(const std::string& cwd);
 
 private:
-    std::string root_;         // ~/.local/share/wx_gritcode
+    std::string root_;         // ~/.local/share/gritcode
     std::string sessionsDir_;  // root_ + "/sessions"
     std::string indexPath_;    // root_ + "/sessions.json"
 

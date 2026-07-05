@@ -17,7 +17,7 @@ static json SearchToolDef() {
     return {
         {"name", "grit_history_search"},
         {"description",
-         "Search the transcripts of past wx_gritcode conversations across "
+         "Search the transcripts of past gritcode conversations across "
          "every project the user has worked on. This is the AUTHORITATIVE "
          "source of prior-conversation recall — use it first whenever the "
          "user references any past work (\"last time\", \"once again\", "
@@ -110,7 +110,7 @@ int RunMcpStdioServer() {
         try {
             req = json::parse(line);
         } catch (...) {
-            std::fprintf(stderr, "wx_gritcode --mcp-stdio: parse error\n");
+            std::fprintf(stderr, "gritcode --mcp-stdio: parse error\n");
             continue;
         }
 

@@ -52,7 +52,7 @@ public:
 
     // Bulk re-index every turn of a session. Wraps a transaction around
     // ClearSession + IndexTurn calls. `messages` is a JSON array of
-    // {role, content, ...} entries (wx_gritcode's wire format). System
+    // {role, content, ...} entries (gritcode's wire format). System
     // messages and tool messages with no content are skipped.
     bool RebuildSession(const std::string& session_id,
                         const std::string& cwd,
@@ -78,8 +78,8 @@ public:
                            int before,
                            int after);
 
-    // Default db path: $XDG_DATA_HOME/wx_gritcode/memory.db (or
-    // ~/.local/share/wx_gritcode/memory.db).
+    // Default db path: $XDG_DATA_HOME/gritcode/memory.db (or
+    // ~/.local/share/gritcode/memory.db).
     static std::string DefaultPath();
 
     // Default sessions directory we walk during --reindex.

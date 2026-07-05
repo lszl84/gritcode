@@ -1,9 +1,9 @@
 cmake_minimum_required(VERSION 3.28 FATAL_ERROR)
 
-project(wx_gritcode VERSION 0.0.13 LANGUAGES CXX)
+project(gritcode VERSION 0.1.0 LANGUAGES CXX)
 
 # Human-facing version string (used for packaging, bundle metadata, etc.)
-set(WXG_VERSION "${PROJECT_VERSION}-alpha")
+set(GRITCODE_VERSION "${PROJECT_VERSION}-alpha")
 
 include(FetchContent)
 
@@ -104,34 +104,34 @@ if(APPLE)
     )
 
     # Compile the app icon from the iconset into a single .icns at build time.
-    set(WXG_ICNS ${CMAKE_CURRENT_BINARY_DIR}/wx_gritcode.icns)
-    file(GLOB WXG_ICONSET_PNGS
-         ${CMAKE_CURRENT_SOURCE_DIR}/packaging/wx_gritcode.iconset/*.png)
+    set(GRITCODE_ICNS ${CMAKE_CURRENT_BINARY_DIR}/gritcode.icns)
+    file(GLOB GRITCODE_ICONSET_PNGS
+         ${CMAKE_CURRENT_SOURCE_DIR}/packaging/gritcode.iconset/*.png)
     add_custom_command(
-        OUTPUT ${WXG_ICNS}
+        OUTPUT ${GRITCODE_ICNS}
         COMMAND iconutil -c icns
-                ${CMAKE_CURRENT_SOURCE_DIR}/packaging/wx_gritcode.iconset
-                -o ${WXG_ICNS}
-        DEPENDS ${WXG_ICONSET_PNGS}
-        COMMENT "Generating wx_gritcode.icns")
-    set_source_files_properties(${WXG_ICNS} PROPERTIES
+                ${CMAKE_CURRENT_SOURCE_DIR}/packaging/gritcode.iconset
+                -o ${GRITCODE_ICNS}
+        DEPENDS ${GRITCODE_ICONSET_PNGS}
+        COMMENT "Generating gritcode.icns")
+    set_source_files_properties(${GRITCODE_ICNS} PROPERTIES
         MACOSX_PACKAGE_LOCATION Resources)
 
-    add_executable(wx_gritcode MACOSX_BUNDLE ${SRCS} ${ASSET_ICON_FILES} ${WXG_ICNS})
+    add_executable(gritcode MACOSX_BUNDLE ${SRCS} ${ASSET_ICON_FILES} ${GRITCODE_ICNS})
 
-    set_target_properties(wx_gritcode PROPERTIES
-        MACOSX_BUNDLE_BUNDLE_NAME       "wx_gritcode"
-        MACOSX_BUNDLE_GUI_IDENTIFIER    "com.gritcode.wx"
-        MACOSX_BUNDLE_BUNDLE_VERSION    "${WXG_VERSION}"
-        MACOSX_BUNDLE_SHORT_VERSION_STRING "${WXG_VERSION}"
+    set_target_properties(gritcode PROPERTIES
+        MACOSX_BUNDLE_BUNDLE_NAME       "gritcode"
+        MACOSX_BUNDLE_GUI_IDENTIFIER    "com.gritcode.app"
+        MACOSX_BUNDLE_BUNDLE_VERSION    "${GRITCODE_VERSION}"
+        MACOSX_BUNDLE_SHORT_VERSION_STRING "${GRITCODE_VERSION}"
         MACOSX_BUNDLE_COPYRIGHT         "Copyright (c) Gritcode contributors"
-        MACOSX_BUNDLE_ICON_FILE         "wx_gritcode.icns"
+        MACOSX_BUNDLE_ICON_FILE         "gritcode.icns"
     )
 else()
-    add_executable(wx_gritcode ${SRCS})
+    add_executable(gritcode ${SRCS})
 endif()
 
-target_link_libraries(wx_gritcode PRIVATE
+target_link_libraries(gritcode PRIVATE
     ${WX_LIBS}
     nlohmann_json::nlohmann_json
     CURL::libcurl
@@ -142,48 +142,48 @@ target_link_libraries(wx_gritcode PRIVATE
 # the canvas. This is the smallest GTK dep we can take.
 if(UNIX AND NOT APPLE)
     pkg_check_modules(GTK3 REQUIRED gtk+-3.0)
-    target_include_directories(wx_gritcode PRIVATE ${GTK3_INCLUDE_DIRS})
-    target_link_libraries(wx_gritcode PRIVATE ${GTK3_LIBRARIES})
+    target_include_directories(gritcode PRIVATE ${GTK3_INCLUDE_DIRS})
+    target_link_libraries(gritcode PRIVATE ${GTK3_LIBRARIES})
 
     # libsecret backs the API-key keyring fallback when wxUSE_SECRETSTORE is 0
     # (the system wx package on Ubuntu 24.04 is built without it).
     pkg_check_modules(LIBSECRET REQUIRED libsecret-1)
-    target_include_directories(wx_gritcode PRIVATE ${LIBSECRET_INCLUDE_DIRS})
-    target_link_libraries(wx_gritcode PRIVATE ${LIBSECRET_LIBRARIES})
+    target_include_directories(gritcode PRIVATE ${LIBSECRET_INCLUDE_DIRS})
+    target_link_libraries(gritcode PRIVATE ${LIBSECRET_LIBRARIES})
 endif()
 
-target_compile_options(wx_gritcode PRIVATE -Wall -Wextra -Wno-unused-parameter)
+target_compile_options(gritcode PRIVATE -Wall -Wextra -Wno-unused-parameter)
 
 # Source-tree asset path baked in for dev builds. At runtime the loader prefers
-# wxStandardPaths::GetResourcesDir() (which derives <prefix>/share/wx_gritcode
+# wxStandardPaths::GetResourcesDir() (which derives <prefix>/share/gritcode
 # from the executable's actual location) and falls back to this if that path
 # isn't populated — i.e., when running straight out of the build tree.
-target_compile_definitions(wx_gritcode PRIVATE
-    WXG_ASSETS_DIR="${CMAKE_SOURCE_DIR}/assets"
+target_compile_definitions(gritcode PRIVATE
+    GRITCODE_ASSETS_DIR="${CMAKE_SOURCE_DIR}/assets"
 )
 
 include(GNUInstallDirs)
 
 # ---- Install rules ----
 # POSIX layout:
-#   <prefix>/bin/wx_gritcode
-#   <prefix>/share/wx_gritcode/icons/*.svg                       (toolbar SVGs)
-#   <prefix>/share/applications/wx_gritcode.desktop              (launcher)
-#   <prefix>/share/icons/hicolor/scalable/apps/wx_gritcode.svg   (app icon)
-install(TARGETS wx_gritcode
+#   <prefix>/bin/gritcode
+#   <prefix>/share/gritcode/icons/*.svg                       (toolbar SVGs)
+#   <prefix>/share/applications/gritcode.desktop              (launcher)
+#   <prefix>/share/icons/hicolor/scalable/apps/gritcode.svg   (app icon)
+install(TARGETS gritcode
     RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
     BUNDLE  DESTINATION .
 )
 
 if(UNIX AND NOT APPLE)
     install(DIRECTORY assets/icons
-        DESTINATION ${CMAKE_INSTALL_DATADIR}/wx_gritcode
+        DESTINATION ${CMAKE_INSTALL_DATADIR}/gritcode
         FILES_MATCHING PATTERN "*.svg"
     )
-    install(FILES packaging/wx_gritcode.desktop
+    install(FILES packaging/gritcode.desktop
         DESTINATION ${CMAKE_INSTALL_DATADIR}/applications
     )
-    install(FILES packaging/wx_gritcode.svg
+    install(FILES packaging/gritcode.svg
         DESTINATION ${CMAKE_INSTALL_DATADIR}/icons/hicolor/scalable/apps
     )
 
@@ -207,19 +207,19 @@ if(UNIX AND NOT APPLE)
 endif()
 
 # ---- CPack ----
-set(CPACK_PACKAGE_NAME "wx_gritcode")
-set(CPACK_PACKAGE_VERSION "${WXG_VERSION}")
+set(CPACK_PACKAGE_NAME "gritcode")
+set(CPACK_PACKAGE_VERSION "${GRITCODE_VERSION}")
 set(CPACK_PACKAGE_VENDOR "gritcode")
-set(CPACK_PACKAGE_DESCRIPTION_SUMMARY "Native wxWidgets AI coding assistant")
-set(CPACK_PACKAGE_HOMEPAGE_URL "https://github.com/lszl84/wx_gritcode")
+set(CPACK_PACKAGE_DESCRIPTION_SUMMARY "Native desktop AI coding assistant")
+set(CPACK_PACKAGE_HOMEPAGE_URL "https://github.com/lszl84/gritcode")
 set(CPACK_PACKAGE_CONTACT "luke@devmindscape.com")
 set(CPACK_RESOURCE_FILE_LICENSE "${CMAKE_CURRENT_SOURCE_DIR}/LICENSE")
-set(CPACK_PACKAGE_INSTALL_DIRECTORY "wx_gritcode")
+set(CPACK_PACKAGE_INSTALL_DIRECTORY "gritcode")
 set(CPACK_STRIP_FILES ON)
 
 if(APPLE)
     set(CPACK_GENERATOR "DragNDrop")
-    set(CPACK_DMG_VOLUME_NAME "wx_gritcode")
+    set(CPACK_DMG_VOLUME_NAME "gritcode")
 else()
     # Linux: DEB only.
     set(CPACK_GENERATOR "DEB")
