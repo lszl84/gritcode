@@ -153,6 +153,5 @@ jobs:
         run: |
           gh release create "${{ github.ref_name }}" \
             artifacts/* \
-            --prerelease \
             --generate-notes \
             --title "${{ github.ref_name }}"
