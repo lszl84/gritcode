@@ -2,7 +2,7 @@
 
 Native desktop AI coding assistant. wxWidgets + C++20. No Electron, no browser tab.
 
-Uses [DeepSeek V4](https://deepseek.com) or the free [OpenCode Zen](https://opencode.ai/zen) tier (no API key needed).
+Uses [DeepSeek V4](https://deepseek.com) (API key required) or the free [OpenCode Zen](https://opencode.ai/zen) tier (no key).
 
 ## Download
 
