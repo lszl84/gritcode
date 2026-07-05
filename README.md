@@ -14,10 +14,12 @@ Uses [DeepSeek V4](https://deepseek.com) (API key required) or the free [OpenCod
 ## Features
 
 - Streaming markdown — paragraphs, headings, fenced code blocks, inline formatting, tables
+- ▶ Play button — one click builds and runs your project, no AI roundtrip
 - Tool calls — the AI runs bash, reads/writes/edits files, lists directories, greps, fetches URLs
 - Multi-session history with SQLite persistence and cross-project full-text search
 - Collapsible tool-call cards and thinking blocks
 - Native dark/light theme
+- ~10 MB binary, ~50 MB RAM at rest — vs hundreds of MB for Electron-based alternatives
 
 ## Build from source
 
