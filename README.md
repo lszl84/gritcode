@@ -17,7 +17,6 @@ Uses [DeepSeek V4](https://deepseek.com) or the free [OpenCode Zen](https://open
 - Tool calls — the AI runs bash, reads/writes/edits files, lists directories, greps, fetches URLs
 - Multi-session history with SQLite persistence and cross-project full-text search
 - Collapsible tool-call cards and thinking blocks
-- MCP server on `127.0.0.1:8766` for external agent control
 - Native dark/light theme
 
 ## Build from source
