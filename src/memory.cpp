@@ -1,48 +1,32 @@
-// Gritcode — GPU-rendered AI coding harness
-// Copyright (C) 2026 luke@devmindscape.com
-//
-// This program is free software: you can redistribute it and/or modify
-// it under the terms of the GNU General Public License as published by
-// the Free Software Foundation, either version 3 of the License, or
-// (at your option) any later version.
-//
-// This program is distributed in the hope that it will be useful,
-// but WITHOUT ANY WARRANTY; without even the implied warranty of
-// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
-// GNU General Public License for more details.
-//
-// You should have received a copy of the GNU General Public License
-// along with this program. If not, see <https://www.gnu.org/licenses/>.
-
 #include "memory.h"
-#include "debug_log.h"
 #include <sqlite3.h>
-#include <filesystem>
+#include <cstdio>
 #include <cstdlib>
+#include <filesystem>
 
 namespace fs = std::filesystem;
 
 MemoryDB::~MemoryDB() { Close(); }
 
 std::string MemoryDB::DefaultPath() {
-    const char* xdg = getenv("XDG_DATA_HOME");
+    const char* xdg = std::getenv("XDG_DATA_HOME");
     std::string base;
     if (xdg && *xdg) {
-        base = std::string(xdg) + "/gritcode";
+        base = std::string(xdg) + "/wx_gritcode";
     } else {
-        const char* home = getenv("HOME");
+        const char* home = std::getenv("HOME");
         if (!home) home = "/tmp";
-        base = std::string(home) + "/.local/share/gritcode";
+        base = std::string(home) + "/.local/share/wx_gritcode";
     }
     return base + "/memory.db";
 }
 
 std::string MemoryDB::SessionsDir() {
-    const char* xdg = getenv("XDG_DATA_HOME");
-    if (xdg && *xdg) return std::string(xdg) + "/gritcode/sessions";
-    const char* home = getenv("HOME");
+    const char* xdg = std::getenv("XDG_DATA_HOME");
+    if (xdg && *xdg) return std::string(xdg) + "/wx_gritcode/sessions";
+    const char* home = std::getenv("HOME");
     if (!home) home = "/tmp";
-    return std::string(home) + "/.local/share/gritcode/sessions";
+    return std::string(home) + "/.local/share/wx_gritcode/sessions";
 }
 
 bool MemoryDB::Open(const std::string& path) {
@@ -54,16 +38,18 @@ bool MemoryDB::Open(const std::string& path) {
     } catch (...) {}
 
     int rc = sqlite3_open_v2(path.c_str(), &db_,
-        SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE | SQLITE_OPEN_FULLMUTEX, nullptr);
+        SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE | SQLITE_OPEN_FULLMUTEX,
+        nullptr);
     if (rc != SQLITE_OK) {
-        DLOG("MemoryDB open failed: %s", sqlite3_errmsg(db_));
+        std::fprintf(stderr, "MemoryDB open failed: %s\n",
+                     db_ ? sqlite3_errmsg(db_) : "?");
         if (db_) { sqlite3_close(db_); db_ = nullptr; }
         return false;
     }
 
-    // Pragmas: WAL for concurrent readers/writers, NORMAL sync (acceptable
-    // since the DB is a derived index — losing the last few writes on a
-    // crash just means the next save re-indexes them).
+    // WAL for concurrent readers/writers; NORMAL sync is fine because the
+    // DB is a derived index — a crash that loses the last few writes is
+    // recovered by the next save's RebuildSession call.
     Exec("PRAGMA journal_mode=WAL");
     Exec("PRAGMA synchronous=NORMAL");
     Exec("PRAGMA temp_store=MEMORY");
@@ -80,7 +66,8 @@ bool MemoryDB::Exec(const char* sql) {
     char* err = nullptr;
     int rc = sqlite3_exec(db_, sql, nullptr, nullptr, &err);
     if (rc != SQLITE_OK) {
-        DLOG("MemoryDB exec failed: %s [sql: %s]", err ? err : "?", sql);
+        std::fprintf(stderr, "MemoryDB exec failed: %s [sql: %s]\n",
+                     err ? err : "?", sql);
         if (err) sqlite3_free(err);
         return false;
     }
@@ -88,7 +75,7 @@ bool MemoryDB::Exec(const char* sql) {
 }
 
 bool MemoryDB::EnsureSchema() {
-    // FTS5 virtual table: cwd + text are searchable; role, ids, ts are
+    // FTS5 virtual table: cwd + text are searchable; role/ids/ts are
     // metadata-only (UNINDEXED keeps them out of the inverted index so
     // searching for "user" doesn't return the world).
     //
@@ -125,10 +112,8 @@ bool MemoryDB::IndexTurn(const std::string& session_id,
                          const std::string& timestamp) {
     std::lock_guard<std::mutex> lk(mu_);
     if (!db_) return false;
-    if (text.empty()) return true;  // nothing to index
+    if (text.empty()) return true;
 
-    // Idempotent: drop any existing row for this (session_id, turn_index)
-    // before inserting. Cheap because the index is tiny per session.
     {
         sqlite3_stmt* del = nullptr;
         if (sqlite3_prepare_v2(db_,
@@ -145,10 +130,7 @@ bool MemoryDB::IndexTurn(const std::string& session_id,
     int rc = sqlite3_prepare_v2(db_,
         "INSERT INTO turns(cwd, text, role, session_id, turn_index, timestamp) "
         "VALUES (?, ?, ?, ?, ?, ?)", -1, &ins, nullptr);
-    if (rc != SQLITE_OK) {
-        DLOG("MemoryDB IndexTurn prepare failed: %s", sqlite3_errmsg(db_));
-        return false;
-    }
+    if (rc != SQLITE_OK) return false;
     sqlite3_bind_text(ins, 1, cwd.c_str(), -1, SQLITE_TRANSIENT);
     sqlite3_bind_text(ins, 2, text.c_str(), -1, SQLITE_TRANSIENT);
     sqlite3_bind_text(ins, 3, role.c_str(), -1, SQLITE_TRANSIENT);
@@ -157,22 +139,45 @@ bool MemoryDB::IndexTurn(const std::string& session_id,
     sqlite3_bind_text(ins, 6, timestamp.c_str(), -1, SQLITE_TRANSIENT);
     rc = sqlite3_step(ins);
     sqlite3_finalize(ins);
-    if (rc != SQLITE_DONE) {
-        DLOG("MemoryDB IndexTurn step failed: rc=%d", rc);
-        return false;
+    return rc == SQLITE_DONE;
+}
+
+// Extract the searchable text for one message. We index the user-visible
+// content plus a stringified form of any tool_calls so a search for the
+// command/path the model ran lands on the calling turn.
+static std::string TextForMessage(const nlohmann::json& m) {
+    if (!m.is_object()) return {};
+    std::string s;
+    if (m.contains("content") && m["content"].is_string()) {
+        s = m["content"].get<std::string>();
     }
-    return true;
+    if (m.contains("tool_calls") && m["tool_calls"].is_array()) {
+        for (const auto& tc : m["tool_calls"]) {
+            if (!tc.is_object() || !tc.contains("function")) continue;
+            const auto& fn = tc["function"];
+            if (!s.empty()) s += '\n';
+            s += "[tool ";
+            if (fn.contains("name") && fn["name"].is_string())
+                s += fn["name"].get<std::string>();
+            if (fn.contains("arguments") && fn["arguments"].is_string()) {
+                s += ' ';
+                s += fn["arguments"].get<std::string>();
+            }
+            s += ']';
+        }
+    }
+    return s;
 }
 
 bool MemoryDB::RebuildSession(const std::string& session_id,
                               const std::string& cwd,
-                              const std::vector<ChatMessage>& history,
+                              const nlohmann::json& messages,
                               const std::string& timestamp) {
     std::lock_guard<std::mutex> lk(mu_);
     if (!db_) return false;
+    if (!messages.is_array()) return false;
 
     Exec("BEGIN");
-    // Inline ClearSession to avoid taking the mutex twice.
     {
         sqlite3_stmt* del = nullptr;
         if (sqlite3_prepare_v2(db_,
@@ -191,21 +196,24 @@ bool MemoryDB::RebuildSession(const std::string& session_id,
         return false;
     }
 
-    for (size_t i = 0; i < history.size(); i++) {
-        const auto& m = history[i];
-        if (m.content.empty()) continue;
+    int idx = 0;
+    for (const auto& m : messages) {
+        std::string role = m.is_object() ? m.value("role", std::string{}) : "";
+        std::string text = TextForMessage(m);
+        if (text.empty() || role == "system") { ++idx; continue; }
         sqlite3_reset(ins);
         sqlite3_bind_text(ins, 1, cwd.c_str(), -1, SQLITE_TRANSIENT);
-        sqlite3_bind_text(ins, 2, m.content.c_str(), -1, SQLITE_TRANSIENT);
-        sqlite3_bind_text(ins, 3, m.role.c_str(), -1, SQLITE_TRANSIENT);
+        sqlite3_bind_text(ins, 2, text.c_str(), -1, SQLITE_TRANSIENT);
+        sqlite3_bind_text(ins, 3, role.c_str(), -1, SQLITE_TRANSIENT);
         sqlite3_bind_text(ins, 4, session_id.c_str(), -1, SQLITE_TRANSIENT);
-        sqlite3_bind_int (ins, 5, (int)i);
+        sqlite3_bind_int (ins, 5, idx);
         sqlite3_bind_text(ins, 6, timestamp.c_str(), -1, SQLITE_TRANSIENT);
         if (sqlite3_step(ins) != SQLITE_DONE) {
             sqlite3_finalize(ins);
             Exec("ROLLBACK");
             return false;
         }
+        ++idx;
     }
     sqlite3_finalize(ins);
     Exec("COMMIT");
@@ -213,12 +221,9 @@ bool MemoryDB::RebuildSession(const std::string& session_id,
 }
 
 // Per-hit and total caps for Fetch output. Claude's MCP client spills anything
-// over ~25k tokens (~87k chars) to a file, so keep well under that.
+// over ~25k tokens (~87k chars) to a file, so stay well under that.
 static constexpr size_t kMaxFetchHitChars = 4000;
 static constexpr size_t kMaxFetchTotalChars = 20000;
-
-// Search snippets are already small (FTS5 snippet() capped at ~20 tokens each),
-// but we still guard against a runaway limit request from the caller.
 static constexpr size_t kMaxSearchTotalChars = 8000;
 
 static std::string TruncateUtf8(const std::string& s, size_t max_bytes) {
@@ -247,7 +252,6 @@ std::string MemoryDB::FormatSearchHits(const std::vector<Hit>& hits) {
         entry += "session_id: " + h.session_id +
                  "  turn_index: " + std::to_string(h.turn_index) +
                  "  full_chars: " + std::to_string(h.full_chars) + "\n";
-        // Snippets come from FTS5 snippet() — [term] highlights the matches.
         entry += h.text;
         if (!entry.empty() && entry.back() != '\n') entry += '\n';
         entry += '\n';
@@ -314,10 +318,7 @@ std::vector<MemoryDB::Hit> MemoryDB::Search(const std::string& query,
 
     sqlite3_stmt* stmt = nullptr;
     int rc = sqlite3_prepare_v2(db_, sql.c_str(), -1, &stmt, nullptr);
-    if (rc != SQLITE_OK) {
-        DLOG("MemoryDB Search prepare failed: %s", sqlite3_errmsg(db_));
-        return out;
-    }
+    if (rc != SQLITE_OK) return out;
     int idx = 1;
     sqlite3_bind_text(stmt, idx++, query.c_str(), -1, SQLITE_TRANSIENT);
     if (!exclude_session_id.empty())
@@ -332,7 +333,7 @@ std::vector<MemoryDB::Hit> MemoryDB::Search(const std::string& query,
         };
         h.cwd        = sv(0);
         h.role       = sv(1);
-        h.text       = sv(2);  // snippet
+        h.text       = sv(2);
         h.session_id = sv(3);
         h.turn_index = sqlite3_column_int(stmt, 4);
         h.timestamp  = sv(5);
@@ -368,10 +369,7 @@ std::vector<MemoryDB::Hit> MemoryDB::Fetch(const std::string& session_id,
         "ORDER BY turn_index ASC";
     sqlite3_stmt* stmt = nullptr;
     int rc = sqlite3_prepare_v2(db_, sql, -1, &stmt, nullptr);
-    if (rc != SQLITE_OK) {
-        DLOG("MemoryDB Fetch prepare failed: %s", sqlite3_errmsg(db_));
-        return out;
-    }
+    if (rc != SQLITE_OK) return out;
     sqlite3_bind_text(stmt, 1, session_id.c_str(), -1, SQLITE_TRANSIENT);
     sqlite3_bind_int (stmt, 2, lo);
     sqlite3_bind_int (stmt, 3, hi);
@@ -384,7 +382,7 @@ std::vector<MemoryDB::Hit> MemoryDB::Fetch(const std::string& session_id,
         };
         h.cwd        = sv(0);
         h.role       = sv(1);
-        h.text       = sv(2);  // full turn text
+        h.text       = sv(2);
         h.session_id = sv(3);
         h.turn_index = sqlite3_column_int(stmt, 4);
         h.timestamp  = sv(5);

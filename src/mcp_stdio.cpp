@@ -1,54 +1,36 @@
-// Gritcode — GPU-rendered AI coding harness
-// Copyright (C) 2026 luke@devmindscape.com
-//
-// This program is free software: you can redistribute it and/or modify
-// it under the terms of the GNU General Public License as published by
-// the Free Software Foundation, either version 3 of the License, or
-// (at your option) any later version.
-//
-// This program is distributed in the hope that it will be useful,
-// but WITHOUT ANY WARRANTY; without even the implied warranty of
-// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
-// GNU General Public License for more details.
-//
-// You should have received a copy of the GNU General Public License
-// along with this program. If not, see <https://www.gnu.org/licenses/>.
-
 #include "mcp_stdio.h"
 #include "memory.h"
 
 #include <nlohmann/json.hpp>
 #include <cstdio>
-#include <cstring>
-#include <string>
 #include <iostream>
+#include <string>
 
 using json = nlohmann::json;
 
-// Protocol version we advertise. Claude CLI's current `initialize` call uses
-// "2024-11-05"; the MCP spec allows the server to pick a version it supports
-// and the client adapts. We just echo back whatever they sent, which is the
-// recommended fallback behavior.
+// Echoed back in initialize replies. Claude's stdio client picks whatever the
+// server sends and adapts. "2025-03-26" is the value other gritcode binaries
+// already use.
 static constexpr const char* kMcpProtocolVersion = "2025-03-26";
 
 static json SearchToolDef() {
     return {
         {"name", "grit_history_search"},
         {"description",
-         "Search the transcripts of past gritcode conversations across every "
-         "project the user has worked on. This is the AUTHORITATIVE source of "
-         "prior-conversation recall in gritcode — use it first whenever the "
-         "user references any past work (\"last time\", \"once again\", \"we "
-         "had\", \"how did we\", \"in <project>\", \"that thing from <name>\"). "
-         "Do NOT try to list any memory directory under ~/.claude — that is "
-         "unrelated and unused here. "
-         "Query budget: typically 1-3 searches per user question. Start with "
-         "ONE broad keyword query; only run more if the first returned strong "
-         "hits that suggest specific follow-ups. If a search returns no "
-         "clearly relevant hits, STOP and answer from what you have (or ask "
-         "the user) — do not fire speculative variant queries. "
-         "Query: 2-5 keywords. Returns short snippets (~20-token window) with "
-         "session_id, turn_index, and full_chars size. Follow up with "
+         "Search the transcripts of past wx_gritcode conversations across "
+         "every project the user has worked on. This is the AUTHORITATIVE "
+         "source of prior-conversation recall — use it first whenever the "
+         "user references any past work (\"last time\", \"once again\", "
+         "\"we had\", \"how did we\", \"in <project>\", \"that thing from "
+         "<name>\"). Do NOT try to list any memory directory under "
+         "~/.claude — that is unrelated and unused here. "
+         "Query budget: typically 1-3 searches per user question. Start "
+         "with ONE broad keyword query; only run more if the first returned "
+         "strong hits that suggest specific follow-ups. If a search returns "
+         "no clearly relevant hits, STOP and answer from what you have (or "
+         "ask the user) — do not fire speculative variant queries. "
+         "Query: 2-5 keywords. Returns short snippets (~20-token window) "
+         "with session_id, turn_index, and full_chars. Follow up with "
          "grit_history_fetch to read the full turn + surrounding context."},
         {"inputSchema", {
             {"type", "object"},
@@ -72,11 +54,11 @@ static json FetchToolDef() {
     return {
         {"name", "grit_history_fetch"},
         {"description",
-         "Read the full text of a specific past turn plus a window of surrounding "
-         "turns. Use after grit_history_search when a snippet looks relevant and you "
-         "need the surrounding conversation. session_id + turn_index come "
-         "directly from a grit_history_search hit. Default window is 2 turns before "
-         "+ 2 after (5 total)."},
+         "Read the full text of a specific past turn plus a window of "
+         "surrounding turns. Use after grit_history_search when a snippet "
+         "looks relevant and you need the surrounding conversation. "
+         "session_id + turn_index come directly from a grit_history_search "
+         "hit. Default window is 2 turns before + 2 after (5 total)."},
         {"inputSchema", {
             {"type", "object"},
             {"properties", {
@@ -109,13 +91,13 @@ static json MakeResult(const json& id, const json& result) {
 }
 
 static json MakeError(const json& id, int code, const std::string& msg) {
-    return {{"jsonrpc", "2.0"}, {"id", id}, {"error", {{"code", code}, {"message", msg}}}};
+    return {{"jsonrpc", "2.0"}, {"id", id},
+            {"error", {{"code", code}, {"message", msg}}}};
 }
 
 int RunMcpStdioServer() {
-    // Ensure stdout is line-buffered so each response flushes as soon as it's
-    // written. Claude's stdio MCP client reads one line at a time and hangs
-    // otherwise.
+    // Line-buffered stdout: Claude's stdio MCP client reads one line at a
+    // time and hangs if the response isn't flushed immediately.
     std::setvbuf(stdout, nullptr, _IOLBF, 0);
 
     MemoryDB memory;
@@ -128,13 +110,11 @@ int RunMcpStdioServer() {
         try {
             req = json::parse(line);
         } catch (...) {
-            // Can't respond without an id; just log to stderr and continue.
-            std::fprintf(stderr, "grit-mcp-stdio: parse error on input\n");
+            std::fprintf(stderr, "wx_gritcode --mcp-stdio: parse error\n");
             continue;
         }
 
-        // Notifications have no id — we just swallow them (initialized,
-        // cancelled, etc.).
+        // Notifications have no id — swallow them (initialized, cancelled, …).
         if (!req.contains("id")) continue;
         json id = req["id"];
         std::string method = req.value("method", "");

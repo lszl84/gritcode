@@ -1,0 +1,2108 @@
+#include "chat_canvas.h"
+#include "perf_log.h"
+#include <wx/dcbuffer.h>
+#include <wx/clipbrd.h>
+#include <wx/dataobj.h>
+#include <wx/dcgraph.h>
+#include <wx/settings.h>
+#include <wx/utils.h>
+#include <algorithm>
+#include <cmath>
+
+#ifdef __WXGTK__
+#include <gtk/gtk.h>
+#endif
+
+namespace {
+
+constexpr int kSideMargin    = 24;
+constexpr int kTopMargin     = 16;
+constexpr int kBottomMargin  = 24;
+constexpr int kBlockSpacing  = 10;
+constexpr int kHeadingSpacing = 18;
+constexpr int kCodePadding   = 12;
+constexpr int kUserBubblePad = 12;
+constexpr int kMaxContentW   = 720;  // chat-style center column
+constexpr int kTableCellPadX = 8;
+constexpr int kTableCellPadY = 4;
+constexpr int kTableMinColW  = 30;   // floor on per-column text width
+constexpr int kToolPadX      = 10;
+constexpr int kToolPadY      = 6;
+constexpr int kToolGap       = 4;    // space between header and body (when expanded)
+
+bool IsDarkMode() {
+    auto appearance = wxSystemSettings::GetAppearance();
+    if (appearance.IsDark()) return true;
+    if (appearance.IsUsingDarkBackground()) return true;
+#if wxCHECK_VERSION(3, 3, 0)
+    // IsSystemDark() was added in wx 3.3 for MSW. It checks system-wide
+    // dark mode even if the app hasn't opted in yet.
+    if (appearance.IsSystemDark()) return true;
+#endif
+    // Fallback: compare luminance of the system window background.
+    wxColour winBg = wxSystemSettings::GetColour(wxSYS_COLOUR_WINDOW);
+    int lum = (winBg.Red() * 299 + winBg.Green() * 587 + winBg.Blue() * 114) / 1000;
+    return lum < 128;
+}
+
+Palette MakePalette() {
+    Palette p;
+    if (IsDarkMode()) {
+        p.bg            = wxColour( 34,  34,  38);
+        p.text          = wxColour(255, 255, 255);
+        p.codeBg        = wxColour( 44,  44,  50);
+        p.codeFg        = wxColour(210, 215, 225);
+        p.userBubbleBg  = wxColour( 50,  72, 110);
+        p.selectionBg   = wxColour( 60,  90, 150);
+        p.thinkingDot   = wxColour(170, 170, 180);
+        p.tableBorder   = wxColour( 90,  90, 100);
+        p.tableHeaderBg = wxColour( 44,  44,  52);
+        p.toolHeaderBg  = wxColour( 50,  56,  70);
+        p.toolBodyBg    = wxColour( 40,  42,  50);
+        p.toolAccent    = wxColour(140, 200, 255);
+        p.toolDim       = wxColour(140, 145, 158);
+        p.thinkingBg    = wxColour( 42,  42,  48);
+        p.thinkingText  = wxColour(180, 180, 190);
+        p.thinkingAccent= wxColour(150, 155, 170);
+        p.linkColour    = wxColour(100, 180, 255);
+    } else {
+        p.bg            = wxColour(248, 248, 248);
+        p.text          = wxColour( 28,  28,  32);
+        p.codeBg        = wxColour(238, 238, 240);
+        p.codeFg        = wxColour( 48,  48,  60);
+        p.userBubbleBg  = wxColour(220, 232, 255);
+        p.selectionBg   = wxColour(170, 200, 255);
+        p.thinkingDot   = wxColour(120, 120, 128);
+        p.tableBorder   = wxColour(180, 180, 188);
+        p.tableHeaderBg = wxColour(232, 232, 236);
+        p.toolHeaderBg  = wxColour(228, 235, 245);
+        p.toolBodyBg    = wxColour(244, 246, 250);
+        p.toolAccent    = wxColour( 30,  90, 170);
+        p.toolDim       = wxColour(120, 130, 145);
+        p.thinkingBg    = wxColour(242, 242, 246);
+        p.thinkingText  = wxColour( 90,  90, 100);
+        p.thinkingAccent= wxColour(120, 125, 140);
+        p.linkColour    = wxColour( 20,  80, 180);
+    }
+    return p;
+}
+
+inline int ClampInt(int v, int lo, int hi) { return std::max(lo, std::min(hi, v)); }
+
+// Tokenize runs into atomic words and single-space tokens, tagging each with
+// its style and starting offset in `visibleText` (the concatenated run text).
+struct Tok {
+    wxString text;
+    bool isSpace = false;
+    bool isNewline = false;
+    InlineRun style;
+    int srcStart = 0;
+};
+
+std::vector<Tok> Tokenize(const std::vector<InlineRun>& runs) {
+    std::vector<Tok> toks;
+    int off = 0;
+    for (const auto& r : runs) {
+        size_t i = 0;
+        while (i < r.text.size()) {
+            if (r.text[i] == '\n') {
+                Tok t;
+                t.isNewline = true;
+                t.style = r;
+                t.style.text.Clear();
+                t.srcStart = off + (int)i;
+                toks.push_back(t);
+                ++i;
+            } else if (r.text[i] == ' ') {
+                Tok t;
+                t.text = " ";
+                t.isSpace = true;
+                t.style = r;
+                t.style.text.Clear();
+                t.srcStart = off + (int)i;
+                toks.push_back(t);
+                ++i;
+            } else {
+                size_t j = i;
+                while (j < r.text.size() && r.text[j] != ' ' && r.text[j] != '\n') ++j;
+                Tok t;
+                t.text = r.text.SubString(i, j - 1);
+                t.isSpace = false;
+                t.style = r;
+                t.style.text.Clear();
+                t.srcStart = off + (int)i;
+                toks.push_back(t);
+                i = j;
+            }
+        }
+        off += (int)r.text.size();
+    }
+    return toks;
+}
+
+// True if two run-styles match in formatting (text content ignored).
+bool SameStyle(const InlineRun& a, const InlineRun& b) {
+    return a.bold == b.bold && a.italic == b.italic && a.code == b.code && a.link == b.link;
+}
+
+enum {
+    ID_ANIM_TIMER = wxID_HIGHEST + 1,
+    ID_RESIZE_TIMER,
+};
+
+// Delay between the last EVT_SIZE and the deferred relayout. ~60ms is below
+// human perception of "feels laggy" while still coalescing the burst of size
+// events generated by a single drag.
+constexpr int kResizeDebounceMs = 60;
+
+}  // namespace
+
+wxBEGIN_EVENT_TABLE(ChatCanvas, wxScrolledCanvas)
+    EVT_PAINT(ChatCanvas::OnPaint)
+    EVT_SIZE(ChatCanvas::OnSize)
+    EVT_LEFT_DOWN(ChatCanvas::OnLeftDown)
+    EVT_LEFT_UP(ChatCanvas::OnLeftUp)
+    EVT_LEFT_DCLICK(ChatCanvas::OnLeftDClick)
+    EVT_MOTION(ChatCanvas::OnMotion)
+    EVT_KEY_DOWN(ChatCanvas::OnKeyDown)
+    EVT_TIMER(ID_ANIM_TIMER, ChatCanvas::OnAnimTick)
+    EVT_TIMER(ID_RESIZE_TIMER, ChatCanvas::OnResizeSettle)
+    EVT_SYS_COLOUR_CHANGED(ChatCanvas::OnSysColourChanged)
+    EVT_SCROLLWIN(ChatCanvas::OnScrollWin)
+    EVT_MOUSEWHEEL(ChatCanvas::OnMouseWheel)
+wxEND_EVENT_TABLE()
+
+ChatCanvas::ChatCanvas(wxWindow* parent)
+    : wxScrolledCanvas(parent, wxID_ANY, wxDefaultPosition, wxDefaultSize,
+                       wxBORDER_NONE | wxVSCROLL),
+      animTimer_(this, ID_ANIM_TIMER),
+      resizeTimer_(this, ID_RESIZE_TIMER) {
+    SetBackgroundStyle(wxBG_STYLE_PAINT);
+    RebuildPalette();
+    SetScrollRate(0, 16);
+    EnableScrolling(false, true);
+
+#ifdef __WXGTK__
+    // Disable GTK theme animations on this widget. Some GTK themes drive
+    // continuous frame-clock invalidations on widgets that are merely under
+    // the mouse cursor (CSS hover transitions, focus pulse, etc.), which
+    // shows up as a 20–40 Hz idle paint storm on a custom-painted canvas.
+    if (GtkWidget* w = GetHandle()) {
+        if (GtkSettings* s = gtk_widget_get_settings(w)) {
+            g_object_set(s, "gtk-enable-animations", FALSE, NULL);
+        }
+    }
+#endif
+}
+
+void ChatCanvas::RebuildPalette() {
+    palette_ = MakePalette();
+    SetBackgroundColour(palette_.bg);
+}
+
+void ChatCanvas::EnsureFonts() {
+    if (fontsReady_) return;
+#ifdef __APPLE__
+    const int bodySz = 14;
+    const int codeSz = 13;
+    static const int hSizes[6] = {24, 21, 18, 16, 15, 14};
+#else
+    const int bodySz = 12;
+    const int codeSz = 11;
+    static const int hSizes[6] = {22, 19, 16, 14, 13, 12};
+#endif
+    fontBody_ = wxFont(wxFontInfo(bodySz).Family(wxFONTFAMILY_DEFAULT));
+    fontBodyBold_ = wxFont(wxFontInfo(bodySz).Family(wxFONTFAMILY_DEFAULT).Bold());
+    fontBodyItalic_ = wxFont(wxFontInfo(bodySz).Family(wxFONTFAMILY_DEFAULT).Italic());
+    fontBodyBoldItalic_ = wxFont(wxFontInfo(bodySz).Family(wxFONTFAMILY_DEFAULT).Bold().Italic());
+    fontCode_ = wxFont(wxFontInfo(codeSz).Family(wxFONTFAMILY_TELETYPE));
+    fontThinking_ = wxFont(wxFontInfo(codeSz).Family(wxFONTFAMILY_DEFAULT).Italic());
+
+    for (int i = 0; i < 6; ++i) {
+        fontH_[i]  = wxFont(wxFontInfo(hSizes[i]).Family(wxFONTFAMILY_DEFAULT).Bold());
+        fontHB_[i] = wxFont(wxFontInfo(hSizes[i]).Family(wxFONTFAMILY_DEFAULT).Bold());
+    }
+    fontsReady_ = true;
+}
+
+const wxFont& ChatCanvas::FontFor(const InlineRun& r, BlockType bt, int hLvl) const {
+    if (r.code) return fontCode_;
+    if (bt == BlockType::Heading) {
+        int idx = ClampInt(hLvl - 1, 0, 5);
+        return fontH_[idx];
+    }
+    if (bt == BlockType::Thinking) return fontThinking_;
+    if (r.bold && r.italic) return fontBodyBoldItalic_;
+    if (r.bold) return fontBodyBold_;
+    if (r.italic) return fontBodyItalic_;
+    return fontBody_;
+}
+
+void ChatCanvas::ToggleToolCall(int blockIdx) {
+    if (blockIdx < 0 || blockIdx >= (int)blocks_.size()) return;
+    Block& b = blocks_[blockIdx];
+    if (b.type != BlockType::ToolCall && b.type != BlockType::Thinking) return;
+    b.toolExpanded = !b.toolExpanded;
+    // Only this one block's height changed. Invalidate it and let Relayout
+    // patch the offset table — every other block keeps its layout cache.
+    b.cachedWidth = -1;
+    layoutDirty_ = true;
+    Relayout(GetClientSize().x);
+    Refresh();
+}
+
+void ChatCanvas::AddBlock(Block b) {
+    // The new block hasn't been laid out yet; the existing blocks are already
+    // laid out at the current width. Relayout's per-block guard makes this
+    // O(1) instead of O(N) per AddBlock — important during streaming where
+    // blocks land in rapid succession.
+    blocks_.push_back(std::move(b));
+    layoutDirty_ = true;
+    Relayout(GetClientSize().x);
+    if (stickToBottom_) {
+        int xu, yu;
+        GetScrollPixelsPerUnit(&xu, &yu);
+        if (yu > 0) Scroll(0, contentHeight_ / yu);
+    }
+    Refresh();
+}
+
+void ChatCanvas::UpdateStickToBottom() {
+    int xu, yu;
+    GetScrollPixelsPerUnit(&xu, &yu);
+    if (yu <= 0) { stickToBottom_ = true; return; }
+    int vx, vy;
+    GetViewStart(&vx, &vy);
+    int viewY = vy * yu;
+    int clientH = GetClientSize().y;
+    int virtualH = GetVirtualSize().y;
+    // ~2 lines of slack so the user doesn't have to land pixel-perfect.
+    const int kThreshold = 40;
+    stickToBottom_ = (viewY + clientH >= virtualH - kThreshold);
+}
+
+void ChatCanvas::OnScrollWin(wxScrollWinEvent& e) {
+    e.Skip();
+    CallAfter([this]{ UpdateStickToBottom(); });
+}
+
+void ChatCanvas::OnMouseWheel(wxMouseEvent& e) {
+    e.Skip();
+    CallAfter([this]{ UpdateStickToBottom(); });
+}
+
+void ChatCanvas::SetThinking(bool on) {
+    if (thinking_ == on) return;
+    thinking_ = on;
+    if (on) {
+        animTimer_.Start(80);
+    } else {
+        animTimer_.Stop();
+    }
+    // Thinking dots are positioned below the last block; toggling them only
+    // changes total content height, not any block's layout. Bump the virtual
+    // height directly instead of forcing a full relayout.
+    int extra = on ? (kBlockSpacing + 24) : -(kBlockSpacing + 24);
+    contentHeight_ += extra;
+    if (layoutWidth_ > 0) SetVirtualSize(layoutWidth_, contentHeight_);
+    Refresh();
+}
+
+void ChatCanvas::Clear() {
+    blocks_.clear();
+    selAnchor_ = selCaret_ = {};
+    layoutWidth_ = -1;
+    contentHeight_ = 0;
+    layoutDirty_ = true;
+    blockTops_.clear();
+    Refresh();
+}
+
+void ChatCanvas::OnAnimTick(wxTimerEvent&) {
+    animPhase_ += 0.12;
+    if (dotsRectValid_) {
+        // Only the 3 dots change between ticks — invalidate just that rect
+        // (converted from canvas to client coords) instead of the whole window.
+        int sx, sy;
+        CalcScrolledPosition(dotsRect_.x, dotsRect_.y, &sx, &sy);
+        RefreshRect(wxRect(sx, sy, dotsRect_.width, dotsRect_.height));
+    } else {
+        Refresh();
+    }
+}
+
+void ChatCanvas::OnSize(wxSizeEvent& e) {
+    // Debounce: relayout is the expensive part (re-wraps every block, walks
+    // every table column). Doing it on each pixel of a window drag stalls
+    // the resize. Just kick the timer; OnPaint will reuse the cached layout
+    // and re-center it at the new client width until the timer fires.
+    resizeTimer_.Start(kResizeDebounceMs, wxTIMER_ONE_SHOT);
+    Refresh();
+    e.Skip();
+}
+
+void ChatCanvas::OnResizeSettle(wxTimerEvent&) {
+    layoutWidth_ = -1;
+    layoutDirty_ = true;
+    Refresh();
+}
+
+// ---------- Layout ----------
+
+void ChatCanvas::LayoutBlock(wxDC& dc, Block& b, int contentWidth, int /*topSpacing*/) const {
+    PERF_SCOPE_T("LayoutBlock", 2000);
+    b.lines.clear();
+    b.cachedWidth = contentWidth;
+
+    const int hLvl = b.headingLevel;
+
+    if (b.type == BlockType::CodeBlock) {
+        // Source text already excludes the fences themselves (md_parser strips
+        // them). Trim trailing newline so we don't render an empty last line.
+        wxString src = b.rawText;
+        if (!src.IsEmpty() && src.Last() == '\n') src.RemoveLast();
+        int maxW = contentWidth - 2 * kCodePadding;
+        if (maxW < 50) maxW = 50;
+        WrapMonospace(dc, src, maxW, b.lines, 0);
+        int h = kCodePadding * 2;
+        for (const auto& wl : b.lines) h += wl.height;
+        b.cachedHeight = h;
+        return;
+    }
+
+    if (b.type == BlockType::Table) {
+        const int N = (int)b.tableAligns.size();
+        if (N == 0 || b.tableRows.empty()) {
+            b.cachedHeight = 0;
+            return;
+        }
+
+        // Per-column natural (single-line) widths — max across all rows.
+        std::vector<int> prefCol(N, 0);
+        auto cellNatural = [&](const TableCell& c, bool header) {
+            // Tokenize directly off cell runs and sum widths. Bold for header.
+            int w = 0;
+            std::vector<InlineRun> tmp = c.runs;
+            if (header) for (auto& r : tmp) r.bold = true;
+            auto toks = Tokenize(tmp);
+            for (auto& t : toks) {
+                const wxFont& f = FontFor(t.style, BlockType::Paragraph, 0);
+                dc.SetFont(f);
+                wxCoord ww = 0, hh = 0;
+                dc.GetTextExtent(t.text, &ww, &hh);
+                w += ww;
+            }
+            return w;
+        };
+        for (size_t r = 0; r < b.tableRows.size(); ++r) {
+            for (int c = 0; c < N && c < (int)b.tableRows[r].size(); ++c) {
+                int w = cellNatural(b.tableRows[r][c], r == 0);
+                if (w > prefCol[c]) prefCol[c] = w;
+            }
+        }
+
+        // Allocate text widths proportionally. Floor each at kTableMinColW.
+        const int gridOverhead = (N + 1) + 2 * kTableCellPadX * N;
+        int availTextW = contentWidth - gridOverhead;
+        if (availTextW < kTableMinColW * N) availTextW = kTableMinColW * N;
+
+        long sumPref = 0;
+        for (int c = 0; c < N; ++c) sumPref += std::max(1, prefCol[c]);
+
+        std::vector<int> textW(N);
+        int used = 0;
+        for (int c = 0; c < N - 1; ++c) {
+            int w = (int)((double)availTextW * std::max(1, prefCol[c]) / (double)sumPref);
+            if (w < kTableMinColW) w = kTableMinColW;
+            textW[c] = w;
+            used += w;
+        }
+        textW[N - 1] = std::max(kTableMinColW, availTextW - used);
+
+        // Wrap each cell at its column's textW; collect row heights.
+        std::vector<int> rowH(b.tableRows.size(), 0);
+        for (size_t r = 0; r < b.tableRows.size(); ++r) {
+            for (int c = 0; c < N && c < (int)b.tableRows[r].size(); ++c) {
+                TableCell& cell = b.tableRows[r][c];
+                cell.lines.clear();
+                std::vector<InlineRun> runs = cell.runs;
+                if (r == 0) for (auto& rr : runs) rr.bold = true;
+                WrapRuns(dc, runs, BlockType::Paragraph, 0, textW[c], cell.lines);
+                int h = 0;
+                for (const auto& wl : cell.lines) h += wl.height;
+                if (h == 0) {
+                    // Empty cell still needs a single line of height for the row.
+                    dc.SetFont(fontBody_);
+                    wxCoord ww = 0, hh = 0;
+                    dc.GetTextExtent("Hg", &ww, &hh);
+                    h = hh;
+                }
+                cell.height = h;
+                if (h > rowH[r]) rowH[r] = h;
+            }
+        }
+
+        // Build column X edges and row Y edges (block-local).
+        b.tableColX.assign(N + 1, 0);
+        for (int c = 0; c < N; ++c) {
+            b.tableColX[c + 1] = b.tableColX[c] + 1 + kTableCellPadX + textW[c] + kTableCellPadX;
+        }
+        b.tableRowY.assign(b.tableRows.size() + 1, 0);
+        for (size_t r = 0; r < b.tableRows.size(); ++r) {
+            b.tableRowY[r + 1] = b.tableRowY[r] + 1 + kTableCellPadY + rowH[r] + kTableCellPadY;
+        }
+        // Total block height = last row's bottom edge + 1px bottom border.
+        b.cachedHeight = b.tableRowY.back() + 1;
+        return;
+    }
+
+    if (b.type == BlockType::Thinking) {
+        // Body lines: wrap the reasoning text as italic runs. WrapRuns picks
+        // fontThinking_ via FontFor(BlockType::Thinking). Inner width matches
+        // the padding rhythm of tool blocks.
+        int innerW = contentWidth - kToolPadX * 2;
+        if (innerW < 50) innerW = 50;
+        std::vector<InlineRun> runs;
+        InlineRun r;
+        r.text = b.rawText;
+        r.italic = true;
+        runs.push_back(r);
+        b.lines.clear();
+        WrapRuns(dc, runs, BlockType::Thinking, 0, innerW, b.lines);
+
+        // Single-line mode: no embedded newlines AND wraps to one visual line.
+        // Render the body inline (no chevron, no toggle).
+        const bool hasNewline = (b.rawText.Find('\n') != wxNOT_FOUND);
+        b.thinkingSingleLine = (!hasNewline && b.lines.size() <= 1);
+
+        dc.SetFont(fontThinking_);
+        int lineH = dc.GetCharHeight();
+        // Chevron size for the expand/collapse triangle (drawn, not text).
+        // Sized to ~2/3 of char height so it looks like a small indicator,
+        // not a giant triangle.
+        b.toolChevStr = wxString(b.toolExpanded ? L'▾' : L'▸') + " ";
+        b.toolChevW = lineH * 2 / 3;
+
+        if (b.thinkingSingleLine) {
+            // Single line — height = padding + lineH.
+            b.toolHeaderH = 0;
+            int h = kToolPadY * 2;
+            if (!b.lines.empty()) h += b.lines.front().height;
+            else h += lineH;
+            b.cachedHeight = h;
+        } else if (!b.toolExpanded) {
+            // Collapsed multi-line: only the "▸ Thinking" header is drawn.
+            b.toolHeaderH = lineH + kToolPadY * 2;
+            b.cachedHeight = b.toolHeaderH;
+        } else {
+            // Expanded multi-line: header + gap + body lines (each with own height).
+            b.toolHeaderH = lineH + kToolPadY * 2;
+            int bodyH = 0;
+            for (const auto& wl : b.lines) bodyH += wl.height;
+            // Bottom padding for the body region (top padding for the body
+            // region is the kToolGap below the header).
+            b.cachedHeight = b.toolHeaderH + kToolGap + bodyH + kToolPadY;
+        }
+        return;
+    }
+
+    if (b.type == BlockType::ToolCall) {
+        dc.SetFont(fontCode_);
+        int charH = dc.GetCharHeight();
+        b.toolHeaderH = charH + kToolPadY * 2;
+        b.lines.clear();
+
+        // Pre-measure the static parts of the header so PaintBlock has no
+        // GetTextExtent calls. The big perf win here is the args truncation —
+        // for write_file/edit_file calls toolArgs can be 1000+ chars, and
+        // calling GetPartialTextExtents on that every paint costs ~35ms.
+        b.toolChevStr = wxString(b.toolExpanded ? L'▾' : L'▸') + " ";
+        b.toolChevW = dc.GetCharHeight() * 2 / 3;
+        wxCoord nw = 0, nh = 0;
+        dc.GetTextExtent(b.toolName, &nw, &nh);
+        b.toolNameW = nw;
+
+        // Hint (collapsed only): "· N lines" or "· ok".
+        b.toolHint.clear();
+        b.toolHintW = 0;
+        if (!b.toolExpanded) {
+            int nlines = 1;
+            for (size_t i = 0; i < b.toolResult.size(); ++i)
+                if (b.toolResult[i] == '\n') ++nlines;
+            if (b.toolResult.IsEmpty()) nlines = 0;
+            if (nlines > 1) {
+                b.toolHint = wxString::FromUTF8(" · ");
+                b.toolHint << nlines << " lines";
+            } else if (!b.toolResult.IsEmpty()) {
+                b.toolHint = wxString::FromUTF8(" · ok");
+            }
+            if (!b.toolHint.IsEmpty()) {
+                wxCoord hw = 0, hh = 0;
+                dc.GetTextExtent(b.toolHint, &hw, &hh);
+                b.toolHintW = hw;
+            }
+        }
+
+        // Truncate args to fit. Only the first ~maxChars are ever visible; for
+        // 1000+ char args we used to feed the whole string to GetPartialTextExtents
+        // which is the dominant paint cost. Cap by character count first using a
+        // generous estimate of avg char width, then measure only the candidate
+        // prefix.
+        const int argsX = kToolPadX + b.toolChevW + b.toolNameW;
+        int rightLimit = contentWidth - kToolPadX;
+        int argsAvail = rightLimit - argsX - b.toolHintW;
+        if (argsAvail < 20) argsAvail = 20;
+        b.toolArgsX = argsX;
+
+        // Estimate the worst-case char width with two reference glyphs and
+        // pick the smaller (so we don't undercount narrow chars).
+        wxCoord refW = 0, refH = 0;
+        dc.GetTextExtent("M", &refW, &refH);
+        int minCharW = refW > 0 ? refW : 8;
+        // Hard cap: at minimum char width, this many chars *could* fit. Add
+        // generous margin for narrow chars + the leading "(" + trailing ")".
+        size_t maxChars = (size_t)(argsAvail / std::max(1, minCharW / 2)) + 4;
+        if (maxChars > b.toolArgs.size() + 2) maxChars = b.toolArgs.size() + 2;
+
+        wxString argsDisplay = "(" + b.toolArgs.Left(maxChars) + ")";
+        wxCoord aw = 0, ah = 0;
+        dc.GetTextExtent(argsDisplay, &aw, &ah);
+        // toolHeaderVisCharsInArgs = number of leading chars in toolArgsFit
+        // that still map 1:1 to source ("(prefix"). The trailing "…)" maps
+        // to the full header end. For the non-truncated case, all chars
+        // map 1:1 so this equals toolArgsFit.size().
+        int toolHeaderVisCharsInArgs = 0;
+        if (aw <= argsAvail && b.toolArgs.size() <= maxChars) {
+            // Whole args fit — no truncation needed.
+            b.toolArgsFit = "(" + b.toolArgs + ")";
+            toolHeaderVisCharsInArgs = (int)b.toolArgsFit.size();
+        } else {
+            // Need to truncate. Measure only the capped candidate.
+            const wxString ell = "…)";
+            wxCoord ellW = 0, ellH = 0;
+            dc.GetTextExtent(ell, &ellW, &ellH);
+            int budget = argsAvail - ellW;
+            if (budget < 1) budget = 1;
+            wxArrayInt parts;
+            dc.GetPartialTextExtents(argsDisplay, parts);
+            size_t cut = argsDisplay.size();
+            for (size_t i = 0; i < parts.size(); ++i) {
+                if (parts[i] > budget) { cut = i; break; }
+            }
+            b.toolArgsFit = argsDisplay.Left(cut) + ell;
+            toolHeaderVisCharsInArgs = (int)cut;
+        }
+
+        // Header selection geometry. Displayed header text is
+        // toolName + toolArgsFit, drawn starting at xName. glyphX has
+        // one entry per char boundary so HitTest/Paint can map a pixel
+        // x to a char index in O(log n) (linear scan is fine here).
+        // toolHeaderSrcLen is the *full* untruncated header length.
+        // toolHeaderVisChars: chars in displayed header that map 1:1
+        // to source — anything past this (i.e. the "…)" tail) maps to
+        // toolHeaderSrcLen on hit-test, and is treated as covering the
+        // hidden tail for selection-paint purposes.
+        b.toolHeaderSrcLen = (int)b.toolName.size() + 2 + (int)b.toolArgs.size();
+        b.toolHeaderVisChars = (int)b.toolName.size() + toolHeaderVisCharsInArgs;
+        wxString headerDisplay = b.toolName + b.toolArgsFit;
+        b.toolHeaderGlyphX.clear();
+        b.toolHeaderGlyphX.push_back(0);
+        if (!headerDisplay.IsEmpty()) {
+            wxArrayInt hparts;
+            dc.GetPartialTextExtents(headerDisplay, hparts);
+            for (auto p : hparts) b.toolHeaderGlyphX.push_back(p);
+        }
+
+        if (b.toolExpanded) {
+            // Body is just the result (no "args:" prefix — args is in the
+            // header now). Its WrappedLine.textStart/textEnd are offset by
+            // toolHeaderSrcLen + 2 (for the "\n\n" separator) so they index
+            // into visibleText.
+            int innerW = contentWidth - kToolPadX * 2;
+            if (innerW < 50) innerW = 50;
+            b.lines.clear();
+            const int bodyBase = b.toolHeaderSrcLen + 2;
+            WrapMonospace(dc, b.toolResult, innerW, b.lines, bodyBase);
+
+            int bodyH = 0;
+            for (const auto& wl : b.lines) bodyH += wl.height;
+            bodyH += kToolPadY * 2;
+            b.cachedHeight = b.toolHeaderH + kToolGap + bodyH;
+        } else {
+            b.cachedHeight = b.toolHeaderH;
+        }
+        return;
+    }
+
+    // Word-wrap path for Paragraph / Heading / UserPrompt.
+    int maxW = contentWidth;
+    if (b.type == BlockType::UserPrompt) {
+        maxW = contentWidth - kUserBubblePad * 2;
+    }
+
+    b.lines.clear();
+    WrapRuns(dc, b.runs, b.type, hLvl, maxW, b.lines);
+
+    int totalH = 0;
+    for (const auto& wl : b.lines) totalH += wl.height;
+    if (b.lines.empty()) {
+        const wxFont& f = FontFor({}, b.type, hLvl);
+        dc.SetFont(f);
+        wxCoord ww = 0, hh = 0;
+        dc.GetTextExtent("Hg", &ww, &hh);
+        totalH = hh;
+    }
+    if (b.type == BlockType::UserPrompt) totalH += kUserBubblePad * 2;
+    b.cachedHeight = totalH;
+}
+
+void ChatCanvas::WrapRuns(wxDC& dc, const std::vector<InlineRun>& runs,
+                          BlockType bt, int hLvl, int maxW,
+                          std::vector<WrappedLine>& outLines) const {
+    auto toks = Tokenize(runs);
+
+    WrappedLine cur;
+    cur.textStart = 0;
+    int curX = 0;
+    int lineHeight = 0;
+
+    auto styleFontHeight = [&]() {
+        const wxFont& f = FontFor({}, bt, hLvl);
+        wxCoord ww = 0, hh = 0;
+        dc.SetFont(f);
+        dc.GetTextExtent("Hg", &ww, &hh);
+        return hh;
+    };
+
+    auto measureToken = [&](const Tok& t) {
+        const wxFont& f = FontFor(t.style, bt, hLvl);
+        dc.SetFont(f);
+        wxCoord ww = 0, hh = 0;
+        dc.GetTextExtent(t.text, &ww, &hh);
+        return std::pair<int, int>{ww, hh};
+    };
+
+    auto appendToLine = [&](const Tok& t, int tw, int th) {
+        if (cur.runs.empty() || !SameStyle(cur.runs.back(), t.style)) {
+            InlineRun r = t.style;
+            r.text = t.text;
+            cur.runs.push_back(r);
+            cur.runX.push_back(curX);
+        } else {
+            cur.runs.back().text += t.text;
+        }
+        cur.text += t.text;
+        curX += tw;
+        if (th > lineHeight) lineHeight = th;
+    };
+
+    auto finalizeLine = [&]() {
+        if (cur.runs.empty() && cur.text.IsEmpty()) return;
+        cur.glyphX.clear();
+        cur.glyphX.push_back(0);
+        int xoff = 0;
+        for (const auto& r : cur.runs) {
+            const wxFont& f = FontFor(r, bt, hLvl);
+            dc.SetFont(f);
+            wxArrayInt parts;
+            dc.GetPartialTextExtents(r.text, parts);
+            for (auto p : parts) cur.glyphX.push_back(xoff + p);
+            xoff += parts.empty() ? 0 : parts.back();
+        }
+        cur.textEnd = cur.textStart + (int)cur.text.size();
+        cur.height = lineHeight > 0 ? lineHeight : styleFontHeight();
+        outLines.push_back(std::move(cur));
+        cur = WrappedLine();
+        cur.textStart = 0;
+        curX = 0;
+        lineHeight = 0;
+    };
+
+    for (size_t i = 0; i < toks.size(); ++i) {
+        const Tok& t = toks[i];
+
+        if (t.isNewline) {
+            // Hard line break. If the current visual line is empty, emit a
+            // blank line at the default font height so consecutive newlines
+            // render as visible empty rows.
+            if (cur.text.IsEmpty() && cur.runs.empty()) {
+                cur.height = styleFontHeight();
+                cur.textEnd = cur.textStart;
+                cur.glyphX.clear();
+                cur.glyphX.push_back(0);
+                outLines.push_back(std::move(cur));
+                cur = WrappedLine();
+            } else {
+                finalizeLine();
+            }
+            cur.textStart = t.srcStart + 1;
+            curX = 0;
+            lineHeight = 0;
+            continue;
+        }
+
+        auto [tw, th] = measureToken(t);
+
+        if (t.isSpace) {
+            if (curX == 0) {
+                cur.textStart = t.srcStart + 1;
+                continue;
+            }
+            if (curX + tw > maxW) {
+                finalizeLine();
+                cur.textStart = t.srcStart + 1;
+                continue;
+            }
+            appendToLine(t, tw, th);
+        } else if (tw <= maxW) {
+            if (curX > 0 && curX + tw > maxW) {
+                finalizeLine();
+            }
+            if (curX == 0) cur.textStart = t.srcStart;
+            appendToLine(t, tw, th);
+        } else {
+            // Single token wider than maxW (long URL, path, base64 blob, …).
+            // Split it at character boundaries so the line wraps instead of
+            // overflowing the content column.
+            const wxFont& f = FontFor(t.style, bt, hLvl);
+            dc.SetFont(f);
+            wxArrayInt parts;
+            dc.GetPartialTextExtents(t.text, parts);
+            size_t pos = 0;
+            while (pos < t.text.size()) {
+                int startW = (pos > 0) ? parts[pos - 1] : 0;
+                int avail = maxW - curX;
+                if (avail < 1) { finalizeLine(); avail = maxW; }
+                size_t j = pos;
+                while (j < t.text.size() && (parts[j] - startW) <= avail) ++j;
+                if (j == pos) {
+                    if (curX > 0) { finalizeLine(); continue; }
+                    j = pos + 1;  // ensure forward progress
+                }
+                Tok piece = t;
+                piece.text = t.text.SubString(pos, j - 1);
+                piece.srcStart = t.srcStart + (int)pos;
+                wxCoord pw = 0, ph = 0;
+                dc.GetTextExtent(piece.text, &pw, &ph);
+                if (curX == 0) cur.textStart = piece.srcStart;
+                appendToLine(piece, pw, ph);
+                pos = j;
+                if (pos < t.text.size()) finalizeLine();
+            }
+        }
+    }
+    finalizeLine();
+}
+
+void ChatCanvas::WrapMonospace(wxDC& dc, const wxString& text, int maxW,
+                               std::vector<WrappedLine>& outLines,
+                               int textOffBase) const {
+    dc.SetFont(fontCode_);
+    int charH = dc.GetCharHeight();
+
+    auto emitLine = [&](const wxString& seg, int srcStart) {
+        WrappedLine wl;
+        wl.text = seg;
+        wl.height = charH;
+        wl.textStart = textOffBase + srcStart;
+        wl.textEnd = wl.textStart + (int)seg.size();
+        InlineRun r;
+        r.text = seg;
+        r.code = true;
+        wl.runs.push_back(r);
+        wl.runX.push_back(0);
+        wl.glyphX.push_back(0);
+        if (!seg.IsEmpty()) {
+            wxArrayInt parts;
+            dc.GetPartialTextExtents(seg, parts);
+            for (auto p : parts) wl.glyphX.push_back(p);
+        }
+        outLines.push_back(std::move(wl));
+    };
+
+    size_t pos = 0;
+    while (pos <= text.size()) {
+        size_t nl = text.find('\n', pos);
+        wxString srcLine = (nl == wxString::npos) ? text.Mid(pos)
+                                                  : text.Mid(pos, nl - pos);
+        const int lineSrcStart = (int)pos;
+        if (srcLine.IsEmpty()) {
+            emitLine(wxString{}, lineSrcStart);
+        } else {
+            wxArrayInt parts;
+            dc.GetPartialTextExtents(srcLine, parts);
+            // parts[i] = pixel width of srcLine[0..i+1]
+
+            size_t i = 0;
+            while (i < srcLine.size()) {
+                int startW = (i > 0) ? parts[i - 1] : 0;
+                // Greedy: largest j where srcLine[i..j] fits in maxW.
+                size_t j = i;
+                while (j < srcLine.size() && (parts[j] - startW) <= maxW) ++j;
+                if (j == i) j = i + 1;  // ensure forward progress
+
+                size_t breakAt = j;
+                if (j < srcLine.size()) {
+                    // Soft-break preference: backtrack to last space in (i, j].
+                    for (size_t k = j; k > i + 1; --k) {
+                        if (srcLine[k - 1] == ' ') { breakAt = k; break; }
+                    }
+                }
+                emitLine(srcLine.SubString(i, breakAt - 1), lineSrcStart + (int)i);
+                i = breakAt;
+            }
+        }
+
+        if (nl == wxString::npos) break;
+        pos = nl + 1;
+    }
+}
+
+void ChatCanvas::Relayout(int width) {
+    PERF_SCOPE_T("Relayout", 1000);
+    EnsureFonts();
+
+    // O(1) fast path. Mutators flip layoutDirty_; nothing dirty + same width =
+    // nothing to do. Avoids the per-block cache scan on every paint/scroll.
+    if (!layoutDirty_ && width == layoutWidth_) return;
+
+    int contentW = std::min(width - 2 * kSideMargin, kMaxContentW);
+    if (contentW < 100) contentW = 100;
+
+    wxClientDC dc(this);
+    int y = kTopMargin;
+    int relaidCount = 0;
+    blockTops_.assign(blocks_.size() + 1, 0);
+    for (size_t i = 0; i < blocks_.size(); ++i) {
+        auto& b = blocks_[i];
+        int spacing = (b.type == BlockType::Heading) ? kHeadingSpacing : kBlockSpacing;
+        y += spacing;
+        // Per-block guard: skip blocks already laid out at this width.
+        // AddBlock and ToggleToolCall set b.cachedWidth = -1 on just the
+        // affected block; everyone else keeps its cached lines/heights.
+        if (b.cachedWidth != contentW) {
+            LayoutBlock(dc, b, contentW, spacing);
+            ++relaidCount;
+        }
+        blockTops_[i] = y;
+        y += b.cachedHeight;
+    }
+    if (!blockTops_.empty()) blockTops_.back() = y;
+    if (thinking_) y += kBlockSpacing + 24;
+    y += kBottomMargin;
+
+    contentHeight_ = y;
+    layoutWidth_ = width;
+    layoutDirty_ = false;
+
+    PERF_LOG("Relayout n=%d w=%d h=%d", relaidCount, width, contentHeight_);
+    SetVirtualSize(width, contentHeight_);
+}
+
+// ---------- Paint ----------
+
+void ChatCanvas::RenderViewport(wxDC& dc, int viewY, int width, int height,
+                                BlockPos selStart, BlockPos selEnd) const {
+    // Paints into `dc` in client coords (0..height). `viewY` is the canvas-coord
+    // y of the topmost visible pixel. Caller arranges scroll offset translation.
+    const Palette& pal = palette_;
+    dc.SetBackground(wxBrush(pal.bg));
+    dc.Clear();
+
+    int contentW = std::min(width - 2 * kSideMargin, kMaxContentW);
+    if (contentW < 100) contentW = 100;
+    int xLeft = (width - contentW) / 2;
+    if (xLeft < kSideMargin) xLeft = kSideMargin;
+
+    // Clip everything to the content column. While a resize is in flight we
+    // paint with a layout cached at the *previous* (wider) width — without a
+    // clip those over-wide lines spill into the side margins until the
+    // debounced relayout catches up.
+    dc.SetClippingRegion(xLeft, 0, contentW, height);
+
+    const int dirtyTop    = viewY;
+    const int dirtyBottom = viewY + height;
+
+    // Find the first block whose bottom edge is at or below dirtyTop. Use the
+    // cumulative-Y prefix so this is O(log N) instead of an O(N) walk.
+    size_t firstVisible = 0;
+    if (!blockTops_.empty() && (int)blocks_.size() + 1 == (int)blockTops_.size()) {
+        // blockTops_[i] = top of blocks_[i]; bottom = blockTops_[i] + cachedHeight.
+        // We need the smallest i such that blockTops_[i] + h(i) >= dirtyTop.
+        // Equivalently: skip blocks whose top + cachedHeight < dirtyTop.
+        // Binary-search on `blockTops_[i+1]` (which is the next block's top) >= dirtyTop.
+        auto it = std::lower_bound(blockTops_.begin() + 1, blockTops_.end(), dirtyTop);
+        if (it != blockTops_.end()) {
+            firstVisible = (size_t)(it - blockTops_.begin()) - 1;
+        } else {
+            firstVisible = blocks_.size();
+        }
+    }
+
+    int painted = 0;
+    for (size_t i = firstVisible; i < blocks_.size(); ++i) {
+        const Block& b = blocks_[i];
+        const int blockTop = blockTops_[i];
+        if (blockTop > dirtyBottom) break;
+        const int blockBottom = blockTop + b.cachedHeight;
+        // Translate canvas-coord block top to client coords for PaintBlock.
+        const int yTopClient = blockTop - viewY;
+        PaintBlock(dc, b, yTopClient, selStart, selEnd, (int)i);
+        (void)blockBottom;
+        ++painted;
+    }
+    dc.DestroyClippingRegion();
+    PERF_LOG("Render firstVis=%zu painted=%d", firstVisible, painted);
+}
+
+void ChatCanvas::OnPaint(wxPaintEvent&) {
+    PERF_SCOPE_T("OnPaint", 50);
+
+    EnsureFonts();
+    wxSize sz = GetClientSize();
+    // While a resize is in flight, paint the cached layout (just re-centered
+    // at the new client width) instead of re-wrapping every block per frame.
+    // OnResizeSettle flips layoutDirty_ once the drag stops and triggers the
+    // real relayout. Genuine invalidations (AddBlock, ToggleToolCall, theme
+    // change) already mark the layout dirty, so they take the slow path here.
+    const int layoutW = (layoutWidth_ > 0 && !layoutDirty_) ? layoutWidth_ : sz.x;
+    Relayout(layoutW);
+
+    // Read scroll offset.
+    int xu, yu;
+    GetScrollPixelsPerUnit(&xu, &yu);
+    int vx, vy;
+    GetViewStart(&vx, &vy);
+    const int viewY = (yu > 0) ? vy * yu : 0;
+
+    BlockPos selStart = selAnchor_, selEnd = selCaret_;
+    if (selEnd < selStart) std::swap(selStart, selEnd);
+
+    // wxAutoBufferedPaintDC manages a DPI-correct backing buffer per platform.
+    // Painting a custom wxBitmap and blitting ourselves was wrong on HiDPI:
+    // the bitmap was sized in logical pixels but the screen has more physical
+    // pixels, so the blit was upscaled and text came out pixelated.
+    wxAutoBufferedPaintDC dc(this);
+
+    // Use Direct2D on Windows for anti-aliased circles and proper
+    // font fallback (emoji, Unicode). Falls back to plain wxDC if
+    // Direct2D isn't available.
+    wxDC* paintDC = &dc;
+#ifdef __WXMSW__
+    wxGCDC* gdc = nullptr;
+    wxGraphicsRenderer* d2d = wxGraphicsRenderer::GetDirect2DRenderer();
+    if (d2d) {
+        wxGraphicsContext* gc = d2d->CreateContext(dc);
+        if (gc) {
+            gdc = new wxGCDC(gc);
+            paintDC = gdc;
+        }
+    }
+#endif
+
+    RenderViewport(*paintDC, viewY, sz.x, sz.y, selStart, selEnd);
+
+    if (thinking_) {
+        int contentW = std::min(sz.x - 2 * kSideMargin, kMaxContentW);
+        if (contentW < 100) contentW = 100;
+        int xLeft = (sz.x - contentW) / 2;
+        if (xLeft < kSideMargin) xLeft = kSideMargin;
+        int dotsCanvasY = (blockTops_.empty() ? kTopMargin : blockTops_.back()) + 8;
+        int dotsClientY = dotsCanvasY - viewY;
+        dotsRect_ = wxRect(xLeft, dotsCanvasY, 16 * 3 + 8, 16);
+        dotsRectValid_ = true;
+        PaintThinkingDots(dc, xLeft, dotsClientY);
+    } else {
+        dotsRectValid_ = false;
+    }
+
+    PERF_LOG("Paint viewY=%d", viewY);
+#ifdef __WXMSW__
+    delete gdc;
+#endif
+}
+
+// Draw a right-pointing or down-pointing chevron triangle.
+// Unicode ▸/▾ often render as boxes on Windows; drawing them
+// as filled polygons works everywhere and looks sharper.
+static void DrawChevron(wxDC& dc, int x, int y, int size, bool expanded) {
+    wxPoint pts[3];
+    if (expanded) {
+        // ▼ down-pointing triangle
+        pts[0] = {x, y};
+        pts[1] = {x + size, y};
+        pts[2] = {x + size / 2, y + size};
+    } else {
+        // ▶ right-pointing triangle
+        pts[0] = {x, y};
+        pts[1] = {x + size, y + size / 2};
+        pts[2] = {x, y + size};
+    }
+    dc.SetPen(*wxTRANSPARENT_PEN);
+    dc.SetBrush(dc.GetTextForeground());
+    dc.DrawPolygon(3, pts);
+}
+
+void ChatCanvas::PaintBlock(wxDC& dc, const Block& b, int yTop, BlockPos selStart, BlockPos selEnd, int blockIdx) const {
+    const char* tag = "PaintBlock";
+    switch (b.type) {
+        case BlockType::Paragraph:  tag = "PaintBlock:Paragraph"; break;
+        case BlockType::Heading:    tag = "PaintBlock:Heading";   break;
+        case BlockType::CodeBlock:  tag = "PaintBlock:Code";      break;
+        case BlockType::UserPrompt: tag = "PaintBlock:User";      break;
+        case BlockType::Table:      tag = "PaintBlock:Table";     break;
+        case BlockType::ToolCall:   tag = "PaintBlock:Tool";      break;
+        case BlockType::Thinking:   tag = "PaintBlock:Thinking";  break;
+    }
+    PERF_SCOPE_T(tag, 200);
+    const Palette& pal = palette_;
+    wxSize sz = GetClientSize();
+    int contentW = std::min(sz.x - 2 * kSideMargin, kMaxContentW);
+    if (contentW < 100) contentW = 100;
+    int xLeft = (sz.x - contentW) / 2;
+    if (xLeft < kSideMargin) xLeft = kSideMargin;
+
+    // Compute the per-block selection char range.
+    int bSelStart = -1, bSelEnd = -1;
+    bool blockSelected = false;
+    if (selStart.IsValid() && selEnd.IsValid() && !(selStart == selEnd)) {
+        if (blockIdx >= selStart.block && blockIdx <= selEnd.block) {
+            blockSelected = true;
+            bSelStart = (blockIdx == selStart.block) ? selStart.offset : 0;
+            bSelEnd   = (blockIdx == selEnd.block)   ? selEnd.offset   : (int)b.visibleText.size();
+        }
+    }
+
+    int blockX = xLeft;
+    int blockW = contentW;
+
+    if (b.type == BlockType::Table) {
+        const int N = (int)b.tableAligns.size();
+        const int R = (int)b.tableRows.size();
+        if (N == 0 || R == 0 || b.tableColX.empty() || b.tableRowY.empty()) return;
+
+        const int tableW = b.tableColX.back() + 1;
+
+        // Header row background (subtle tint).
+        dc.SetPen(*wxTRANSPARENT_PEN);
+        dc.SetBrush(wxBrush(pal.tableHeaderBg));
+        int hy0 = yTop + b.tableRowY[0] + 1;
+        int hy1 = yTop + b.tableRowY[1];
+        int hx0 = blockX + 1;
+        int hx1 = blockX + b.tableColX.back();
+        dc.DrawRectangle(hx0, hy0, hx1 - hx0, hy1 - hy0);
+
+        // Cell text with per-cell selection highlights.
+        for (int r = 0; r < R; ++r) {
+            const int rowTextY0 = yTop + b.tableRowY[r] + 1 + kTableCellPadY;
+            const int rowH = b.tableRowY[r + 1] - b.tableRowY[r] - 2 - 2 * kTableCellPadY;
+            for (int c = 0; c < N && c < (int)b.tableRows[r].size(); ++c) {
+                const TableCell& cell = b.tableRows[r][c];
+                const int colTextX0 = blockX + b.tableColX[c] + 1 + kTableCellPadX;
+                const int colTextW  = b.tableColX[c + 1] - b.tableColX[c] - 1 - 2 * kTableCellPadX;
+
+                // Compute per-cell selection range from block-level offsets.
+                int cellSelStart = -1, cellSelEnd = -1;
+                if (blockSelected) {
+                    int cellBase = TableCellToOffset(b, r, c, 0);
+                    int cellLen = (int)cell.visibleText.size();
+                    int cellEnd = cellBase + cellLen;
+                    if (bSelEnd > cellBase && bSelStart < cellEnd) {
+                        cellSelStart = std::max(0, bSelStart - cellBase);
+                        cellSelEnd = std::min(cellLen, bSelEnd - cellBase);
+                    }
+                }
+
+                // Vertical centering of cell content within the row.
+                int innerH = 0;
+                for (const auto& wl : cell.lines) innerH += wl.height;
+                int yLine = rowTextY0 + std::max(0, (rowH - innerH) / 2);
+
+                for (const auto& wl : cell.lines) {
+                    int lineW = wl.glyphX.empty() ? 0 : wl.glyphX.back();
+                    int xBase = colTextX0;
+                    TableAlign al = b.tableAligns[c];
+                    if (al == TableAlign::Center)      xBase = colTextX0 + (colTextW - lineW) / 2;
+                    else if (al == TableAlign::Right)  xBase = colTextX0 + (colTextW - lineW);
+
+                    // Per-cell, per-line selection highlight.
+                    if (cellSelStart >= 0 && cellSelEnd > cellSelStart) {
+                        int lineSelStart = std::max(cellSelStart - wl.textStart, 0);
+                        int lineSelEnd = std::min(cellSelEnd - wl.textStart, (int)wl.text.size());
+                        if (lineSelEnd > lineSelStart && lineSelStart < (int)wl.text.size()
+                            && wl.textStart < cellSelEnd && wl.textEnd > cellSelStart) {
+                            int x1 = xBase + wl.glyphX[lineSelStart];
+                            int x2 = xBase + wl.glyphX[lineSelEnd];
+                            dc.SetBrush(wxBrush(pal.selectionBg));
+                            dc.SetPen(*wxTRANSPARENT_PEN);
+                            dc.DrawRectangle(x1, yLine, x2 - x1, wl.height);
+                        }
+                    }
+
+                    for (size_t ri = 0; ri < wl.runs.size(); ++ri) {
+                        const auto& run = wl.runs[ri];
+                        const wxFont& f = FontFor(run, BlockType::Paragraph, 0);
+                        dc.SetFont(f);
+                        bool isLink = !run.link.IsEmpty();
+                        dc.SetTextForeground(isLink ? pal.linkColour
+                                                    : (run.code ? pal.codeFg : pal.text));
+                        int xr = xBase + (ri < wl.runX.size() ? wl.runX[ri] : 0);
+                        dc.DrawText(run.text, xr, yLine);
+                        if (isLink) {
+                            wxCoord rw = 0, rh = 0;
+                            dc.GetTextExtent(run.text, &rw, &rh);
+                            dc.DrawLine(xr, yLine + rh, xr + rw, yLine + rh);
+                        }
+                    }
+                    yLine += wl.height;
+                }
+            }
+        }
+
+        // Grid lines (drawn last so they sit on top of selection/cell backgrounds).
+        dc.SetPen(wxPen(pal.tableBorder, 1));
+        // Vertical: at each column edge.
+        for (int c = 0; c <= N; ++c) {
+            int x = blockX + b.tableColX[c];
+            dc.DrawLine(x, yTop, x, yTop + b.cachedHeight);
+        }
+        // Horizontal: at each row edge.
+        for (int r = 0; r <= R; ++r) {
+            int y = yTop + b.tableRowY[r];
+            dc.DrawLine(blockX, y, blockX + tableW, y);
+        }
+        return;
+    }
+
+    if (b.type == BlockType::Thinking) {
+        const int radius = 6;
+
+        // Tinting rule mirrors collapsed-tool behavior:
+        //  - Single-line:  per-char selection on the one visible line.
+        //  - Collapsed:    body is hidden, so any cross-block touch tints the
+        //                  whole header strip.
+        //  - Expanded:     strict full-range tint for cross-block selections;
+        //                  per-line tint for intra-block selections.
+        bool fullySelected = false;
+        if (blockSelected) {
+            if (b.thinkingSingleLine) {
+                fullySelected = (bSelStart <= 0
+                                 && bSelEnd >= (int)b.visibleText.size());
+            } else if (!b.toolExpanded) {
+                fullySelected = (bSelEnd > bSelStart);
+            } else {
+                fullySelected = (bSelStart <= 0
+                                 && bSelEnd >= (int)b.visibleText.size());
+            }
+        }
+
+        const wxColour blockBg = fullySelected ? pal.selectionBg : pal.thinkingBg;
+        dc.SetPen(*wxTRANSPARENT_PEN);
+        dc.SetBrush(wxBrush(blockBg));
+        dc.DrawRoundedRectangle(blockX, yTop, blockW, b.cachedHeight, radius);
+
+        dc.SetFont(fontThinking_);
+
+        if (b.thinkingSingleLine) {
+            // Render the single wrapped line inline with per-char selection tint.
+            const int textXLeft = blockX + kToolPadX;
+            int yLine = yTop + kToolPadY;
+            if (!b.lines.empty()) {
+                const auto& wl = b.lines.front();
+                if (blockSelected && !fullySelected) {
+                    int lineSelStart = std::max(bSelStart - wl.textStart, 0);
+                    int lineSelEnd = std::min(bSelEnd - wl.textStart, (int)wl.text.size());
+                    if (lineSelEnd > lineSelStart && lineSelStart < (int)wl.text.size() && lineSelEnd > 0) {
+                        int x1 = textXLeft + wl.glyphX[lineSelStart];
+                        int x2 = textXLeft + wl.glyphX[lineSelEnd];
+                        dc.SetBrush(wxBrush(pal.selectionBg));
+                        dc.SetPen(*wxTRANSPARENT_PEN);
+                        dc.DrawRectangle(x1, yLine, x2 - x1, wl.height);
+                    }
+                }
+                dc.SetTextForeground(pal.thinkingText);
+                dc.DrawText(wl.text, textXLeft, yLine);
+            }
+            return;
+        }
+
+        // Multi-line modes: draw the chevron + "Thinking" header.
+        const int textY = yTop + kToolPadY;
+        const int xChev = blockX + kToolPadX;
+        const int chevSize = b.toolChevW > 0 ? b.toolChevW : 12;
+        const int xLabel = xChev + chevSize + 4;
+        dc.SetTextForeground(pal.thinkingAccent);
+        DrawChevron(dc, xChev, textY + 2, chevSize, b.toolExpanded);
+        dc.DrawText("Thinking", xLabel, textY);
+
+        if (b.toolExpanded) {
+            const int textXLeft = blockX + kToolPadX;
+            int yLine = yTop + b.toolHeaderH + kToolGap;
+            for (const auto& wl : b.lines) {
+                if (blockSelected && !fullySelected) {
+                    int lineSelStart = std::max(bSelStart - wl.textStart, 0);
+                    int lineSelEnd = std::min(bSelEnd - wl.textStart, (int)wl.text.size());
+                    if (lineSelEnd > lineSelStart && lineSelStart < (int)wl.text.size() && lineSelEnd > 0) {
+                        int x1 = textXLeft + wl.glyphX[lineSelStart];
+                        int x2 = textXLeft + wl.glyphX[lineSelEnd];
+                        dc.SetBrush(wxBrush(pal.selectionBg));
+                        dc.SetPen(*wxTRANSPARENT_PEN);
+                        dc.DrawRectangle(x1, yLine, x2 - x1, wl.height);
+                    } else if (wl.text.IsEmpty()
+                               && bSelStart <= wl.textStart && bSelEnd > wl.textStart) {
+                        dc.SetBrush(wxBrush(pal.selectionBg));
+                        dc.SetPen(*wxTRANSPARENT_PEN);
+                        dc.DrawRectangle(textXLeft, yLine, wl.height, wl.height);
+                    }
+                }
+                // Draw runs (all italic per FontFor(BlockType::Thinking)).
+                dc.SetTextForeground(pal.thinkingText);
+                for (size_t ri = 0; ri < wl.runs.size(); ++ri) {
+                    const auto& run = wl.runs[ri];
+                    const wxFont& f = FontFor(run, BlockType::Thinking, 0);
+                    dc.SetFont(f);
+                    int xr = textXLeft + (ri < wl.runX.size() ? wl.runX[ri] : 0);
+                    dc.DrawText(run.text, xr, yLine);
+                }
+                yLine += wl.height;
+            }
+        }
+        return;
+    }
+
+    if (b.type == BlockType::ToolCall) {
+        const int radius = 6;
+
+        // fullySelected drives the whole-block background tint behind the
+        // header + (collapsed) body slot.
+        //
+        // Expanded: strict — only the genuine select-all / whole-block
+        // pass-through (bSelStart=0, bSelEnd=visibleText.size()) tints the
+        // background. Anything narrower goes to per-char header tint +
+        // per-line body tint below.
+        //
+        // Collapsed: the body is hidden, so we can't show a partial body
+        // selection. As soon as the selection extends past the displayed
+        // header (or this block is an intermediate block in a multi-block
+        // selection), tint the whole thing. Only when the selection lives
+        // entirely within the displayed header *and* both endpoints are in
+        // this block do we fall through to the per-char header tint.
+        bool fullySelected;
+        if (b.toolExpanded) {
+            fullySelected = blockSelected
+                && bSelStart <= 0 && bSelEnd >= (int)b.visibleText.size();
+        } else {
+            const bool intraHeader = (selStart.block == blockIdx
+                                      && selEnd.block == blockIdx
+                                      && bSelEnd <= b.toolHeaderSrcLen);
+            fullySelected = blockSelected
+                && bSelEnd > bSelStart
+                && !intraHeader;
+        }
+        // When fullySelected, paint the bg with selectionBg directly. The
+        // earlier draw-selectionBg-rect-then-overlay-headerBg pattern was a
+        // bug: the header bg's rounded rect (and the body bg's, when
+        // expanded) covered the entire selection rect except for a sliver
+        // in the rounded corners — so cross-block selections were invisible
+        // over collapsed tools, and on expanded tools the selection
+        // "disappeared" the moment the cursor moved past the block bottom
+        // (bSelEnd jumps to visibleText.size() → fullySelected flips true →
+        // bg overdraws the per-line tints we'd been drawing up to that point).
+        const wxColour headerBg = fullySelected ? pal.selectionBg : pal.toolHeaderBg;
+        const wxColour bodyBg   = fullySelected ? pal.selectionBg : pal.toolBodyBg;
+
+        // Header background.
+        dc.SetPen(*wxTRANSPARENT_PEN);
+        dc.SetBrush(wxBrush(headerBg));
+        if (b.toolExpanded) {
+            // Header rounded only on top corners — fake by drawing a round
+            // rect spanning the whole block then a bottom-half flat rect.
+            dc.DrawRoundedRectangle(blockX, yTop, blockW, b.toolHeaderH + radius, radius);
+            dc.DrawRectangle(blockX, yTop + b.toolHeaderH - 1, blockW, 1);
+            // Fill the gap between header and body so the strip shows the
+            // selection color too (otherwise it shows the window bg).
+            if (fullySelected && kToolGap > 0) {
+                dc.DrawRectangle(blockX, yTop + b.toolHeaderH, blockW, kToolGap);
+            }
+        } else {
+            dc.DrawRoundedRectangle(blockX, yTop, blockW, b.toolHeaderH, radius);
+        }
+
+        // Header text — all measurements precomputed in LayoutBlock.
+        dc.SetFont(fontCode_);
+        const int textY = yTop + kToolPadY;
+        const int xChev = blockX + kToolPadX;
+        const int xName = xChev + b.toolChevW;
+        const int xArgs = blockX + b.toolArgsX;
+        const int rightLimit = blockX + blockW - kToolPadX;
+
+        // Header selection tint — drawn before the text so it sits behind
+        // the glyphs. The header text covers source offsets [0, srcLen);
+        // chars past toolHeaderVisChars are the "…)" tail that visually
+        // stands in for the truncated args, so we treat any selection that
+        // extends past visChars as covering through end-of-displayed-header.
+        if (blockSelected && !fullySelected
+            && !b.toolHeaderGlyphX.empty()
+            && bSelStart < b.toolHeaderSrcLen && bSelEnd > 0) {
+            const int displayedLen = (int)b.toolHeaderGlyphX.size() - 1;
+            int dispStart = std::max(bSelStart, 0);
+            int dispEnd = std::min(bSelEnd, b.toolHeaderSrcLen);
+            // Clamp to the 1:1 range, except when the selection reaches the
+            // full header end — then extend to the end of the displayed
+            // string (covers the "…)" tail).
+            if (dispStart > b.toolHeaderVisChars) dispStart = b.toolHeaderVisChars;
+            int dispEndIdx;
+            if (dispEnd >= b.toolHeaderSrcLen) dispEndIdx = displayedLen;
+            else dispEndIdx = std::min(dispEnd, b.toolHeaderVisChars);
+            if (dispEndIdx > dispStart) {
+                int x1 = xName + b.toolHeaderGlyphX[dispStart];
+                int x2 = xName + b.toolHeaderGlyphX[dispEndIdx];
+                dc.SetBrush(wxBrush(pal.selectionBg));
+                dc.SetPen(*wxTRANSPARENT_PEN);
+                dc.DrawRectangle(x1, textY, x2 - x1, b.toolHeaderH - kToolPadY * 2);
+            }
+        }
+
+        dc.SetTextForeground(pal.toolAccent);
+        DrawChevron(dc, xChev, textY + 2, b.toolChevW > 0 ? b.toolChevW : 12, b.toolExpanded);
+        dc.DrawText(b.toolName, xName, textY);
+
+        dc.SetTextForeground(pal.codeFg);
+        dc.DrawText(b.toolArgsFit, xArgs, textY);
+
+        if (!b.toolHint.IsEmpty()) {
+            dc.SetTextForeground(pal.toolDim);
+            dc.DrawText(b.toolHint, rightLimit - b.toolHintW, textY);
+        }
+
+        // Body (when expanded).
+        if (b.toolExpanded) {
+            const int bodyTop = yTop + b.toolHeaderH + kToolGap;
+            const int bodyH = b.cachedHeight - b.toolHeaderH - kToolGap;
+            dc.SetPen(*wxTRANSPARENT_PEN);
+            dc.SetBrush(wxBrush(bodyBg));
+            dc.DrawRoundedRectangle(blockX, bodyTop, blockW, bodyH, radius);
+            // Square the top corners (continuous with header).
+            dc.DrawRectangle(blockX, bodyTop, blockW, radius);
+
+            int yLine = bodyTop + kToolPadY;
+            const int textXLeft = blockX + kToolPadX;
+            dc.SetFont(fontCode_);
+            for (const auto& wl : b.lines) {
+                if (blockSelected && !fullySelected) {
+                    int lineSelStart = std::max(bSelStart - wl.textStart, 0);
+                    int lineSelEnd = std::min(bSelEnd - wl.textStart, (int)wl.text.size());
+                    if (lineSelEnd > lineSelStart && lineSelStart < (int)wl.text.size() && lineSelEnd > 0) {
+                        int x1 = textXLeft + wl.glyphX[lineSelStart];
+                        int x2 = textXLeft + wl.glyphX[lineSelEnd];
+                        dc.SetBrush(wxBrush(pal.selectionBg));
+                        dc.SetPen(*wxTRANSPARENT_PEN);
+                        dc.DrawRectangle(x1, yLine, x2 - x1, wl.height);
+                    } else if (wl.text.IsEmpty()
+                               && bSelStart <= wl.textStart && bSelEnd > wl.textStart) {
+                        // Empty line fully inside the selection: draw a
+                        // small tint so the blank row doesn't look like a
+                        // selection gap.
+                        dc.SetBrush(wxBrush(pal.selectionBg));
+                        dc.SetPen(*wxTRANSPARENT_PEN);
+                        dc.DrawRectangle(textXLeft, yLine, wl.height, wl.height);
+                    }
+                }
+                dc.SetTextForeground(pal.codeFg);
+                if (!wl.text.IsEmpty()) dc.DrawText(wl.text, textXLeft, yLine);
+                yLine += wl.height;
+            }
+        }
+        return;
+    }
+
+    if (b.type == BlockType::CodeBlock) {
+        // Background fill.
+        dc.SetPen(*wxTRANSPARENT_PEN);
+        dc.SetBrush(wxBrush(pal.codeBg));
+        dc.DrawRoundedRectangle(blockX, yTop, blockW, b.cachedHeight, 6);
+
+        int yLine = yTop + kCodePadding;
+        dc.SetFont(fontCode_);
+        dc.SetTextForeground(pal.codeFg);
+        for (const auto& wl : b.lines) {
+            // Selection highlight.
+            if (blockSelected) {
+                int lineSelStart = std::max(bSelStart - wl.textStart, 0);
+                int lineSelEnd = std::min(bSelEnd - wl.textStart, (int)wl.text.size());
+                if (lineSelEnd > lineSelStart && lineSelStart < (int)wl.text.size() && lineSelEnd > 0) {
+                    int x1 = blockX + kCodePadding + wl.glyphX[lineSelStart];
+                    int x2 = blockX + kCodePadding + wl.glyphX[lineSelEnd];
+                    dc.SetBrush(wxBrush(pal.selectionBg));
+                    dc.SetPen(*wxTRANSPARENT_PEN);
+                    dc.DrawRectangle(x1, yLine, x2 - x1, wl.height);
+                }
+            }
+            dc.DrawText(wl.text, blockX + kCodePadding, yLine);
+            yLine += wl.height;
+        }
+        return;
+    }
+
+    // Paragraph / Heading / UserPrompt
+    int textXLeft = blockX;
+    int textYTop = yTop;
+    if (b.type == BlockType::UserPrompt) {
+        // Right-aligned bubble — width fits the longest line content.
+        int bubbleW = 0;
+        for (const auto& wl : b.lines) {
+            if (!wl.glyphX.empty()) bubbleW = std::max<int>(bubbleW, wl.glyphX.back());
+        }
+        bubbleW += kUserBubblePad * 2;
+        if (bubbleW > blockW) bubbleW = blockW;
+        int bubbleX = blockX + blockW - bubbleW;
+        dc.SetPen(*wxTRANSPARENT_PEN);
+        dc.SetBrush(wxBrush(pal.userBubbleBg));
+        dc.DrawRoundedRectangle(bubbleX, yTop, bubbleW, b.cachedHeight, 8);
+        textXLeft = bubbleX + kUserBubblePad;
+        textYTop  = yTop + kUserBubblePad;
+    }
+
+    int yLine = textYTop;
+    for (const auto& wl : b.lines) {
+        if (blockSelected) {
+            int lineSelStart = std::max(bSelStart - wl.textStart, 0);
+            int lineSelEnd = std::min(bSelEnd - wl.textStart, (int)wl.text.size());
+            if (lineSelEnd > lineSelStart && lineSelStart < (int)wl.text.size() && lineSelEnd > 0
+                && wl.textStart < bSelEnd && wl.textEnd > bSelStart) {
+                int x1 = textXLeft + wl.glyphX[lineSelStart];
+                int x2 = textXLeft + wl.glyphX[lineSelEnd];
+                dc.SetBrush(wxBrush(pal.selectionBg));
+                dc.SetPen(*wxTRANSPARENT_PEN);
+                dc.DrawRectangle(x1, yLine, x2 - x1, wl.height);
+            }
+        }
+        // Draw runs.
+        for (size_t ri = 0; ri < wl.runs.size(); ++ri) {
+            const auto& r = wl.runs[ri];
+            const wxFont& f = FontFor(r, b.type, b.headingLevel);
+            dc.SetFont(f);
+            bool isLink = !r.link.IsEmpty();
+            dc.SetTextForeground(isLink ? pal.linkColour
+                                        : (r.code ? pal.codeFg : pal.text));
+            int xr = textXLeft + (ri < wl.runX.size() ? wl.runX[ri] : 0);
+            dc.DrawText(r.text, xr, yLine);
+            if (isLink) {
+                wxCoord rw = 0, rh = 0;
+                dc.GetTextExtent(r.text, &rw, &rh);
+                dc.DrawLine(xr, yLine + rh, xr + rw, yLine + rh);
+            }
+        }
+        yLine += wl.height;
+    }
+}
+
+void ChatCanvas::PaintThinkingDots(wxDC& dc, int xLeft, int yTop) const {
+    dc.SetPen(*wxTRANSPARENT_PEN);
+    for (int i = 0; i < 3; ++i) {
+        double phase = animPhase_ - i * 0.4;
+        double s = (std::sin(phase) + 1.0) * 0.5;  // 0..1
+        int alpha = (int)(60 + s * 180);
+        wxColour c(palette_.thinkingDot.Red(), palette_.thinkingDot.Green(), palette_.thinkingDot.Blue(), alpha);
+        dc.SetBrush(wxBrush(c));
+        dc.DrawCircle(xLeft + 8 + i * 16, yTop + 8, 4);
+    }
+}
+
+// ---------- Hit-test & selection ----------
+
+// Map a table block's visibleText offset to (row, col, cellCharOffset).
+// Returns true if the offset falls within a cell's text (not on a delimiter).
+bool ChatCanvas::TableOffsetToCell(const Block& b, int offset,
+                                   int& row, int& col, int& cellOff) const {
+    int off = 0;
+    for (size_t r = 0; r < b.tableRows.size(); ++r) {
+        for (size_t c = 0; c < b.tableRows[r].size(); ++c) {
+            int cellLen = (int)b.tableRows[r][c].visibleText.size();
+            if (offset >= off && offset < off + cellLen) {
+                row = (int)r;
+                col = (int)c;
+                cellOff = offset - off;
+                return true;
+            }
+            off += cellLen;
+            // Skip delimiter after cell.
+            if (c + 1 < b.tableRows[r].size()) {
+                if (offset == off) return false;  // on a tab
+                ++off;  // '\t'
+            }
+        }
+        if (r + 1 < b.tableRows.size()) {
+            if (offset == off) return false;  // on a newline
+            ++off;  // '\n'
+        }
+    }
+    return false;
+}
+
+int ChatCanvas::TableCellToOffset(const Block& b, int row, int col, int cellOff) const {
+    int off = 0;
+    for (int r = 0; r < (int)b.tableRows.size(); ++r) {
+        for (int c = 0; c < (int)b.tableRows[r].size(); ++c) {
+            if (r == row && c == col) return off + cellOff;
+            off += (int)b.tableRows[r][c].visibleText.size();
+            if (c + 1 < (int)b.tableRows[r].size()) ++off;  // '\t'
+        }
+        if (r + 1 < (int)b.tableRows.size()) ++off;  // '\n'
+    }
+    return off;
+}
+
+BlockPos ChatCanvas::HitTest(const wxPoint& canvasPt) const {
+    wxSize sz = GetClientSize();
+    int contentW = std::min(sz.x - 2 * kSideMargin, kMaxContentW);
+    if (contentW < 100) contentW = 100;
+    int xLeft = (sz.x - contentW) / 2;
+    if (xLeft < kSideMargin) xLeft = kSideMargin;
+
+    int y = kTopMargin;
+    int lastVisitedBlock = -1;
+    for (size_t i = 0; i < blocks_.size(); ++i) {
+        const Block& b = blocks_[i];
+        int spacing = (b.type == BlockType::Heading) ? kHeadingSpacing : kBlockSpacing;
+        y += spacing;
+        int blockTop = y;
+        int blockBottom = y + b.cachedHeight;
+        if (canvasPt.y >= blockTop - spacing / 2 && canvasPt.y < blockBottom) {
+
+            // Table: per-cell, per-character hit-test.
+            if (b.type == BlockType::Table) {
+                // Degenerate table (e.g. empty rows/aligns): LayoutBlock left
+                // tableRowY/tableColX empty. `size() - 1` on an empty vector
+                // is size_t underflow — guard before walking.
+                if (b.tableRowY.size() < 2 || b.tableColX.size() < 2) {
+                    return {(int)i, 0};
+                }
+                int localY = canvasPt.y - blockTop;
+                // Find row.
+                int row = -1;
+                for (size_t r = 0; r + 1 < b.tableRowY.size(); ++r) {
+                    if (localY >= b.tableRowY[r] && localY < b.tableRowY[r + 1]) {
+                        row = (int)r;
+                        break;
+                    }
+                }
+                if (row < 0) {
+                    // Clicked in the gap between rows or below last row.
+                    if (localY < b.tableRowY[0]) return {(int)i, 0};
+                    return {(int)i, (int)b.visibleText.size()};
+                }
+                // Find column.
+                int localX = canvasPt.x - xLeft;
+                int col = -1;
+                for (size_t c = 0; c + 1 < b.tableColX.size(); ++c) {
+                    if (localX >= b.tableColX[c] && localX < b.tableColX[c + 1]) {
+                        col = (int)c;
+                        break;
+                    }
+                }
+                if (col < 0) {
+                    // Clicked in the margin outside columns.
+                    return {(int)i, TableCellToOffset(b, row, 0, 0)};
+                }
+                if (row >= (int)b.tableRows.size() || col >= (int)b.tableRows[row].size()) {
+                    return {(int)i, (int)b.visibleText.size()};
+                }
+                const TableCell& cell = b.tableRows[row][col];
+                // Vertical offset within the cell's lines.
+                const int rowTextY0 = blockTop + b.tableRowY[row] + 1 + kTableCellPadY;
+                int cellY = canvasPt.y - rowTextY0;
+                int yLine = 0;
+                const int colTextX0 = xLeft + b.tableColX[col] + 1 + kTableCellPadX;
+                const int colTextW  = b.tableColX[col + 1] - b.tableColX[col] - 1 - 2 * kTableCellPadX;
+                for (const auto& wl : cell.lines) {
+                    if (cellY >= yLine && cellY < yLine + wl.height) {
+                        // Found the line. Compute xBase (text start after alignment).
+                        int lineW = wl.glyphX.empty() ? 0 : wl.glyphX.back();
+                        int xBase = colTextX0;
+                        TableAlign al = b.tableAligns[col];
+                        if (al == TableAlign::Center)      xBase = colTextX0 + (colTextW - lineW) / 2;
+                        else if (al == TableAlign::Right)  xBase = colTextX0 + (colTextW - lineW);
+                        int xRel = canvasPt.x - xBase;
+                        int charIdx = (int)wl.text.size();
+                        if (xRel < 0) charIdx = 0;
+                        else {
+                            for (size_t k = 0; k + 1 < wl.glyphX.size(); ++k) {
+                                int mid = (wl.glyphX[k] + wl.glyphX[k + 1]) / 2;
+                                if (xRel < mid) { charIdx = (int)k; break; }
+                            }
+                        }
+                        return {(int)i, TableCellToOffset(b, row, col, wl.textStart + charIdx)};
+                    }
+                    yLine += wl.height;
+                }
+                // Below all cell lines: return end of cell.
+                int lastLineEnd = cell.lines.empty() ? 0 : cell.lines.back().textEnd;
+                return {(int)i, TableCellToOffset(b, row, col, lastLineEnd)};
+            }
+
+            // Thinking blocks: in single-line mode the entire block is a
+            // single italic line — hit-test per-char like a paragraph. In
+            // multi-line modes the header ("▸/▾ Thinking") is opaque (snap
+            // to start for cross-block drag), the body (when expanded) is
+            // per-char like a normal paragraph.
+            if (b.type == BlockType::Thinking) {
+                const int textXLeft = xLeft + kToolPadX;
+
+                if (b.thinkingSingleLine) {
+                    int yLine = blockTop + kToolPadY;
+                    if (canvasPt.y < yLine) return {(int)i, 0};
+                    if (b.lines.empty()) return {(int)i, 0};
+                    const auto& wl = b.lines.front();
+                    if (canvasPt.y >= yLine && canvasPt.y < yLine + wl.height) {
+                        int xRel = canvasPt.x - textXLeft;
+                        if (xRel < 0) return {(int)i, wl.textStart};
+                        int charIdx = (int)wl.text.size();
+                        for (size_t k = 0; k + 1 < wl.glyphX.size(); ++k) {
+                            int mid = (wl.glyphX[k] + wl.glyphX[k + 1]) / 2;
+                            if (xRel < mid) { charIdx = (int)k; break; }
+                        }
+                        return {(int)i, wl.textStart + charIdx};
+                    }
+                    return {(int)i, (int)b.visibleText.size()};
+                }
+
+                const int headerBottom = blockTop + b.toolHeaderH;
+                if (!b.toolExpanded || canvasPt.y < headerBottom) {
+                    // Header strip — chevron + "Thinking" label are not part
+                    // of visibleText, so snap to a sensible anchor for any
+                    // selection drag that lands here.
+                    return {(int)i, 0};
+                }
+                int yLine = blockTop + b.toolHeaderH + kToolGap;
+                if (canvasPt.y < yLine) return {(int)i, 0};
+                for (const auto& wl : b.lines) {
+                    if (canvasPt.y >= yLine && canvasPt.y < yLine + wl.height) {
+                        int xRel = canvasPt.x - textXLeft;
+                        if (xRel < 0) return {(int)i, wl.textStart};
+                        int charIdx = (int)wl.text.size();
+                        for (size_t k = 0; k + 1 < wl.glyphX.size(); ++k) {
+                            int mid = (wl.glyphX[k] + wl.glyphX[k + 1]) / 2;
+                            if (xRel < mid) { charIdx = (int)k; break; }
+                        }
+                        return {(int)i, wl.textStart + charIdx};
+                    }
+                    yLine += wl.height;
+                }
+                return {(int)i, (int)b.visibleText.size()};
+            }
+
+            // Tool-call blocks: header text (toolName + toolArgsFit) is
+            // per-character selectable; chevron region is the toggle target
+            // (handled by OnLeftDown — HitTest snaps it to offset 0 so a
+            // selection drag starting there still has a sensible anchor);
+            // the body is per-character selectable when expanded.
+            if (b.type == BlockType::ToolCall) {
+                const int headerBottom = blockTop + b.toolHeaderH;
+                if (!b.toolExpanded || canvasPt.y < headerBottom) {
+                    // Header strip.
+                    const int xChevLeft = xLeft + kToolPadX;
+                    const int xName = xChevLeft + b.toolChevW;
+                    if (canvasPt.x < xName) {
+                        // Chevron / left padding → start of header.
+                        return {(int)i, 0};
+                    }
+                    int xRel = canvasPt.x - xName;
+                    if (b.toolHeaderGlyphX.empty()) return {(int)i, 0};
+                    int displayedLen = (int)b.toolHeaderGlyphX.size() - 1;
+                    if (xRel >= b.toolHeaderGlyphX.back()) {
+                        // Right of displayed header text (over hint or padding)
+                        // → end of (full untruncated) header.
+                        return {(int)i, b.toolHeaderSrcLen};
+                    }
+                    int charIdx = displayedLen;
+                    for (int k = 0; k + 1 < displayedLen + 1; ++k) {
+                        int mid = (b.toolHeaderGlyphX[k] + b.toolHeaderGlyphX[k + 1]) / 2;
+                        if (xRel < mid) { charIdx = k; break; }
+                    }
+                    // Map displayed-char index back to source offset:
+                    // chars within toolHeaderVisChars are 1:1; chars in the
+                    // "…)" tail collapse onto the full header end.
+                    int srcOff = (charIdx <= b.toolHeaderVisChars)
+                        ? charIdx : b.toolHeaderSrcLen;
+                    return {(int)i, srcOff};
+                }
+                const int textXLeft = xLeft + kToolPadX;
+                int yLine = blockTop + b.toolHeaderH + kToolGap + kToolPadY;
+                if (canvasPt.y < yLine) {
+                    // Top padding inside body, above the first wrapped line:
+                    // snap to body start (just after the "\n\n").
+                    return {(int)i, b.toolHeaderSrcLen + 2};
+                }
+                for (const auto& wl : b.lines) {
+                    if (canvasPt.y >= yLine && canvasPt.y < yLine + wl.height) {
+                        int xRel = canvasPt.x - textXLeft;
+                        if (xRel < 0) return {(int)i, wl.textStart};
+                        int charIdx = (int)wl.text.size();
+                        for (size_t k = 0; k + 1 < wl.glyphX.size(); ++k) {
+                            int mid = (wl.glyphX[k] + wl.glyphX[k + 1]) / 2;
+                            if (xRel < mid) { charIdx = (int)k; break; }
+                        }
+                        return {(int)i, wl.textStart + charIdx};
+                    }
+                    yLine += wl.height;
+                }
+                return {(int)i, (int)b.visibleText.size()};
+            }
+
+            // CodeBlock, Paragraph, Heading, UserPrompt: per-character.
+            int textXLeft = xLeft;
+            int yLine = blockTop;
+            if (b.type == BlockType::UserPrompt) {
+                int bubbleW = 0;
+                for (const auto& wl : b.lines)
+                    if (!wl.glyphX.empty()) bubbleW = std::max<int>(bubbleW, wl.glyphX.back());
+                bubbleW += kUserBubblePad * 2;
+                if (bubbleW > contentW) bubbleW = contentW;
+                textXLeft = xLeft + contentW - bubbleW + kUserBubblePad;
+                yLine += kUserBubblePad;
+            } else if (b.type == BlockType::CodeBlock) {
+                textXLeft = xLeft + kCodePadding;
+                yLine += kCodePadding;
+            }
+
+            // Above the first line (upper-spacing-half claimed by this block,
+            // or top-padding for CodeBlock/UserPrompt): snap to block start.
+            // Without this, the line loop matches nothing and we fall through
+            // to the end-of-block return, which briefly extends the selection
+            // to wrap the whole block while the user drags past a line edge.
+            if (canvasPt.y < yLine) return {(int)i, 0};
+
+            for (const auto& wl : b.lines) {
+                if (canvasPt.y >= yLine && canvasPt.y < yLine + wl.height) {
+                    int xRel = canvasPt.x - textXLeft;
+                    if (xRel < 0) return {(int)i, wl.textStart};
+                    // Find char by binary scan on glyphX.
+                    int charIdx = (int)wl.text.size();
+                    for (size_t k = 0; k + 1 < wl.glyphX.size(); ++k) {
+                        int mid = (wl.glyphX[k] + wl.glyphX[k + 1]) / 2;
+                        if (xRel < mid) { charIdx = (int)k; break; }
+                    }
+                    return {(int)i, wl.textStart + charIdx};
+                }
+                yLine += wl.height;
+            }
+            // Below all lines of this block: return end.
+            return {(int)i, (int)b.visibleText.size()};
+        }
+        // Track the last block the cursor has passed (block bottom is at or
+        // above the cursor). Updating unconditionally walked past the cursor
+        // and left lastVisitedBlock at blocks_.size()-1, so a drag into the
+        // orphan slice of a gap (lower spacing half, not claimed by either
+        // neighbor) snapped to end-of-document — visually wrapping every
+        // block between the anchor and the doc tail.
+        if (canvasPt.y >= blockBottom) lastVisitedBlock = (int)i;
+        y = blockBottom;
+    }
+    // Mouse above all blocks: return start of first block.
+    if (canvasPt.y < kTopMargin) {
+        if (!blocks_.empty()) return {0, 0};
+        return {};
+    }
+    // Mouse in the gap between blocks or below the last block.
+    // Snap to the nearest block boundary.
+    if (!blocks_.empty()) {
+        if (lastVisitedBlock < 0) return {0, 0};
+        return {lastVisitedBlock, (int)blocks_[lastVisitedBlock].visibleText.size()};
+    }
+    return {};
+}
+
+void ChatCanvas::FindWordBounds(const BlockPos& pos, BlockPos& wordStart, BlockPos& wordEnd) const {
+    wordStart = wordEnd = pos;
+    if (pos.block < 0 || pos.block >= (int)blocks_.size()) return;
+    const Block& b = blocks_[pos.block];
+
+    // For tables, map to the cell first.
+    const wxString* text = &b.visibleText;
+    int localOff = pos.offset;
+
+    if (b.type == BlockType::Table) {
+        int row, col, cellOff;
+        if (!TableOffsetToCell(b, pos.offset, row, col, cellOff)) return;
+        text = &b.tableRows[row][col].visibleText;
+        localOff = cellOff;
+    }
+
+    const wxString& t = *text;
+    if (t.IsEmpty()) return;
+
+    // Clamp.
+    if (localOff < 0) localOff = 0;
+    if (localOff > (int)t.size()) localOff = (int)t.size();
+
+    // Helper: is this a word char?
+    auto isWord = [](wxUniChar c) {
+        return (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') ||
+               (c >= '0' && c <= '9') || c == '_';
+    };
+
+    int start = localOff;
+    int end = localOff;
+
+    // If we're on a word char, expand to word boundaries.
+    if (start < (int)t.size() && isWord(t[start])) {
+        while (start > 0 && isWord(t[start - 1])) --start;
+        while (end < (int)t.size() && isWord(t[end])) ++end;
+    } else if (start < (int)t.size() && t[start] == ' ') {
+        // On space: select the run of whitespace.
+        while (start > 0 && t[start - 1] == ' ') --start;
+        while (end < (int)t.size() && t[end] == ' ') ++end;
+    } else if (start < (int)t.size()) {
+        // On punctuation/symbol: select just that char.
+        end = start + 1;
+    }
+
+    // Map back to block-visibleText offsets for tables.
+    if (b.type == BlockType::Table) {
+        int row, col, cellOff;
+        if (TableOffsetToCell(b, pos.offset, row, col, cellOff)) {
+            wordStart = {(int)pos.block, TableCellToOffset(b, row, col, start)};
+            wordEnd   = {(int)pos.block, TableCellToOffset(b, row, col, end)};
+        }
+    } else {
+        wordStart = {(int)pos.block, start};
+        wordEnd   = {(int)pos.block, end};
+    }
+}
+
+wxString ChatCanvas::LinkUrlAt(const BlockPos& pos) const {
+    if (pos.block < 0 || pos.block >= (int)blocks_.size()) return {};
+    const Block& b = blocks_[pos.block];
+    // Only Paragraph, Heading, and UserPrompt blocks contain inline-run links.
+    if (b.type != BlockType::Paragraph && b.type != BlockType::Heading
+        && b.type != BlockType::UserPrompt)
+        return {};
+    int off = 0;
+    for (const auto& r : b.runs) {
+        int len = (int)r.text.size();
+        if (pos.offset >= off && pos.offset < off + len) {
+            return r.link;
+        }
+        off += len;
+    }
+    return {};
+}
+
+void ChatCanvas::OnLeftDown(wxMouseEvent& e) {
+    SetFocus();
+    wxPoint p = e.GetPosition();
+    CalcUnscrolledPosition(p.x, p.y, &p.x, &p.y);
+    BlockPos hp = HitTest(p);
+    if (!hp.IsValid()) return;
+
+    // Link click: open in browser, don't start a selection.
+    wxString linkUrl = LinkUrlAt(hp);
+    if (!linkUrl.IsEmpty()) {
+        wxLaunchDefaultBrowser(linkUrl);
+        return;
+    }
+
+    // Tool-call blocks: only the chevron region toggles expansion. The
+    // rest of the header (toolName + args) and the body (when expanded)
+    // are selectable text. This is the standard disclosure-triangle
+    // pattern — avoids ambiguity between "click to toggle" and "click to
+    // place caret for selection", and keeps double-click → word-select
+    // working in the header.
+    if (hp.block >= 0 && hp.block < (int)blocks_.size()
+        && blocks_[hp.block].type == BlockType::ToolCall) {
+        const Block& tb = blocks_[hp.block];
+        if (hp.block < (int)blockTops_.size()) {
+            wxSize sz = GetClientSize();
+            int contentW = std::min(sz.x - 2 * kSideMargin, kMaxContentW);
+            if (contentW < 100) contentW = 100;
+            int xLeft = (sz.x - contentW) / 2;
+            if (xLeft < kSideMargin) xLeft = kSideMargin;
+            const int xChev = xLeft + kToolPadX;
+            const int xName = xChev + tb.toolChevW;
+            const int headerBottom = blockTops_[hp.block] + tb.toolHeaderH;
+            if (p.y < headerBottom && p.x >= xLeft && p.x < xName) {
+                // Chevron (and a bit of left padding) → toggle.
+                selAnchor_ = selCaret_ = {};
+                ToggleToolCall(hp.block);
+                return;
+            }
+        }
+    }
+
+    // Thinking blocks: in multi-line modes, clicking anywhere in the header
+    // strip toggles. The header has no selectable text (just the "Thinking"
+    // label), so there's no ambiguity with selection. Single-line mode has
+    // no chevron and no toggle — falls through to normal selection.
+    if (hp.block >= 0 && hp.block < (int)blocks_.size()
+        && blocks_[hp.block].type == BlockType::Thinking) {
+        const Block& tb = blocks_[hp.block];
+        if (!tb.thinkingSingleLine && hp.block < (int)blockTops_.size()) {
+            const int headerBottom = blockTops_[hp.block] + tb.toolHeaderH;
+            if (p.y < headerBottom) {
+                selAnchor_ = selCaret_ = {};
+                ToggleToolCall(hp.block);  // same toggle path — flips toolExpanded
+                return;
+            }
+        }
+    }
+
+    selAnchor_ = hp;
+    selCaret_ = hp;
+    selecting_ = true;
+    CaptureMouse();
+    Refresh();
+}
+
+void ChatCanvas::OnLeftUp(wxMouseEvent& /*e*/) {
+    if (selecting_ && HasCapture()) ReleaseMouse();
+    selecting_ = false;
+}
+
+void ChatCanvas::OnLeftDClick(wxMouseEvent& e) {
+    SetFocus();
+    wxPoint p = e.GetPosition();
+    CalcUnscrolledPosition(p.x, p.y, &p.x, &p.y);
+    BlockPos hp = HitTest(p);
+    if (!hp.IsValid()) return;
+
+    // Tool-call chevron: swallow double-clicks (the first click already
+    // toggled). Header text and body double-clicks fall through to word
+    // selection so users can pick out a token like the tool name.
+    if (hp.block >= 0 && hp.block < (int)blocks_.size()
+        && blocks_[hp.block].type == BlockType::ToolCall) {
+        const Block& tb = blocks_[hp.block];
+        if (hp.block < (int)blockTops_.size()) {
+            wxSize sz = GetClientSize();
+            int contentW = std::min(sz.x - 2 * kSideMargin, kMaxContentW);
+            if (contentW < 100) contentW = 100;
+            int xLeft = (sz.x - contentW) / 2;
+            if (xLeft < kSideMargin) xLeft = kSideMargin;
+            const int xName = xLeft + kToolPadX + tb.toolChevW;
+            const int headerBottom = blockTops_[hp.block] + tb.toolHeaderH;
+            if (p.y < headerBottom && p.x >= xLeft && p.x < xName) return;
+        }
+    }
+
+    // Thinking header double-click: first click already toggled, swallow.
+    if (hp.block >= 0 && hp.block < (int)blocks_.size()
+        && blocks_[hp.block].type == BlockType::Thinking) {
+        const Block& tb = blocks_[hp.block];
+        if (!tb.thinkingSingleLine && hp.block < (int)blockTops_.size()) {
+            const int headerBottom = blockTops_[hp.block] + tb.toolHeaderH;
+            if (p.y < headerBottom) return;
+        }
+    }
+
+    BlockPos ws, we;
+    FindWordBounds(hp, ws, we);
+    selAnchor_ = ws;
+    selCaret_ = we;
+    selecting_ = false;
+    if (HasCapture()) ReleaseMouse();
+    Refresh();
+}
+
+BlockPos ChatCanvas::ApplyDragSnap(BlockPos hp, const wxPoint& /*canvasPt*/,
+                                   BlockPos anchor) const {
+    // Through-drag snap for collapsed tool blocks: treat them as atomic
+    // units when crossed from a drag anchored elsewhere.
+    //
+    // The body is hidden, so we can't show a partial selection inside it
+    // anyway. We snap so the block flips to fully-selected the moment the
+    // caret enters its claim region (from whichever side the anchor is
+    // on), and stays that way until the caret leaves. This avoids two
+    // failure modes:
+    //   1. Y-midline snap (previous attempt) flipped on/off as the cursor
+    //      crossed the block's vertical midpoint — hand jitter around the
+    //      midline made the highlight strobe.
+    //   2. Raw HitTest with no snap gave one offset inside the header
+    //      band (small, X-driven) and a different one in the orphan gap
+    //      just below (huge, end-of-block). A 1-px Y delta near the
+    //      block's bottom border toggled the whole-block tint.
+    //
+    // Direction-based snap: if the anchor is above this block (anchor.block
+    // < hp.block), the cursor entered from above, so the entire block is
+    // already covered by the selection — snap to visibleText.size().
+    // Symmetric for anchor below.
+    //
+    // Same-block drags fall through (anchor.block == hp.block): per-char
+    // header selection works normally.
+    if (!anchor.IsValid() || anchor.block == hp.block) return hp;
+    if (hp.block < 0 || hp.block >= (int)blocks_.size()) return hp;
+    const Block& tb = blocks_[hp.block];
+    // Atomic blocks for through-drag: collapsed tool calls and collapsed
+    // multi-line thinking blocks (both hide their body when collapsed).
+    // Single-line thinking blocks are NOT atomic — their body is visible,
+    // so per-character drag selection works the same as a paragraph.
+    const bool atomic =
+        (tb.type == BlockType::ToolCall && !tb.toolExpanded) ||
+        (tb.type == BlockType::Thinking && !tb.toolExpanded && !tb.thinkingSingleLine);
+    if (!atomic) return hp;
+    hp.offset = (anchor.block < hp.block) ? (int)tb.visibleText.size() : 0;
+    return hp;
+}
+
+void ChatCanvas::OnMotion(wxMouseEvent& e) {
+    // Change cursor to hand when hovering a link.
+    wxPoint p = e.GetPosition();
+    CalcUnscrolledPosition(p.x, p.y, &p.x, &p.y);
+    BlockPos hp = HitTest(p);
+    if (hp.IsValid() && !LinkUrlAt(hp).IsEmpty()) {
+        SetCursor(wxCURSOR_HAND);
+    } else {
+        SetCursor(wxNullCursor);
+    }
+
+    if (!selecting_) return;
+    hp = ApplyDragSnap(hp, p, selAnchor_);
+    if (hp == selCaret_) return;
+    selCaret_ = hp;
+    Refresh();
+}
+
+void ChatCanvas::OnKeyDown(wxKeyEvent& e) {
+    if (e.ControlDown() && e.GetKeyCode() == 'A') {
+        SelectAll();
+        return;
+    }
+    if (e.ControlDown() && e.GetKeyCode() == 'C') {
+        wxString sel = GetSelectedText();
+        if (!sel.IsEmpty() && wxTheClipboard->Open()) {
+            wxTheClipboard->SetData(new wxTextDataObject(sel));
+            wxTheClipboard->Close();
+        }
+        return;
+    }
+    e.Skip();
+}
+
+void ChatCanvas::OnSysColourChanged(wxSysColourChangedEvent& e) {
+    RebuildPalette();
+    Refresh();
+    e.Skip();
+}
+
+void ChatCanvas::SelectAll() {
+    if (blocks_.empty()) return;
+    selAnchor_ = {0, 0};
+    selCaret_  = {(int)blocks_.size() - 1, (int)blocks_.back().visibleText.size()};
+    Refresh();
+}
+
+wxString ChatCanvas::GetSelectedText() const {
+    if (!selAnchor_.IsValid() || !selCaret_.IsValid() || selAnchor_ == selCaret_) return {};
+    BlockPos a = selAnchor_, b = selCaret_;
+    if (b < a) std::swap(a, b);
+    wxString out;
+    for (int i = a.block; i <= b.block; ++i) {
+        const Block& blk = blocks_[i];
+        int s = (i == a.block) ? a.offset : 0;
+        int e = (i == b.block) ? b.offset : (int)blk.visibleText.size();
+        s = ClampInt(s, 0, (int)blk.visibleText.size());
+        e = ClampInt(e, 0, (int)blk.visibleText.size());
+        if (e > s) out += blk.visibleText.SubString(s, e - 1);
+        if (i < b.block) out += "\n\n";
+    }
+    return out;
+}

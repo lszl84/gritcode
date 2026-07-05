@@ -1,0 +1,158 @@
+name: build
+
+on:
+  push:
+    tags: ['v*']
+  pull_request:
+    branches: [wx]
+  workflow_dispatch:
+    inputs:
+      linux:
+        description: 'Build Linux (.deb)'
+        type: boolean
+        default: true
+      macos:
+        description: 'Build macOS (.dmg)'
+        type: boolean
+        default: true
+
+jobs:
+  linux:
+    name: Linux (Ubuntu 24.04)
+    runs-on: ubuntu-24.04
+    if: ${{ github.event_name != 'workflow_dispatch' || inputs.linux }}
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install build deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            clang ninja-build cmake \
+            libwxgtk3.2-dev libgtk-3-dev \
+            libcurl4-openssl-dev libsqlite3-dev \
+            libsecret-1-dev \
+            dpkg-dev file
+
+      - name: Configure
+        run: cmake --preset release
+
+      - name: Build
+        run: cmake --build --preset release
+
+      - name: Package
+        working-directory: build
+        run: cpack
+
+      - name: Upload .deb
+        uses: actions/upload-artifact@v7
+        with:
+          name: linux-deb
+          path: build/wx_gritcode-*.deb
+
+  macos:
+    name: macOS
+    runs-on: macos-14
+    if: ${{ github.event_name != 'workflow_dispatch' || inputs.macos }}
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install build deps
+        run: brew install ninja cmake
+
+      - name: Configure
+        run: cmake --preset release
+
+      - name: Build
+        run: cmake --build --preset release
+
+      - name: Import signing certificate
+        env:
+          CERT_BASE64: ${{ secrets.APPLE_DEVELOPER_CERTIFICATE }}
+          CERT_PASS: ${{ secrets.APPLE_DEVELOPER_CERTIFICATE_PASSWORD }}
+        run: |
+          set -e
+          echo "$CERT_BASE64" | base64 -d > developer-id.p12
+          echo "p12 file size: $(wc -c < developer-id.p12) bytes"
+          security create-keychain -p temp temp.keychain
+          security default-keychain -s temp.keychain
+          security unlock-keychain -p temp temp.keychain
+          security import developer-id.p12 -k temp.keychain -P "$CERT_PASS" -T /usr/bin/codesign
+          security set-key-partition-list -S apple-tool:,apple: -s -k temp temp.keychain
+          security list-keychains -d user -s temp.keychain $(security list-keychains -d user | sed 's/"//g')
+          echo "Imported identities:"
+          security find-identity -v -p codesigning temp.keychain
+          rm developer-id.p12
+
+      - name: Sign .app with Developer ID
+        run: |
+          IDENTITY=$(security find-identity -v -p codesigning temp.keychain | grep "Developer ID Application" | head -1 | awk -F'"' '{print $2}')
+          echo "Signing with: $IDENTITY"
+          app="build/wx_gritcode.app"
+          codesign --force --sign "$IDENTITY" --options runtime --timestamp --deep "$app"
+
+      - name: Package
+        working-directory: build
+        run: cpack
+
+      - name: Sign .dmg
+        run: |
+          IDENTITY=$(security find-identity -v -p codesigning temp.keychain | grep "Developer ID Application" | head -1 | awk -F'"' '{print $2}')
+          DMG=$(ls build/wx_gritcode-*.dmg | head -1)
+          codesign --force --sign "$IDENTITY" --options runtime --timestamp "$DMG"
+
+      - name: Notarize .dmg
+        env:
+          APPLE_ID: luke@devmindscape.com
+          TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          NOTARY_PASS: ${{ secrets.APPLE_NOTARY_PASSWORD }}
+        run: |
+          DMG=$(ls build/wx_gritcode-*.dmg | head -1)
+          xcrun notarytool submit "$DMG" \
+            --apple-id "$APPLE_ID" \
+            --team-id "$TEAM_ID" \
+            --password "$NOTARY_PASS" \
+            --wait
+
+      - name: Staple notarization ticket
+        run: |
+          DMG=$(ls build/wx_gritcode-*.dmg | head -1)
+          xcrun stapler staple "$DMG"
+
+      - name: Upload .dmg
+        uses: actions/upload-artifact@v7
+        with:
+          name: macos-dmg
+          path: build/wx_gritcode-*.dmg
+
+  release:
+    name: Publish GitHub Release
+    needs: [linux, macos]
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/download-artifact@v8
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: Delete stale releases for this tag
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release delete "${{ github.ref_name }}" --yes 2>/dev/null || true
+
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "${{ github.ref_name }}" \
+            artifacts/* \
+            --prerelease \
+            --generate-notes \
+            --title "${{ github.ref_name }}"

@@ -1,21 +1,5 @@
-// Gritcode — GPU-rendered AI coding harness
-// Copyright (C) 2026 luke@devmindscape.com
-//
-// This program is free software: you can redistribute it and/or modify
-// it under the terms of the GNU General Public License as published by
-// the Free Software Foundation, either version 3 of the License, or
-// (at your option) any later version.
-//
-// This program is distributed in the hope that it will be useful,
-// but WITHOUT ANY WARRANTY; without even the implied warranty of
-// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
-// GNU General Public License for more details.
-//
-// You should have received a copy of the GNU General Public License
-// along with this program. If not, see <https://www.gnu.org/licenses/>.
-
 #pragma once
-#include "session.h"
+#include <nlohmann/json.hpp>
 #include <string>
 #include <vector>
 #include <mutex>
@@ -24,11 +8,11 @@ struct sqlite3;
 
 // Cross-project conversation memory backed by SQLite FTS5.
 //
-// One row per turn (ChatMessage), keyed on (session_id, turn_index) for
+// One row per turn (chat message), keyed on (session_id, turn_index) for
 // idempotent re-indexing. Search returns BM25-ranked turns matching the
 // FTS5 MATCH expression. Stays out of the way: no embeddings, no daemon,
-// just an inverted index over the same conversation history that Session
-// already persists as JSON.
+// just an inverted index over the same conversation history that
+// SessionStore already persists as JSON.
 class MemoryDB {
 public:
     struct Hit {
@@ -53,8 +37,7 @@ public:
     void Close();
     bool IsOpen() const { return db_ != nullptr; }
 
-    // Delete every indexed turn for this session. Used before a full
-    // re-insert when we don't know which turns changed.
+    // Delete every indexed turn for this session.
     bool ClearSession(const std::string& session_id);
 
     // Insert one turn. The (session_id, turn_index) key is enforced via a
@@ -68,11 +51,12 @@ public:
                    const std::string& timestamp);
 
     // Bulk re-index every turn of a session. Wraps a transaction around
-    // ClearSession + IndexTurn calls. Used by --reindex backfill and by
-    // Session-loading paths.
+    // ClearSession + IndexTurn calls. `messages` is a JSON array of
+    // {role, content, ...} entries (wx_gritcode's wire format). System
+    // messages and tool messages with no content are skipped.
     bool RebuildSession(const std::string& session_id,
                         const std::string& cwd,
-                        const std::vector<ChatMessage>& history,
+                        const nlohmann::json& messages,
                         const std::string& timestamp);
 
     // FTS5 MATCH search. `query` is an FTS5 query expression — for the
@@ -94,16 +78,15 @@ public:
                            int before,
                            int after);
 
-    // Default db path: $XDG_DATA_HOME/gritcode/memory.db (or
-    // ~/.local/share/gritcode/memory.db).
+    // Default db path: $XDG_DATA_HOME/wx_gritcode/memory.db (or
+    // ~/.local/share/wx_gritcode/memory.db).
     static std::string DefaultPath();
 
     // Default sessions directory we walk during --reindex.
     static std::string SessionsDir();
 
     // Compact search output: snippet only, with session_id/turn_index/full_chars
-    // so the agent can follow up with grit_history_fetch. Total output bounded far
-    // below the MCP response limit.
+    // so the agent can follow up with grit_history_fetch. Total output bounded.
     static std::string FormatSearchHits(const std::vector<Hit>& hits);
 
     // Full-text window output (from Fetch). Per-hit cap + total cap so even a
