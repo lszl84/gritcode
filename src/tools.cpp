@@ -849,8 +849,9 @@ nlohmann::json GetToolDefinitions() {
     tools.push_back(ToolDef(
         "run_project",
         "Get, set, forget, or detect the command used to build and run the current project. "
-        "The stored command should compile (if needed) then run the project — the "
-        "Play button triggers it via the model. "
+        "The stored command is executed directly by the Play button — it does NOT go "
+        "through the AI loop, so it must be a single, self-contained shell command "
+        "that works from the project root with no prior setup. "
         "Actions: "
         "'get' (returns current config), "
         "'set' (stores a build+run command), "
@@ -859,7 +860,9 @@ nlohmann::json GetToolDefinitions() {
         "Call 'get' first to see if a command already exists, or 'detect' to auto-discover. "
         "IMPORTANT: When setting a command for a compiled project, include both "
         "the build step (e.g. `make` / `cargo build` / `go build`) AND the run "
-        "step in a single shell command (e.g. `make && ./myapp`). "
+        "step in a single shell command (e.g. `make && ./myapp`). Always test "
+        "the command via bash BEFORE storing it — run it, check the output, "
+        "and only call set once it succeeds. "
         "For interpreted languages the build step can be omitted.",
         {{"type", "object"},
          {"properties", {

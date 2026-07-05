@@ -893,6 +893,13 @@ void ChatFrame::SeedSystemPrompt() {
          "Prefer concrete actions over speculation. Use markdown for "
          "formatting and fenced code blocks for code.\n\n"
          + platformInfo + "\n\n"
+         "Play button: the ▶ button runs a single stored shell command "
+         "directly from the project root — it does NOT invoke the AI. "
+         "When the user clicks it and no command is stored, you will be "
+         "asked to configure it. The command must be a self-contained "
+         "build+run chain (e.g. `cmake --build build && ./build/myapp`) "
+         "that works from the project root. Always test the command via "
+         "bash before storing it with run_project set.\n\n"
          "Cross-project memory: use grit_history_search whenever the user "
          "references any prior work (\"last time\", \"once again\", \"we "
          "had\", \"how did we\", \"in <project>\"). It searches the "
@@ -1046,11 +1053,26 @@ void ChatFrame::OnPlay(wxCommandEvent&) {
         // No command stored yet — ask the model to discover the project and
         // configure both a build and run step.
         wxString prompt = wxString::FromUTF8(
-            "Configure the run command for this project.\n"
-            "1. Examine the project structure (list_directory, read build files).\n"
-            "2. Figure out the correct way to build and run it.\n"
-            "3. Use run_project set to store the full build+run command.\n"
-            "4. Then build and run the project.");
+            "Configure the Play button for this project. The Play button "
+            "executes a single shell command from the project root — it does "
+            "NOT go through the AI loop, so the command must be fully "
+            "self-contained with no prior setup steps.\n\n"
+            "1. Examine the project structure (list_directory, read build "
+            "files) to identify the build system and entry point.\n"
+            "2. Construct a SINGLE shell command that builds (if compiled) "
+            "AND runs the project. Use && to chain build + run (e.g. "
+            "`cmake --build build && ./build/myapp` or "
+            "`npm run build && npm start`). For interpreted languages the "
+            "build step can be omitted.\n"
+            "3. TEST the command by running it via bash. Verify it works "
+            "from the project root. If it fails, debug and fix it — "
+            "read error output, adjust the command, and retest.\n"
+            "4. Once the command works correctly, use run_project set to "
+            "store it.\n"
+            "5. Finally, build and run the project with the stored command.\n\n"
+            "The Play button runs exactly the stored command every time it's "
+            "clicked. Make sure it always rebuilds (or builds if needed) "
+            "before running so the latest code is reflected.");
         input_->SetValue(prompt);
         CallAfter([this]() {
             wxCommandEvent ev(wxEVT_BUTTON, ID_SEND);
