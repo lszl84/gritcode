@@ -1006,6 +1006,22 @@ void ChatFrame::OnPlay(wxCommandEvent&) {
         history_.push_back(std::move(histEntry));
         PersistActive();
 
+        // Synthesise an assistant message with a tool_call so the following
+        // tool-result message satisfies the API requirement: every "tool"
+        // role message must be preceded by an assistant with matching
+        // tool_calls. Without this the next user message would trigger a
+        // 400 ("Messages with role 'tool' must be a response to a preceding
+        // message with 'tool_calls'").
+        history_.push_back({
+            {"role", "assistant"},
+            {"content", nullptr},
+            {"tool_calls", nlohmann::json::array({
+                {{"id", "play"},
+                 {"type", "function"},
+                 {"function", {{"name", "bash"}, {"arguments", cfg->command}}}},
+            })},
+        });
+
         // Run the command on a background thread. Use the same cancel-token
         // infrastructure as the tool worker so Escape can kill runaway builds.
         auto token = std::make_shared<ToolCancelToken>();
