@@ -895,11 +895,9 @@ void ChatFrame::SeedSystemPrompt() {
          + platformInfo + "\n\n"
          "Play button: the ▶ button runs a single stored shell command "
          "directly from the project root — it does NOT invoke the AI. "
-         "When the user clicks it and no command is stored, you will be "
-         "asked to configure it. The command must be a self-contained "
-         "build+run chain (e.g. `cmake --build build && ./build/myapp`) "
-         "that works from the project root. Always test the command via "
-         "bash before storing it with run_project set.\n\n"
+         "When clicked with no stored command, you'll be asked to "
+         "configure it. Test your command via bash first, then store "
+         "it with run_project set.\n\n"
          "Cross-project memory: use grit_history_search whenever the user "
          "references any prior work (\"last time\", \"once again\", \"we "
          "had\", \"how did we\", \"in <project>\"). It searches the "
@@ -1034,8 +1032,23 @@ void ChatFrame::OnPlay(wxCommandEvent&) {
         auto token = std::make_shared<ToolCancelToken>();
         currentToolToken_ = token;
         if (toolWorker_.joinable()) toolWorker_.join();
-        toolWorker_ = std::thread([this, cmd = cfg->command, token]() {
-            std::string result = ToolBashDirect(cmd.c_str(), token.get());
+        toolWorker_ = std::thread([this, cmd = cfg->command, token, cwd = activeCwd_]() {
+            // Wrap the stored command with a cd to the project directory so
+            // relative paths work regardless of the process's current cwd.
+            // This is the key fix for the Play button: the model stores
+            // commands like "cmake --build build && ./build/gritcode" which
+            // only work from the project root. The wrapping cd ensures the
+            // shell is in the right place before executing.
+            // POSIX-safe single-quote escaping for the cwd path.
+            std::string qcwd;
+            qcwd += '\'';
+            for (char ch : cwd) {
+                if (ch == '\'') qcwd += "'\\''";
+                else qcwd += ch;
+            }
+            qcwd += '\'';
+            std::string wrapped = "cd " + qcwd + " && " + cmd;
+            std::string result = ToolBashDirect(wrapped.c_str(), token.get());
             CallAfter([this, result, cmd]() {
                 if (destroying_.load()) return;
                 currentToolToken_.reset();
@@ -1053,26 +1066,14 @@ void ChatFrame::OnPlay(wxCommandEvent&) {
         // No command stored yet — ask the model to discover the project and
         // configure both a build and run step.
         wxString prompt = wxString::FromUTF8(
-            "Configure the Play button for this project. The Play button "
-            "executes a single shell command from the project root — it does "
-            "NOT go through the AI loop, so the command must be fully "
-            "self-contained with no prior setup steps.\n\n"
-            "1. Examine the project structure (list_directory, read build "
-            "files) to identify the build system and entry point.\n"
-            "2. Construct a SINGLE shell command that builds (if compiled) "
-            "AND runs the project. Use && to chain build + run (e.g. "
-            "`cmake --build build && ./build/myapp` or "
-            "`npm run build && npm start`). For interpreted languages the "
-            "build step can be omitted.\n"
-            "3. TEST the command by running it via bash. Verify it works "
-            "from the project root. If it fails, debug and fix it — "
-            "read error output, adjust the command, and retest.\n"
-            "4. Once the command works correctly, use run_project set to "
-            "store it.\n"
-            "5. Finally, build and run the project with the stored command.\n\n"
-            "The Play button runs exactly the stored command every time it's "
-            "clicked. Make sure it always rebuilds (or builds if needed) "
-            "before running so the latest code is reflected.");
+            "Configure the Play button for this project.\n\n"
+            "1. Examine the project structure and identify the build/entry "
+            "point.\n"
+            "2. Construct a SINGLE self-contained command that builds (if "
+            "compiled) AND runs the project from the root directory.\n"
+            "3. Test it with bash — debug until it succeeds.\n"
+            "4. Use run_project set to store the working command.\n\n"
+            "The Play button runs exactly the stored command every time.");
         input_->SetValue(prompt);
         CallAfter([this]() {
             wxCommandEvent ev(wxEVT_BUTTON, ID_SEND);

@@ -858,18 +858,22 @@ nlohmann::json GetToolDefinitions() {
         "'forget' (removes the config), "
         "'detect' (scans the project directory for build systems and suggests commands). "
         "Call 'get' first to see if a command already exists, or 'detect' to auto-discover. "
-        "IMPORTANT: When setting a command for a compiled project, include both "
-        "the build step (e.g. `make` / `cargo build` / `go build`) AND the run "
-        "step in a single shell command (e.g. `make && ./myapp`). Always test "
-        "the command via bash BEFORE storing it — run it, check the output, "
-        "and only call set once it succeeds. "
+        "IMPORTANT: The Play button automatically prefixes the command with "
+        "`cd <cwd> &&` so relative paths always resolve against the project "
+        "directory. You do NOT need to include `cd` in the command itself. "
+        "When calling `set`, always pass `cwd` explicitly — set it to the "
+        "absolute path of the project root. "
+        "For compiled projects, include both the build step and the run step "
+        "in a single shell command (e.g. `cmake --build build && ./build/gritcode`). "
+        "Always test the command via bash BEFORE storing it — run it, check the "
+        "output, and only call set once it succeeds. "
         "For interpreted languages the build step can be omitted.",
         {{"type", "object"},
          {"properties", {
              {"action", {{"type", "string"},
                          {"description", "One of: get, set, forget, detect."}}},
              {"command", StrParam("Shell command that builds (if needed) and runs the project. Required for set action. Should be a single command — use && to chain build + run steps.")},
-             {"cwd", StrParam("Project directory (defaults to current session directory).")},
+             {"cwd", StrParam("Project directory (absolute path). Defaults to current session directory, but you SHOULD always set this explicitly to the project's root directory so the config is stored under the correct key.")},
          }},
          {"required", {"action"}}}));
 
@@ -1002,7 +1006,7 @@ std::string ToolRunProject(const nlohmann::json& args, const std::string& curren
         }
 
         result += "\nYou can store one of the suggested commands with:\n";
-        result += "  run_project set command=\"<your command>\"\n";
+        result += "  run_project set command=\"<your command>\" cwd=\"<absolute project path>\"\n";
         result += "Or the model can figure it out automatically when the Play button is clicked.";
 
         return result;
