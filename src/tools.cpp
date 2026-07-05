@@ -229,6 +229,10 @@ std::string ToolBash(const nlohmann::json& args, ToolCancelToken* token) {
 // and SIGTERM the whole group on Escape. popen() doesn't expose the child PID
 // and can't be interrupted from another thread. The pipe is O_CLOEXEC so the
 // child's exec'd program doesn't inherit our fd.
+//
+// Timeout is enforced in the parent (SIGTERM → 500 ms → SIGKILL on the
+// process group), not via an external `timeout` binary — that GNU utility
+// doesn't exist on macOS.
 std::string ToolBash(const nlohmann::json& args, ToolCancelToken* token) {
     std::string cmd = GetStringArg(args, "command");
     if (cmd.empty()) return "Error: missing 'command' argument";
@@ -247,12 +251,12 @@ std::string ToolBash(const nlohmann::json& args, ToolCancelToken* token) {
     }
     if (pid == 0) {
         // child: become its own process group leader so the parent can signal
-        // the whole tree (timeout → bash → user command) with one kill(-pgid).
+        // the whole tree (bash → user command) with one kill(-pgid).
         setpgid(0, 0);
         dup2(pfd[1], STDOUT_FILENO);
         dup2(pfd[1], STDERR_FILENO);
         // pfd[0]/pfd[1] are O_CLOEXEC so they auto-close on exec.
-        execlp("timeout", "timeout", "30", "bash", "-c", cmd.c_str(),
+        execlp("bash", "bash", "-c", cmd.c_str(),
                (char*)nullptr);
         _exit(127);
     }
@@ -276,14 +280,23 @@ std::string ToolBash(const nlohmann::json& args, ToolCancelToken* token) {
 
     std::string out;
     bool truncated = false;
+    bool timedOut = false;
     bool sentTerm = false;
     bool sentKill = false;
     bool pipeEof = false;
     int status = 0;
     char buf[4096];
+    auto timeoutDeadline = std::chrono::steady_clock::now() + std::chrono::seconds(30);
     auto killDeadline = std::chrono::steady_clock::time_point::max();
 
     for (;;) {
+        // 30s timeout: same escalation as cancellation (SIGTERM → SIGKILL).
+        if (!sentTerm && std::chrono::steady_clock::now() >= timeoutDeadline) {
+            timedOut = true;
+            kill(-pid, SIGTERM);
+            sentTerm = true;
+            killDeadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(500);
+        }
         if (token && token->cancelled.load() && !sentTerm) {
             kill(-pid, SIGTERM);
             sentTerm = true;
@@ -335,8 +348,7 @@ std::string ToolBash(const nlohmann::json& args, ToolCancelToken* token) {
     if (truncated) out += "\n[output truncated]";
     if (out.empty()) out = "(no output)";
 
-    // `timeout` exits 124 when it kills the child.
-    if (WIFEXITED(status) && WEXITSTATUS(status) == 124)
+    if (timedOut)
         out += "\n[timed out after 30s]";
     else if (WIFEXITED(status) && WEXITSTATUS(status) != 0)
         out += "\n[exit " + std::to_string(WEXITSTATUS(status)) + "]";
