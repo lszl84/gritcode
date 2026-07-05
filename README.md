@@ -19,7 +19,7 @@ Uses [DeepSeek V4](https://deepseek.com) (API key required) or the free [OpenCod
 - Multi-session history with SQLite persistence and cross-project full-text search
 - Collapsible tool-call cards and thinking blocks
 - Native dark/light theme
-- ~10 MB binary, ~50 MB RAM at rest — vs hundreds of MB for Electron alternatives (T3 Chat, OpenCode GUI, Claude Code GUI, etc.)
+- ~10 MB binary, ~50 MB RAM at rest — vs hundreds of MB for Electron alternatives (T3 Code, OpenCode GUI, Claude Code GUI, etc.)
 
 ## Build from source
 
