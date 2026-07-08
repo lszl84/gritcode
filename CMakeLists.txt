@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.28 FATAL_ERROR)
 
-project(gritcode VERSION 0.1.2 LANGUAGES CXX)
+project(gritcode VERSION 0.1.3 LANGUAGES CXX)
 
 # Human-facing version string (used for packaging, bundle metadata, etc.)
 set(GRITCODE_VERSION "${PROJECT_VERSION}-alpha")
@@ -183,6 +183,9 @@ if(UNIX AND NOT APPLE)
     install(FILES packaging/gritcode.desktop
         DESTINATION ${CMAKE_INSTALL_DATADIR}/applications
     )
+    install(FILES packaging/gritcode.metainfo.xml
+        DESTINATION ${CMAKE_INSTALL_DATADIR}/metainfo
+    )
     install(FILES packaging/gritcode.svg
         DESTINATION ${CMAKE_INSTALL_DATADIR}/icons/hicolor/scalable/apps
     )
@@ -209,7 +212,7 @@ endif()
 # ---- CPack ----
 set(CPACK_PACKAGE_NAME "gritcode")
 set(CPACK_PACKAGE_VERSION "${GRITCODE_VERSION}")
-set(CPACK_PACKAGE_VENDOR "gritcode")
+set(CPACK_PACKAGE_VENDOR "DevMindscape")
 set(CPACK_PACKAGE_DESCRIPTION_SUMMARY "Native desktop AI coding assistant")
 set(CPACK_PACKAGE_HOMEPAGE_URL "https://github.com/lszl84/gritcode")
 set(CPACK_PACKAGE_CONTACT "luke@devmindscape.com")
@@ -223,10 +226,19 @@ if(APPLE)
 else()
     # Linux: DEB only.
     set(CPACK_GENERATOR "DEB")
-    set(CPACK_DEBIAN_PACKAGE_MAINTAINER "Lukasz Sromek <luke@devmindscape.com>")
+    set(CPACK_DEBIAN_PACKAGE_MAINTAINER "DevMindscape <luke@devmindscape.com>")
     set(CPACK_DEBIAN_PACKAGE_SECTION "devel")
     set(CPACK_DEBIAN_PACKAGE_HOMEPAGE "${CPACK_PACKAGE_HOMEPAGE_URL}")
     set(CPACK_DEBIAN_PACKAGE_SHLIBDEPS ON)
+    set(CPACK_DEBIAN_PACKAGE_DESCRIPTION
+        " Native desktop AI coding assistant — no Electron, no browser tab.
+ Streaming markdown, multi-session history, bash tool execution,
+ one-click Play button that builds and runs your project without
+ an AI roundtrip.
+ .
+ Built with C++20 and wxWidgets. Uses ~10 MB on disk and ~50 MB
+ RAM at rest, vs hundreds of MB for Electron alternatives.
+ Supports DeepSeek and the free OpenCode Zen tier.")
 endif()
 
 include(CPack)
