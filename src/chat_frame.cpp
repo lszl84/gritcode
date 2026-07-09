@@ -590,6 +590,16 @@ ChatFrame::~ChatFrame() {
         }
         toolWorker_.join();
     }
+    if (playWorker_.joinable()) {
+        if (auto tok = currentPlayToken_) {
+            tok->cancelled.store(true);
+#ifndef _WIN32
+            int pgid = tok->activePgid.load();
+            if (pgid > 0) ::kill(-pgid, SIGTERM);
+#endif
+        }
+        playWorker_.join();
+    }
 }
 
 nlohmann::json ChatFrame::BuildBlocksSnapshot() const {
@@ -718,6 +728,14 @@ void ChatFrame::RequestCancel() {
     // the active pgid kills the bash subtree without waiting for the worker
     // to notice — important when bash is blocked on something slow.
     if (auto tok = currentToolToken_) {
+        tok->cancelled.store(true);
+#ifndef _WIN32
+        int pgid = tok->activePgid.load();
+        if (pgid > 0) ::kill(-pgid, SIGTERM);
+#endif
+    }
+    // Same for the Play-button worker (e.g. a running dev server).
+    if (auto tok = currentPlayToken_) {
         tok->cancelled.store(true);
 #ifndef _WIN32
         int pgid = tok->activePgid.load();
@@ -1010,12 +1028,13 @@ void ChatFrame::OnPlay(wxCommandEvent&) {
         userBlock.runs.push_back({userMsg, false, false});
         canvas_->AddBlock(std::move(userBlock));
 
-        // Run the command on a background thread. Use the same cancel-token
-        // infrastructure as the tool worker so Escape can kill runaway builds.
+        // Run the command on a background thread. Use a dedicated playWorker_
+        // so a long-running dev server doesn't block the tool dispatch worker
+        // — otherwise the model can't execute tool calls while the server runs.
         auto token = std::make_shared<ToolCancelToken>();
-        currentToolToken_ = token;
-        if (toolWorker_.joinable()) toolWorker_.join();
-        toolWorker_ = std::thread([this, cmd = cfg->command, token, cwd = activeCwd_]() {
+        currentPlayToken_ = token;
+        if (playWorker_.joinable()) playWorker_.join();
+        playWorker_ = std::thread([this, cmd = cfg->command, token, cwd = activeCwd_]() {
             // Wrap the stored command with a cd to the project directory so
             // relative paths work regardless of the process's current cwd.
             // This is the key fix for the Play button: the model stores
@@ -1034,7 +1053,7 @@ void ChatFrame::OnPlay(wxCommandEvent&) {
             std::string result = ToolBashDirect(wrapped.c_str(), token.get());
             CallAfter([this, result, cmd]() {
                 if (destroying_.load()) return;
-                currentToolToken_.reset();
+                currentPlayToken_.reset();
                 // Canvas-only display — no history_ modification.
                 RenderToolBlock("bash", cmd, result);
             });

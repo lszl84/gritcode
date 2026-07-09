@@ -122,6 +122,12 @@ private:
     // frame and call wxQueueEvent on a dangling `this`.
     std::thread toolWorker_;
 
+    // Separate thread for Play-button runs so a long-running dev server
+    // doesn't block the tool dispatch worker (they share the same cancellation
+    // pattern but must not contend for the same std::thread slot).
+    std::shared_ptr<ToolCancelToken> currentPlayToken_;
+    std::thread playWorker_;
+
     // Graceful close — see OnClose.
     bool quitRequested_ = false;
 
