@@ -734,14 +734,10 @@ void ChatFrame::RequestCancel() {
         if (pgid > 0) ::kill(-pgid, SIGTERM);
 #endif
     }
-    // Same for the Play-button worker (e.g. a running dev server).
-    if (auto tok = currentPlayToken_) {
-        tok->cancelled.store(true);
-#ifndef _WIN32
-        int pgid = tok->activePgid.load();
-        if (pgid > 0) ::kill(-pgid, SIGTERM);
-#endif
-    }
+    // Note: Play-button worker (currentPlayToken_) is intentionally NOT
+    // cancelled here. Escape cancels AI-initiated tool calls, not user-
+    // initiated Play runs. If the user started a dev server via Play,
+    // they want it to keep running.
 }
 
 void ChatFrame::ReloadToolbarIcons() {
