@@ -16,6 +16,7 @@ const wxString kServicePrefix = "gritcode/";
 const wxString kUsername      = "api_key";
 
 const char* kModelIndexKey = "/UI/LastModelIndex";
+const char* kModelExplicitKey = "/UI/ModelExplicit";
 
 wxString ServiceFor(Preferences::Provider p) {
     switch (p) {
@@ -51,6 +52,15 @@ void Preferences::Init() {
 
 int Preferences::GetLastModelIndex() {
     auto* cfg = wxConfigBase::Get();
+    long explicitChoice = 0;
+    cfg->Read(kModelExplicitKey, &explicitChoice, 0L);
+
+    if (!explicitChoice) {
+        // User never changed the dropdown — pick the best available model.
+        if (HasApiKey(Provider::DeepSeek)) return 2;  // DeepSeek Pro
+        return 0;  // OpenCode Free (no key, only option that works)
+    }
+
     long v = 0;
     cfg->Read(kModelIndexKey, &v, 0L);
     if (v < 0 || v > 2) v = 0;
@@ -61,6 +71,7 @@ void Preferences::SetLastModelIndex(int idx) {
     if (idx < 0 || idx > 2) idx = 0;
     auto* cfg = wxConfigBase::Get();
     cfg->Write(kModelIndexKey, (long)idx);
+    cfg->Write(kModelExplicitKey, 1L);
     cfg->Flush();
 }
 

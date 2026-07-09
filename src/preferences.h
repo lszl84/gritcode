@@ -17,8 +17,10 @@ public:
 
     // ---- non-secret prefs (wxConfig) ----
 
-    // Index into the model dropdown: 0=OpenCode Free, 1=DeepSeek V4 Flash,
-    // 2=DeepSeek V4 Pro. Out-of-range values are clamped on read.
+    // Resolves the effective model index. If the user has never explicitly
+    // picked a model, defaults to DeepSeek Pro (2) when an API key is stored,
+    // otherwise OpenCode Free (0). Once the user changes the dropdown, that
+    // choice sticks permanently.
     static int  GetLastModelIndex();
     static void SetLastModelIndex(int idx);
 
