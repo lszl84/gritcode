@@ -995,7 +995,13 @@ void ChatFrame::OnPlay(wxCommandEvent&) {
     if (streaming_) return;
     auto cfg = RunConfigStore::Get(activeCwd_);
     if (cfg) {
-        // Direct execution path — no model inference, just run the stored command.
+        // Direct execution path — no model inference, just run the stored
+        // command. Display-only: the user prompt block and tool result go
+        // on the canvas but are NOT appended to history_. The Play button
+        // is a local UX affordance; injecting fake tool_call/tool_result
+        // messages into the API conversation breaks subsequent requests
+        // when the command is long-running (e.g. a dev server) — the API
+        // rejects the dangling tool_calls with a 400.
         wxString userMsg = wxString::FromUTF8("▶ Build and run:\n  ") + wxString::FromUTF8(cfg->command);
         Block userBlock;
         userBlock.type = BlockType::UserPrompt;
@@ -1003,29 +1009,6 @@ void ChatFrame::OnPlay(wxCommandEvent&) {
         userBlock.visibleText = userMsg;
         userBlock.runs.push_back({userMsg, false, false});
         canvas_->AddBlock(std::move(userBlock));
-
-        // Append to history so it persists.
-        nlohmann::json histEntry;
-        histEntry["role"] = "user";
-        histEntry["content"] = userMsg.ToStdString(wxConvUTF8);
-        history_.push_back(std::move(histEntry));
-        PersistActive();
-
-        // Synthesise an assistant message with a tool_call so the following
-        // tool-result message satisfies the API requirement: every "tool"
-        // role message must be preceded by an assistant with matching
-        // tool_calls. Without this the next user message would trigger a
-        // 400 ("Messages with role 'tool' must be a response to a preceding
-        // message with 'tool_calls'").
-        history_.push_back({
-            {"role", "assistant"},
-            {"content", nullptr},
-            {"tool_calls", nlohmann::json::array({
-                {{"id", "play"},
-                 {"type", "function"},
-                 {"function", {{"name", "bash"}, {"arguments", cfg->command}}}},
-            })},
-        });
 
         // Run the command on a background thread. Use the same cancel-token
         // infrastructure as the tool worker so Escape can kill runaway builds.
@@ -1052,20 +1035,16 @@ void ChatFrame::OnPlay(wxCommandEvent&) {
             CallAfter([this, result, cmd]() {
                 if (destroying_.load()) return;
                 currentToolToken_.reset();
+                // Canvas-only display — no history_ modification.
                 RenderToolBlock("bash", cmd, result);
-                history_.push_back({
-                    {"role", "tool"},
-                    {"tool_call_id", "play"},
-                    {"name", "bash"},
-                    {"content", result},
-                });
-                PersistActive();
             });
         });
     } else {
         // No command stored yet — ask the model to discover the project and
-        // configure both a build and run step.
-        wxString prompt = wxString::FromUTF8(
+        // configure both a build and run step. The visible prompt is short;
+        // hidden instructions tell the model how to handle servers and how
+        // to make subsequent Play clicks restart rather than fork.
+        wxString visible = wxString::FromUTF8(
             "Configure the Play button for this project.\n\n"
             "1. Examine the project structure and identify the build/entry "
             "point.\n"
@@ -1074,11 +1053,46 @@ void ChatFrame::OnPlay(wxCommandEvent&) {
             "3. Test it with bash — debug until it succeeds.\n"
             "4. Use run_project set to store the working command.\n\n"
             "The Play button runs exactly the stored command every time.");
-        input_->SetValue(prompt);
-        CallAfter([this]() {
-            wxCommandEvent ev(wxEVT_BUTTON, ID_SEND);
-            OnSend(ev);
-        });
+        std::string hidden =
+            "\n\n"
+            "[hidden]"
+            "When configuring the Play button for server / web-dev projects "
+            "(Hugo, Django, Next.js, Flask, Express, Rails, etc.), the "
+            "stored command must:"
+            "\n- Kill any previous instance of the server before starting a "
+            "new one, so repeated Play clicks restart rather than fork. Use "
+            "pkill or kill $(lsof -t -i:<port>) for a clean restart."
+            "\n- After starting the server, open the default browser to the "
+            "appropriate URL (e.g. xdg-open http://localhost:1313 for Hugo, "
+            "xdg-open http://localhost:8000 for Django)."
+            "\n\nFor static sites (Hugo, Jekyll, etc.), the command should "
+            "build AND start the dev server + open the browser, all in one "
+            "shot: 'hugo serve && xdg-open http://localhost:1313' is NOT "
+            "correct because hugo serve blocks. Instead use "
+            "'hugo serve --noBrowser & sleep 1 && xdg-open http://localhost:1313 && wait' "
+            "or a similar pattern."
+            "\n\nFor compiled projects, just build and run — no browser needed."
+            "[/hidden]";
+
+        // Show only the visible prompt on the canvas.
+        Block ub;
+        ub.type = BlockType::UserPrompt;
+        ub.rawText = visible;
+        InlineRun r;
+        r.text = visible;
+        ub.runs.push_back(r);
+        ub.visibleText = visible;
+        canvas_->AddBlock(std::move(ub));
+
+        // The API sees visible + hidden; the canvas shows only visible.
+        history_.push_back({{"role", "user"},
+                            {"content", visible.ToStdString(wxConvUTF8) + hidden}});
+
+        streaming_ = true;
+        canvas_->SetThinking(true);
+        UpdateQueueUI();
+        toolIter_ = 0;
+        StartCompletion();
     }
 }
 void ChatFrame::OnSettings(wxCommandEvent&) {
