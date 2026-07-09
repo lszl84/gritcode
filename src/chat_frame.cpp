@@ -1028,8 +1028,17 @@ void ChatFrame::OnPlay(wxCommandEvent&) {
         // so a long-running dev server doesn't block the tool dispatch worker
         // — otherwise the model can't execute tool calls while the server runs.
         auto token = std::make_shared<ToolCancelToken>();
-        currentPlayToken_ = token;
+        // If a previous Play run is still alive (e.g. a dev server), cancel
+        // it so join() returns quickly instead of blocking the GUI forever.
+        if (auto old = currentPlayToken_) {
+            old->cancelled.store(true);
+#ifndef _WIN32
+            int pgid = old->activePgid.load();
+            if (pgid > 0) ::kill(-pgid, SIGTERM);
+#endif
+        }
         if (playWorker_.joinable()) playWorker_.join();
+        currentPlayToken_ = token;
         playWorker_ = std::thread([this, cmd = cfg->command, token, cwd = activeCwd_]() {
             // Wrap the stored command with a cd to the project directory so
             // relative paths work regardless of the process's current cwd.
