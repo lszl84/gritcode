@@ -25,8 +25,8 @@ grade: stable
 
 apps:
   gritcode:
-    command: bin/gritcode
-    desktop: share/applications/gritcode.desktop
+    command: usr/bin/gritcode
+    desktop: usr/share/applications/gritcode.desktop
 
 parts:
   gritcode:
@@ -35,7 +35,6 @@ parts:
     cmake-parameters:
       - -DCMAKE_C_COMPILER=clang
       - -DCMAKE_CXX_COMPILER=clang++
-      - -DCMAKE_INSTALL_PREFIX=/
     build-packages:
       - g++
       - ninja-build
