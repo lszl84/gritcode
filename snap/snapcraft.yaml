@@ -35,7 +35,6 @@ parts:
     cmake-parameters:
       - -DCMAKE_C_COMPILER=clang
       - -DCMAKE_CXX_COMPILER=clang++
-      - -DCMAKE_INSTALL_PREFIX=/
     build-packages:
       - g++
       - ninja-build
@@ -52,3 +51,13 @@ parts:
       - libsecret-1-0
       - libwxgtk3.2-1t64
       - libwxbase3.2-1t64
+    override-prime: |
+      craftctl default
+      # The cmake install puts desktop/metainfo/icons under the prefix;
+      # snapcraft expects them directly in the prime directory.
+      mkdir -p $CRAFT_PRIME/share/applications
+      mkdir -p $CRAFT_PRIME/share/metainfo
+      mkdir -p $CRAFT_PRIME/share/icons/hicolor/scalable/apps
+      cp packaging/gritcode.desktop $CRAFT_PRIME/share/applications/
+      cp packaging/gritcode.metainfo.xml $CRAFT_PRIME/share/metainfo/
+      cp packaging/gritcode.svg $CRAFT_PRIME/share/icons/hicolor/scalable/apps/
