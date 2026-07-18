@@ -25,8 +25,8 @@ grade: stable
 
 apps:
   gritcode:
-    command: usr/bin/gritcode
-    desktop: usr/share/applications/gritcode.desktop
+    command: usr/local/bin/gritcode
+    desktop: usr/local/share/applications/gritcode.desktop
 
 parts:
   gritcode:
