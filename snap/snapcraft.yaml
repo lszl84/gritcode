@@ -33,8 +33,8 @@ parts:
     plugin: cmake
     source: .
     cmake-parameters:
-      - -DCMAKE_C_COMPILER=gcc
-      - -DCMAKE_CXX_COMPILER=g++
+      - -DCMAKE_C_COMPILER=clang
+      - -DCMAKE_CXX_COMPILER=clang++
     build-packages:
       - g++
       - ninja-build
