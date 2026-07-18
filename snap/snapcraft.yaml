@@ -35,6 +35,7 @@ parts:
     cmake-parameters:
       - -DCMAKE_C_COMPILER=clang
       - -DCMAKE_CXX_COMPILER=clang++
+      - -DCMAKE_INSTALL_PREFIX=/
     build-packages:
       - g++
       - ninja-build
