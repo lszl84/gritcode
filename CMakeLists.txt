@@ -231,13 +231,13 @@ else()
     set(CPACK_DEBIAN_PACKAGE_HOMEPAGE "${CPACK_PACKAGE_HOMEPAGE_URL}")
     set(CPACK_DEBIAN_PACKAGE_SHLIBDEPS ON)
     set(CPACK_DEBIAN_PACKAGE_DESCRIPTION
-        " Native desktop AI coding assistant -- no browser tab, no Electron.
+        " Native desktop AI coding assistant. No browser tab, no Electron.
  Streaming markdown, multi-session history, and a one-click Play
  button that builds and runs your project without an AI roundtrip.
  .
- Lean and snappy: ~10 MB on disk and ~50 MB RAM at rest, compared to
- hundreds of MB for OpenCode, Claude Code, and Codex. Built with
- C++20 and wxWidgets.
+ Lean and fast: built with C++20 and wxWidgets, a fraction of the
+ size of Electron-based alternatives like OpenCode, Claude Code,
+ and Codex.
  .
  Supports DeepSeek V4 and the free OpenCode Zen tier.")
 
