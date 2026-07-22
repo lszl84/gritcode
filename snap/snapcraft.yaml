@@ -1,20 +1,22 @@
 name: gritcode
 version: "0.1.6"
-summary: "Native desktop AI coding assistant — no Electron, no browser tab"
+summary: "Native desktop AI coding assistant -- no browser tab, no Electron"
 description: |
   A fast, native desktop AI coding assistant built with C++20 and wxWidgets.
   Streaming markdown rendering, multi-session history with full-text search,
   and a one-click Play button that builds and runs your project without an
   AI roundtrip.
 
+  Lean and snappy: ~10 MB on disk and ~50 MB RAM at rest, compared to
+  hundreds of MB for OpenCode, Claude Code, and Codex.
+
   Features:
-  - Streaming markdown — paragraphs, headings, code blocks, tables
-  - One-click Play button — builds and runs your project, no AI needed
-  - Tool calls — bash, read/write/edit files, web fetch, directory listing
+  - Streaming markdown -- paragraphs, headings, code blocks, tables
+  - One-click Play button -- builds and runs your project, no AI needed
+  - Tool calls -- bash, read/write/edit files, web fetch, directory listing
   - Multi-session history with SQLite persistence and cross-project search
   - Collapsible tool-call cards and thinking blocks
   - Native dark/light theme
-  - ~10 MB binary, ~50 MB RAM at rest
 
   Supports DeepSeek V4 (API key) or the free OpenCode Zen tier.
 

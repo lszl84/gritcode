@@ -15,9 +15,12 @@
       an AI roundtrip.
     </p>
     <p>
-      Built with C++20 and wxWidgets. Uses ~10 MB on disk — orders of
-      magnitude leaner than Electron alternatives. Supports DeepSeek
-      and the free OpenCode Zen tier.
+      Lean and snappy: ~10 MB on disk and ~50 MB RAM at rest, compared
+      to hundreds of MB for OpenCode, Claude Code, and Codex. Built with
+      C++20 and wxWidgets.
+    </p>
+    <p>
+      Supports DeepSeek V4 (API key) or the free OpenCode Zen tier.
     </p>
   </description>
 
