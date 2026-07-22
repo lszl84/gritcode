@@ -1,5 +1,5 @@
 name: gritcode
-version: "0.1.6"
+version: "0.1.7"
 summary: "Native desktop AI coding assistant. No browser tab, no Electron."
 description: |
   A fast, native desktop AI coding assistant built with C++20 and wxWidgets.
