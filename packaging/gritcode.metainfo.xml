@@ -7,6 +7,10 @@
   <name>Gritcode</name>
   <summary>Native desktop AI coding assistant</summary>
 
+  <developer id="com.devmindscape">
+    <name>DevMindscape</name>
+  </developer>
+
   <description>
     <p>
       A fast, native desktop AI coding assistant. Streaming markdown
@@ -23,14 +27,15 @@
     </p>
   </description>
 
-  <icon type="stock">gritcode</icon>
+  <launchable type="desktop-id">gritcode.desktop</launchable>
+
+  <icon type="remote">https://raw.githubusercontent.com/lszl84/gritcode/main/assets/gritcode-icon.svg</icon>
   <categories>
     <category>Development</category>
     <category>IDE</category>
   </categories>
 
   <url type="homepage">https://github.com/lszl84/gritcode</url>
-  <developer_name>DevMindscape</developer_name>
 
   <screenshots>
     <screenshot type="default">
