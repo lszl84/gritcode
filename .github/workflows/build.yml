@@ -50,18 +50,6 @@ jobs:
           name: linux-deb
           path: build/gritcode-*.deb
 
-      - name: Install snapcraft
-        run: sudo snap install snapcraft --classic
-
-      - name: Build snap
-        run: snapcraft pack --output build/ --destructive-mode
-
-      - name: Upload snap
-        uses: actions/upload-artifact@v7
-        with:
-          name: linux-snap
-          path: build/gritcode_*.snap
-
   macos:
     name: macOS
     runs-on: macos-14
