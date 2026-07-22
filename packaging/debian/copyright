@@ -1,0 +1,5 @@
+Format: https://www.debian.org/doc/packaging-manuals/copyright-format/1.0/
+Upstream-Name: gritcode
+Upstream-Contact: DevMindscape <luke@devmindscape.com>
+Source: https://github.com/lszl84/gritcode
+License: GPL-3.0

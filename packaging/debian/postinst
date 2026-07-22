@@ -1,0 +1,8 @@
+#!/bin/sh
+set -e
+# Refresh the icon cache so gritcode.svg shows up in launchers and software center.
+if command -v update-icon-caches >/dev/null 2>&1; then
+    update-icon-caches /usr/share/icons/hicolor
+elif command -v gtk-update-icon-cache >/dev/null 2>&1; then
+    gtk-update-icon-cache /usr/share/icons/hicolor
+fi

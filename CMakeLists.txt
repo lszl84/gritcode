@@ -239,6 +239,20 @@ else()
  Built with C++20 and wxWidgets. Uses ~10 MB on disk and ~50 MB
  RAM at rest, vs hundreds of MB for Electron alternatives.
  Supports DeepSeek and the free OpenCode Zen tier.")
+
+    # --- DEB control extras ---
+    # Generate a minimal changelog at configure time.
+    string(TIMESTAMP TODAY "%Y-%m-%d")
+    set(CHANGELOG_FILE "${CMAKE_CURRENT_BINARY_DIR}/changelog")
+    file(WRITE "${CHANGELOG_FILE}"
+        "gritcode (${GRITCODE_VERSION}) unstable; urgency=medium\n\n"
+        "  * Release ${GRITCODE_VERSION}\n\n"
+        " -- DevMindscape <luke@devmindscape.com>  ${TODAY}\n")
+
+    set(CPACK_DEBIAN_PACKAGE_CONTROL_EXTRA
+        "${CMAKE_CURRENT_SOURCE_DIR}/packaging/debian/postinst"
+        "${CMAKE_CURRENT_SOURCE_DIR}/packaging/debian/copyright"
+        "${CHANGELOG_FILE}")
 endif()
 
 include(CPack)
