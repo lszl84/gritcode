@@ -293,19 +293,6 @@ ChatFrame::ChatFrame()
     root->Add(outer, 1, wxEXPAND | wxALL, FromDIP(2));
     panel->SetSizer(root);
 
-    // Import viewer panel — right side, hidden until a session is imported.
-    importPanel_ = new wxPanel(this);
-    importPanel_->SetBackgroundColour(
-        wxSystemSettings::GetColour(wxSYS_COLOUR_WINDOW));
-    importSizer_ = new wxBoxSizer(wxVERTICAL);
-    importPanel_->SetSizer(importSizer_);
-    importPanel_->Hide();
-
-    auto* frameSizer = new wxBoxSizer(wxHORIZONTAL);
-    frameSizer->Add(panel, 1, wxEXPAND);
-    frameSizer->Add(importPanel_, 0, wxEXPAND | wxLEFT, 4);
-    SetSizer(frameSizer);
-
     // Open the most recent session if one exists; otherwise seed one for the
     // default cwd so the dropdown always has at least one entry.
     store_.Init();
@@ -586,6 +573,42 @@ ChatFrame::ChatFrame()
             RestoreCanvasFromHistory();
             RefreshSessionChoice();
             return {{"ok", true}, {"cwd", activeCwd_}};
+        });
+    };
+    cb.exportSession = [this, guiSync](const std::string& path)
+        -> nlohmann::json {
+        return guiSync([this, path]() -> nlohmann::json {
+            nlohmann::json j;
+            j["version"] = 1;
+            j["messages"] = history_;
+            std::ofstream f(path, std::ios::binary | std::ios::trunc);
+            if (!f) return {{"ok", false}, {"error", "cannot write file"}};
+            f << j.dump(2, ' ', false, nlohmann::json::error_handler_t::replace);
+            return {{"ok", true}, {"messageCount", (int)history_.size()}};
+        });
+    };
+    cb.importSession = [this, guiSync](const std::string& path)
+        -> nlohmann::json {
+        return guiSync([this, path]() -> nlohmann::json {
+            std::ifstream f(path);
+            if (!f) return {{"ok", false}, {"error", "cannot open file"}};
+            nlohmann::json j;
+            try { f >> j; }
+            catch (...) { return {{"ok", false}, {"error", "invalid JSON"}}; }
+            if (!j.contains("messages") || !j["messages"].is_array())
+                return {{"ok", false}, {"error", "no messages array"}};
+
+            importedMessages_.clear();
+            for (const auto& m : j["messages"]) {
+                if (m.is_object()) importedMessages_.push_back(m);
+            }
+
+            // Count user prompts.
+            int promptCount = 0;
+            for (const auto& m : importedMessages_) {
+                if (m.value("role", std::string{}) == "user") ++promptCount;
+            }
+            return {{"ok", true}, {"promptCount", promptCount}};
         });
     };
     mcp_.Start(std::move(cb));
@@ -1220,35 +1243,28 @@ void ChatFrame::OnImport(wxCommandEvent&) {
         return;
     }
 
-    importedMessages_.clear();
+    std::vector<nlohmann::json> msgs;
     try {
-        for (const auto& m : j["messages"]) {
-            if (m.is_object()) importedMessages_.push_back(m);
-        }
+        for (const auto& m : j["messages"])
+            if (m.is_object()) msgs.push_back(m);
     } catch (...) {
         wxMessageBox("Failed to read messages.", "Import", wxOK | wxICON_ERROR);
         return;
     }
 
-    // Clear old import panel contents.
-    importSizer_->Clear(true);
+    // Show prompts in a dialog with Copy buttons.
+    wxDialog viewDlg(this, wxID_ANY, "Imported Session",
+                     wxDefaultPosition, wxSize(500, 600));
+    auto* dlgSizer = new wxBoxSizer(wxVERTICAL);
 
-    auto* header = new wxStaticText(importPanel_, wxID_ANY,
-        wxString::FromUTF8("Imported Session"));
-    auto hdrFont = header->GetFont();
-    hdrFont.SetWeight(wxFONTWEIGHT_BOLD);
-    header->SetFont(hdrFont);
-    importSizer_->Add(header, 0, wxALL, 4);
-
-    auto* scrolled = new wxScrolledWindow(importPanel_);
+    auto* scrolled = new wxScrolledWindow(&viewDlg);
     scrolled->SetScrollRate(0, 10);
     auto* scrollSizer = new wxBoxSizer(wxVERTICAL);
     scrolled->SetSizer(scrollSizer);
-    scrolled->SetMinSize(wxSize(350, -1));
 
     int promptNum = 0;
-    for (size_t i = 0; i < importedMessages_.size(); ++i) {
-        const auto& m = importedMessages_[i];
+    for (size_t i = 0; i < msgs.size(); ++i) {
+        const auto& m = msgs[i];
         std::string role = m.value("role", std::string{});
 
         if (role == "user") {
@@ -1262,20 +1278,20 @@ void ChatFrame::OnImport(wxCommandEvent&) {
 
             auto* label = new wxStaticText(scrolled, wxID_ANY,
                 wxString::Format("%d.", promptNum) + " " + display);
-            label->Wrap(340);
+            label->Wrap(460);
             scrollSizer->Add(label, 0, wxALL, 4);
 
             auto* btn = new wxButton(scrolled, wxID_ANY, "Copy to input");
             std::string fullText = text;
-            btn->Bind(wxEVT_BUTTON, [this, fullText](wxCommandEvent&) {
+            btn->Bind(wxEVT_BUTTON, [this, fullText, &viewDlg](wxCommandEvent&) {
                 input_->SetValue(wxString::FromUTF8(fullText));
+                viewDlg.Close();
             });
             scrollSizer->Add(btn, 0, wxLEFT | wxBOTTOM, 20);
 
-            if (i + 1 < importedMessages_.size()) {
-                const auto& next = importedMessages_[i + 1];
-                std::string nextRole = next.value("role", std::string{});
-                if (nextRole == "assistant") {
+            if (i + 1 < msgs.size()) {
+                const auto& next = msgs[i + 1];
+                if (next.value("role", std::string{}) == "assistant") {
                     std::string resp = next.value("content", std::string{});
                     if (!resp.empty()) {
                         wxString rDisplay = wxString::FromUTF8(resp);
@@ -1284,7 +1300,7 @@ void ChatFrame::OnImport(wxCommandEvent&) {
                         auto* prevLabel = new wxStaticText(scrolled, wxID_ANY,
                             wxString::FromUTF8("Previous response:\n") + rDisplay);
                         prevLabel->SetForegroundColour(wxColour(120, 120, 120));
-                        prevLabel->Wrap(340);
+                        prevLabel->Wrap(460);
                         scrollSizer->Add(prevLabel, 0, wxLEFT | wxBOTTOM, 14);
                     }
                 }
@@ -1292,15 +1308,9 @@ void ChatFrame::OnImport(wxCommandEvent&) {
         }
     }
 
-    importSizer_->Add(scrolled, 1, wxEXPAND | wxALL, 4);
-
-    // Expand window before showing the panel to avoid layout conflicts.
-    SetSize(wxSize(950, GetSize().y));
-    SetMinSize(wxSize(950, 400));
-
-    importPanel_->Show();
-    importSizer_->Layout();
-    Layout();
+    dlgSizer->Add(scrolled, 1, wxEXPAND | wxALL, 8);
+    viewDlg.SetSizer(dlgSizer);
+    viewDlg.ShowModal();
 }
 
 void ChatFrame::OnSend(wxCommandEvent&) {
