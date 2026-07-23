@@ -1232,7 +1232,7 @@ void ChatFrame::OnImport(wxCommandEvent&) {
     header->SetFont(hdrFont);
     importSizer_->Add(header, 0, wxALL, 4);
 
-    auto* scrolled = new wxScrolled<wxPanel>(importPanel_);
+    auto* scrolled = new wxScrolledWindow(importPanel_);
     scrolled->SetScrollRate(0, 10);
     auto* scrollSizer = new wxBoxSizer(wxVERTICAL);
     scrolled->SetSizer(scrollSizer);
@@ -1254,7 +1254,7 @@ void ChatFrame::OnImport(wxCommandEvent&) {
                 display = display.Left(300) + wxString::FromUTF8("\xE2\x80\xA6");
 
             auto* label = new wxStaticText(scrolled, wxID_ANY,
-                wxString::Format("%d. %s", promptNum, display));
+                wxString::Format("%d.", promptNum) + " " + display);
             label->Wrap(340);
             scrollSizer->Add(label, 0, wxALL, 4);
 
