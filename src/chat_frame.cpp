@@ -357,8 +357,9 @@ ChatFrame::ChatFrame()
 
     // Click on import canvas copies prompt to main input.
     importCanvas_->Bind(wxEVT_LEFT_UP, [this](wxMouseEvent& e) {
-        int x = e.GetX(), y = e.GetY();
-        BlockPos pos = importCanvas_->HitTestPublic(x, y);
+        wxPoint logical = importCanvas_->CalcUnscrolledPosition(
+            e.GetPosition());
+        BlockPos pos = importCanvas_->HitTestPublic(logical.x, logical.y);
         if (!pos.IsValid()) { e.Skip(); return; }
         const auto& blocks = importCanvas_->Blocks();
         if (pos.block < 0 || pos.block >= (int)blocks.size()) { e.Skip(); return; }
