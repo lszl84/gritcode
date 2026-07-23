@@ -1310,6 +1310,13 @@ void ChatFrame::OnImport(wxCommandEvent&) {
 
     dlgSizer->Add(scrolled, 1, wxEXPAND | wxALL, 8);
     viewDlg.SetSizer(dlgSizer);
+
+    if (promptNum == 0) {
+        wxMessageBox("No user prompts found in this session file.",
+                     "Import", wxOK | wxICON_INFORMATION);
+        return;
+    }
+
     viewDlg.ShowModal();
 }
 
