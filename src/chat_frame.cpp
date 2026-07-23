@@ -50,7 +50,6 @@ constexpr int ID_MODEL    = wxID_HIGHEST + 11;
 constexpr int ID_SETTINGS = wxID_HIGHEST + 12;
 constexpr int ID_PLAY     = wxID_HIGHEST + 13;
 constexpr int ID_EXPORT   = wxID_HIGHEST + 14;
-constexpr int ID_IMPORT   = wxID_HIGHEST + 15;
 
 // Per-model routing config. Resolved fresh at each StartCompletion so a model
 // change during a tool-call loop applies on the next request.
@@ -240,17 +239,11 @@ ChatFrame::ChatFrame()
                                       wxBORDER_NONE);
     settingsBtn_->SetToolTip(wxString::FromUTF8("Settings…"));
 
-    wxBitmapBundle bbExport = LoadThemedSvgIcon("plus.svg", kIconSize, accent);
+    wxBitmapBundle bbExport = LoadThemedSvgIcon("export.svg", kIconSize, accent);
     exportBtn_ = new wxBitmapButton(panel, ID_EXPORT, bbExport,
                                      wxDefaultPosition, kBtnSize,
                                      wxBORDER_NONE);
     exportBtn_->SetToolTip(wxString::FromUTF8("Export session to file"));
-
-    wxBitmapBundle bbImport = LoadThemedSvgIcon("plus.svg", kIconSize, accent);
-    importBtn_ = new wxBitmapButton(panel, ID_IMPORT, bbImport,
-                                     wxDefaultPosition, kBtnSize,
-                                     wxBORDER_NONE);
-    importBtn_->SetToolTip(wxString::FromUTF8("Import session from file"));
 
     wxBitmapBundle bbPlay = LoadThemedSvgIcon("play.svg", kIconSize, accent);
     playBtn_ = new wxBitmapButton(panel, ID_PLAY, bbPlay,
@@ -269,7 +262,6 @@ ChatFrame::ChatFrame()
     toolbarRow->AddStretchSpacer(8);
     toolbarRow->Add(settingsBtn_, 0, wxALIGN_CENTER_VERTICAL);
     toolbarRow->Add(exportBtn_, 0, wxALIGN_CENTER_VERTICAL | wxLEFT, 4);
-    toolbarRow->Add(importBtn_, 0, wxALIGN_CENTER_VERTICAL | wxLEFT, 4);
 
     // Chip row — wraps to multiple lines if the queue gets long. Hidden
     // (via sizer Show) until the queue has at least one entry.
@@ -358,7 +350,6 @@ ChatFrame::ChatFrame()
     Bind(wxEVT_CLOSE_WINDOW, &ChatFrame::OnClose, this);
     Bind(wxEVT_BUTTON, &ChatFrame::OnSettings, this, ID_SETTINGS);
     Bind(wxEVT_BUTTON, &ChatFrame::OnExport, this, ID_EXPORT);
-    Bind(wxEVT_BUTTON, &ChatFrame::OnImport, this, ID_IMPORT);
     Bind(wxEVT_BUTTON, &ChatFrame::OnPlay, this, ID_PLAY);
     Bind(wxEVT_TOOL_BATCH_DONE, &ChatFrame::OnToolBatchDone, this);
     sessionChoice_->Bind(wxEVT_CHOICE, &ChatFrame::OnSessionChoice, this);
@@ -780,39 +771,53 @@ void ChatFrame::ReloadToolbarIcons() {
     wxColour accent = wxSystemSettings::GetColour(wxSYS_COLOUR_WINDOWTEXT);
     settingsBtn_->SetBitmap(LoadThemedSvgIcon("settings.svg", kIconSize, accent));
     playBtn_->SetBitmap(LoadThemedSvgIcon("play.svg", kIconSize, accent));
-    exportBtn_->SetBitmap(LoadThemedSvgIcon("plus.svg", kIconSize, accent));
-    importBtn_->SetBitmap(LoadThemedSvgIcon("plus.svg", kIconSize, accent));
+    exportBtn_->SetBitmap(LoadThemedSvgIcon("export.svg", kIconSize, accent));
 }
 
 void ChatFrame::RefreshSessionChoice() {
     sessionChoice_->Clear();
     sessionCwds_.clear();
+    sessionChoice_->Append(wxString::FromUTF8("Import Session\xE2\x80\xA6"));
     sessionChoice_->Append(wxString::FromUTF8("New Session\xE2\x80\xA6"));
     int activeRow = -1;
     for (const auto& e : store_.List()) {
         sessionChoice_->Append(DisplayPath(e.cwd));
         sessionCwds_.push_back(e.cwd);
-        if (e.cwd == activeCwd_) activeRow = (int)sessionCwds_.size();
+        if (e.cwd == activeCwd_) activeRow = (int)sessionCwds_.size() + 1;
     }
-    // Fall back to first real session if active cwd wasn't found in the list
-    // (shouldn't happen — every saved session is in the index).
-    if (activeRow < 1 && sessionCwds_.size() >= 1) activeRow = 1;
-    if (activeRow >= 1) sessionChoice_->SetSelection(activeRow);
-    // Tooltip shows the absolute path even when the dropdown collapses ~/ .
-    if (activeRow >= 1) {
+    if (activeRow < 2 && sessionCwds_.size() >= 1) activeRow = 2;
+    if (activeRow >= 2) sessionChoice_->SetSelection(activeRow);
+    if (activeRow >= 2) {
         sessionChoice_->SetToolTip(
-            wxString::FromUTF8(sessionCwds_[activeRow - 1]));
+            wxString::FromUTF8(sessionCwds_[activeRow - 2]));
     }
 }
 
 void ChatFrame::OnSessionChoice(wxCommandEvent& evt) {
     int sel = evt.GetSelection();
     if (sel == 0) {
+        // "Import Session…" sentinel — snap back to current session.
+        for (int i = 0; i < (int)sessionCwds_.size(); ++i) {
+            if (sessionCwds_[i] == activeCwd_) {
+                sessionChoice_->SetSelection(i + 2);
+                break;
+            }
+        }
+        if (streaming_) {
+            wxMessageBox("Cannot import while streaming.",
+                         "gritcode", wxOK | wxICON_INFORMATION, this);
+            return;
+        }
+        wxCommandEvent dummy;
+        OnImport(dummy);
+        return;
+    }
+    if (sel == 1) {
         // "New Session…" sentinel — snap selection back so it never sticks,
         // then start the new-session flow.
         for (int i = 0; i < (int)sessionCwds_.size(); ++i) {
             if (sessionCwds_[i] == activeCwd_) {
-                sessionChoice_->SetSelection(i + 1);
+                sessionChoice_->SetSelection(i + 2);
                 break;
             }
         }
@@ -824,7 +829,7 @@ void ChatFrame::OnSessionChoice(wxCommandEvent& evt) {
         CreateNewSession();
         return;
     }
-    int idx = sel - 1;
+    int idx = sel - 2;
     if (idx < 0 || idx >= (int)sessionCwds_.size()) return;
     const std::string& target = sessionCwds_[idx];
     if (target == activeCwd_) return;
@@ -832,7 +837,7 @@ void ChatFrame::OnSessionChoice(wxCommandEvent& evt) {
         // Restore prior selection and warn.
         for (int i = 0; i < (int)sessionCwds_.size(); ++i) {
             if (sessionCwds_[i] == activeCwd_) {
-                sessionChoice_->SetSelection(i + 1);
+                sessionChoice_->SetSelection(i + 2);
                 break;
             }
         }

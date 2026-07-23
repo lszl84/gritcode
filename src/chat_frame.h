@@ -61,7 +61,6 @@ private:
     wxBitmapButton* playBtn_ = nullptr;
     wxBitmapButton* settingsBtn_ = nullptr;
     wxBitmapButton* exportBtn_ = nullptr;
-    wxBitmapButton* importBtn_ = nullptr;
 
     // On-disk session persistence. Sessions are keyed by working directory
     // (one session per folder, gritcode model). The dropdown is rebuilt from
