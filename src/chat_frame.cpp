@@ -16,6 +16,7 @@
 #include <wx/stdpaths.h>
 #include <wx/filedlg.h>
 #include <wx/scrolwin.h>
+#include <wx/splitter.h>
 #include <algorithm>
 #include <chrono>
 #include <ctime>
@@ -210,7 +211,13 @@ ChatFrame::ChatFrame()
 
     SetIcons(LoadAppIcon());
 
-    auto* panel = new wxPanel(this);
+    splitter_ = new wxSplitterWindow(this, wxID_ANY,
+        wxDefaultPosition, wxDefaultSize, wxSP_LIVE_UPDATE);
+    splitter_->SetMinimumPaneSize(200);
+
+    // Main panel: right pane of splitter.
+    auto* panel = new wxPanel(splitter_);
+    mainPanel_ = panel;
     auto* outer = new wxBoxSizer(wxVERTICAL);
 
     canvas_ = new ChatCanvas(panel);
@@ -293,31 +300,30 @@ ChatFrame::ChatFrame()
     root->Add(outer, 1, wxEXPAND | wxALL, FromDIP(2));
     panel->SetSizer(root);
 
-    // Import viewer — right side, hidden until a session is imported.
-    importPanel_ = new wxPanel(this);
+    // Import viewer — left pane of splitter, hidden until import.
+    importPanel_ = new wxPanel(splitter_);
     auto* importSizer = new wxBoxSizer(wxVERTICAL);
     importCanvas_ = new ChatCanvas(importPanel_);
     importSizer->Add(importCanvas_, 1, wxEXPAND);
     importPanel_->SetSizer(importSizer);
-    importPanel_->Hide();
 
-    // Bind click on import canvas to copy prompt to main input.
+    // Click on import canvas copies prompt to main input.
     importCanvas_->Bind(wxEVT_LEFT_UP, [this](wxMouseEvent& e) {
         int x = e.GetX(), y = e.GetY();
         BlockPos pos = importCanvas_->HitTestPublic(x, y);
         if (!pos.IsValid()) { e.Skip(); return; }
         const auto& blocks = importCanvas_->Blocks();
         if (pos.block < 0 || pos.block >= (int)blocks.size()) { e.Skip(); return; }
-        const auto& b = blocks[pos.block];
-        if (b.type == BlockType::UserPrompt) {
-            input_->SetValue(b.rawText);
+        if (blocks[pos.block].type == BlockType::UserPrompt) {
+            input_->SetValue(blocks[pos.block].rawText);
         }
         e.Skip();
     });
 
+    splitter_->Initialize(mainPanel_);  // Right pane only at start
+
     auto* frameSizer = new wxBoxSizer(wxHORIZONTAL);
-    frameSizer->Add(panel, 1, wxEXPAND);
-    frameSizer->Add(importPanel_, 1, wxEXPAND | wxLEFT, 4);
+    frameSizer->Add(splitter_, 1, wxEXPAND);
     SetSizer(frameSizer);
 
     // Open the most recent session if one exists; otherwise seed one for the
@@ -1351,10 +1357,10 @@ void ChatFrame::ShowImportDialog() {
         }
     }
 
-    importPanel_->Show();
-    importPanel_->GetParent()->Layout();
-    // Resize to accommodate both panels.
-    SetSize(wxSize(1200, GetSize().y));
+    // Split to show the import panel on the left.
+    if (!splitter_->IsSplit()) {
+        splitter_->SplitVertically(importPanel_, mainPanel_, 400);
+    }
 }
 
 void ChatFrame::OnSend(wxCommandEvent&) {

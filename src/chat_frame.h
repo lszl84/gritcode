@@ -3,6 +3,7 @@
 #include <wx/choice.h>
 #include <wx/textctrl.h>
 #include <wx/bmpbuttn.h>
+#include <wx/splitter.h>
 #include <wx/thread.h>
 #include <nlohmann/json.hpp>
 #include "chat_canvas.h"
@@ -206,8 +207,10 @@ private:
 
     // ---- Session import/export ----
     std::vector<nlohmann::json> importedMessages_;   // raw messages from import
-    wxPanel* importPanel_ = nullptr;                  // right-side import viewer
+    wxPanel* importPanel_ = nullptr;                  // left pane of splitter
     ChatCanvas* importCanvas_ = nullptr;              // rendered import messages
+    wxSplitterWindow* splitter_ = nullptr;            // main splitter
+    wxPanel* mainPanel_ = nullptr;                     // right pane (main UI)
 
     // Streaming HTTP callbacks (delivered on the GUI thread via CallAfter).
     // OnStreamData appends to sseBuf_ and parses any complete SSE events.
