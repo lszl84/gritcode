@@ -293,6 +293,33 @@ ChatFrame::ChatFrame()
     root->Add(outer, 1, wxEXPAND | wxALL, FromDIP(2));
     panel->SetSizer(root);
 
+    // Import viewer — right side, hidden until a session is imported.
+    importPanel_ = new wxPanel(this);
+    auto* importSizer = new wxBoxSizer(wxVERTICAL);
+    importCanvas_ = new ChatCanvas(importPanel_);
+    importSizer->Add(importCanvas_, 1, wxEXPAND);
+    importPanel_->SetSizer(importSizer);
+    importPanel_->Hide();
+
+    // Bind click on import canvas to copy prompt to main input.
+    importCanvas_->Bind(wxEVT_LEFT_UP, [this](wxMouseEvent& e) {
+        int x = e.GetX(), y = e.GetY();
+        BlockPos pos = importCanvas_->HitTestPublic(x, y);
+        if (!pos.IsValid()) { e.Skip(); return; }
+        const auto& blocks = importCanvas_->Blocks();
+        if (pos.block < 0 || pos.block >= (int)blocks.size()) { e.Skip(); return; }
+        const auto& b = blocks[pos.block];
+        if (b.type == BlockType::UserPrompt) {
+            input_->SetValue(b.rawText);
+        }
+        e.Skip();
+    });
+
+    auto* frameSizer = new wxBoxSizer(wxHORIZONTAL);
+    frameSizer->Add(panel, 1, wxEXPAND);
+    frameSizer->Add(importPanel_, 1, wxEXPAND | wxLEFT, 4);
+    SetSizer(frameSizer);
+
     // Open the most recent session if one exists; otherwise seed one for the
     // default cwd so the dropdown always has at least one entry.
     store_.Init();
@@ -1253,75 +1280,81 @@ void ChatFrame::OnImport(wxCommandEvent&) {
 }
 
 void ChatFrame::ShowImportDialog() {
-    if (importedMessages_.empty()) {
-        wxMessageBox("No messages to display.", "Import", wxOK | wxICON_INFORMATION);
-        return;
-    }
+    if (importedMessages_.empty()) return;
 
-    wxDialog viewDlg(this, wxID_ANY, "Imported Session",
-                     wxDefaultPosition, wxSize(500, 600));
-    auto* dlgSizer = new wxBoxSizer(wxVERTICAL);
+    // Render imported messages into the side canvas using the same
+    // rendering pipeline as RestoreCanvasFromHistory.
+    importCanvas_->Clear();
+    MdStream importStream([this](Block b) {
+        importCanvas_->AddBlock(std::move(b));
+    });
 
-    auto* scrolled = new wxScrolledWindow(&viewDlg);
-    scrolled->SetScrollRate(0, 10);
-    auto* scrollSizer = new wxBoxSizer(wxVERTICAL);
-    scrolled->SetSizer(scrollSizer);
-
-    int promptNum = 0;
-    for (size_t i = 0; i < importedMessages_.size(); ++i) {
-        const auto& m = importedMessages_[i];
+    for (const auto& m : importedMessages_) {
         std::string role = m.value("role", std::string{});
+        if (role == "system") continue;
 
         if (role == "user") {
-            ++promptNum;
-            std::string text = m.value("content", std::string{});
-            if (text.empty()) continue;
-
-            wxString display = wxString::FromUTF8(text);
-            if (display.Length() > 300)
-                display = display.Left(300) + wxString::FromUTF8("\xE2\x80\xA6");
-
-            auto* label = new wxStaticText(scrolled, wxID_ANY,
-                wxString::Format("%d.", promptNum) + " " + display);
-            label->Wrap(460);
-            scrollSizer->Add(label, 0, wxALL, 4);
-
-            auto* btn = new wxButton(scrolled, wxID_ANY, "Copy to input");
-            std::string fullText = text;
-            btn->Bind(wxEVT_BUTTON, [this, fullText, &viewDlg](wxCommandEvent&) {
-                input_->SetValue(wxString::FromUTF8(fullText));
-                viewDlg.Close();
-            });
-            scrollSizer->Add(btn, 0, wxLEFT | wxBOTTOM, 20);
-
-            if (i + 1 < importedMessages_.size()) {
-                const auto& next = importedMessages_[i + 1];
-                if (next.value("role", std::string{}) == "assistant") {
-                    std::string resp = next.value("content", std::string{});
-                    if (!resp.empty()) {
-                        wxString rDisplay = wxString::FromUTF8(resp);
-                        if (rDisplay.Length() > 400)
-                            rDisplay = rDisplay.Left(400) + wxString::FromUTF8("\xE2\x80\xA6");
-                        auto* prevLabel = new wxStaticText(scrolled, wxID_ANY,
-                            wxString::FromUTF8("Previous response:\n") + rDisplay);
-                        prevLabel->SetForegroundColour(wxColour(120, 120, 120));
-                        prevLabel->Wrap(460);
-                        scrollSizer->Add(prevLabel, 0, wxLEFT | wxBOTTOM, 14);
+            std::string content = m.value("content", std::string{});
+            Block ub;
+            ub.type = BlockType::UserPrompt;
+            ub.rawText = wxString::FromUTF8(content);
+            InlineRun r;
+            r.text = ub.rawText;
+            ub.runs.push_back(r);
+            ub.visibleText = ub.rawText;
+            importCanvas_->AddBlock(std::move(ub));
+        } else if (role == "assistant") {
+            if (m.contains("content") && m["content"].is_string() && !m["content"].get<std::string>().empty()) {
+                std::string content = m["content"].get<std::string>();
+                importStream.Feed(wxString::FromUTF8(content));
+            }
+            if (m.contains("reasoning_content") && m["reasoning_content"].is_string()) {
+                std::string rc = m["reasoning_content"].get<std::string>();
+                Block tb;
+                tb.type = BlockType::Thinking;
+                tb.rawText = wxString::FromUTF8(rc);
+                tb.visibleText = tb.rawText;
+                tb.toolExpanded = false;
+                importCanvas_->AddBlock(std::move(tb));
+            }
+            importStream.Flush();
+        } else if (role == "tool") {
+            std::string name = m.value("name", std::string{});
+            std::string result = m.value("content", std::string{});
+            // Find matching tool_call from preceding assistant message.
+            std::string displayArgs;
+            if (&m > &importedMessages_.front()) {
+                const auto* prev = &m - 1;
+                while (prev >= &importedMessages_.front()) {
+                    if (prev->value("role", std::string{}) == "assistant" &&
+                        prev->contains("tool_calls") && (*prev)["tool_calls"].is_array()) {
+                        for (const auto& tc : (*prev)["tool_calls"]) {
+                            if (tc.value("id", std::string{}) == m.value("tool_call_id", std::string{})) {
+                                if (tc.contains("function") && tc["function"].contains("arguments"))
+                                    displayArgs = tc["function"]["arguments"].get<std::string>();
+                                break;
+                            }
+                        }
+                        break;
                     }
+                    --prev;
                 }
             }
+            Block tb;
+            tb.type = BlockType::ToolCall;
+            tb.toolName = wxString::FromUTF8(name);
+            tb.toolArgs = wxString::FromUTF8(displayArgs);
+            tb.toolResult = wxString::FromUTF8(result);
+            tb.visibleText = tb.toolName + "(" + tb.toolArgs + ")\n\n" + tb.toolResult;
+            tb.toolExpanded = false;
+            importCanvas_->AddBlock(std::move(tb));
         }
     }
 
-    dlgSizer->Add(scrolled, 1, wxEXPAND | wxALL, 8);
-    viewDlg.SetSizer(dlgSizer);
-
-    if (promptNum == 0) {
-        wxMessageBox("No user prompts found.", "Import", wxOK | wxICON_INFORMATION);
-        return;
-    }
-
-    viewDlg.ShowModal();
+    importPanel_->Show();
+    importPanel_->GetParent()->Layout();
+    // Resize to accommodate both panels.
+    SetSize(wxSize(1200, GetSize().y));
 }
 
 void ChatFrame::OnSend(wxCommandEvent&) {

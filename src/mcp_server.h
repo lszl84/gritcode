@@ -76,6 +76,14 @@ struct MCPCallbacks {
     std::function<nlohmann::json(int, int, int, int)> setSelection;
     std::function<nlohmann::json()> getGeometry;
     std::function<nlohmann::json(int, int, int, int, int)> simulateDrag;
+
+    // Export the current session to a .gritsession file at the given path.
+    // Returns {ok: bool, messageCount: int, error?: string}.
+    std::function<nlohmann::json(const std::string&)> exportSession;
+
+    // Import a .gritsession file from the given path. Returns
+    // {ok: bool, promptCount: int, error?: string}.
+    std::function<nlohmann::json(const std::string&)> importSession;
 };
 
 class MCPServer {

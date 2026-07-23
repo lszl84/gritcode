@@ -206,6 +206,8 @@ private:
 
     // ---- Session import/export ----
     std::vector<nlohmann::json> importedMessages_;   // raw messages from import
+    wxPanel* importPanel_ = nullptr;                  // right-side import viewer
+    ChatCanvas* importCanvas_ = nullptr;              // rendered import messages
 
     // Streaming HTTP callbacks (delivered on the GUI thread via CallAfter).
     // OnStreamData appends to sseBuf_ and parses any complete SSE events.
