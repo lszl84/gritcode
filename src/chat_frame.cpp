@@ -1220,7 +1220,15 @@ void ChatFrame::OnImport(wxCommandEvent&) {
         return;
     }
 
-    importedMessages_ = j["messages"].get<std::vector<nlohmann::json>>();
+    importedMessages_.clear();
+    try {
+        for (const auto& m : j["messages"]) {
+            if (m.is_object()) importedMessages_.push_back(m);
+        }
+    } catch (...) {
+        wxMessageBox("Failed to read messages.", "Import", wxOK | wxICON_ERROR);
+        return;
+    }
 
     // Clear old import panel contents.
     importSizer_->Clear(true);
@@ -1248,7 +1256,6 @@ void ChatFrame::OnImport(wxCommandEvent&) {
             std::string text = m.value("content", std::string{});
             if (text.empty()) continue;
 
-            // Limit display to first 300 chars.
             wxString display = wxString::FromUTF8(text);
             if (display.Length() > 300)
                 display = display.Left(300) + wxString::FromUTF8("\xE2\x80\xA6");
@@ -1265,7 +1272,6 @@ void ChatFrame::OnImport(wxCommandEvent&) {
             });
             scrollSizer->Add(btn, 0, wxLEFT | wxBOTTOM, 20);
 
-            // Show previous assistant response if it follows this user message.
             if (i + 1 < importedMessages_.size()) {
                 const auto& next = importedMessages_[i + 1];
                 std::string nextRole = next.value("role", std::string{});
@@ -1287,12 +1293,14 @@ void ChatFrame::OnImport(wxCommandEvent&) {
     }
 
     importSizer_->Add(scrolled, 1, wxEXPAND | wxALL, 4);
-    importPanel_->Show();
-    importPanel_->GetParent()->Layout();
 
-    // Expand the window to accommodate the import panel.
+    // Expand window before showing the panel to avoid layout conflicts.
     SetSize(wxSize(950, GetSize().y));
     SetMinSize(wxSize(950, 400));
+
+    importPanel_->Show();
+    importSizer_->Layout();
+    Layout();
 }
 
 void ChatFrame::OnSend(wxCommandEvent&) {
