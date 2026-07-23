@@ -599,15 +599,17 @@ ChatFrame::ChatFrame()
                 return {{"ok", false}, {"error", "no messages array"}};
 
             importedMessages_.clear();
+            int promptCount = 0;
             for (const auto& m : j["messages"]) {
-                if (m.is_object()) importedMessages_.push_back(m);
+                if (m.is_object()) {
+                    importedMessages_.push_back(m);
+                    if (m.value("role", std::string{}) == "user") ++promptCount;
+                }
             }
 
-            // Count user prompts.
-            int promptCount = 0;
-            for (const auto& m : importedMessages_) {
-                if (m.value("role", std::string{}) == "user") ++promptCount;
-            }
+            // Trigger the import dialog on the GUI thread.
+            CallAfter([this]() { ShowImportDialog(); });
+
             return {{"ok", true}, {"promptCount", promptCount}};
         });
     };
@@ -1243,16 +1245,19 @@ void ChatFrame::OnImport(wxCommandEvent&) {
         return;
     }
 
-    std::vector<nlohmann::json> msgs;
-    try {
-        for (const auto& m : j["messages"])
-            if (m.is_object()) msgs.push_back(m);
-    } catch (...) {
-        wxMessageBox("Failed to read messages.", "Import", wxOK | wxICON_ERROR);
+    importedMessages_.clear();
+    for (const auto& m : j["messages"]) {
+        if (m.is_object()) importedMessages_.push_back(m);
+    }
+    ShowImportDialog();
+}
+
+void ChatFrame::ShowImportDialog() {
+    if (importedMessages_.empty()) {
+        wxMessageBox("No messages to display.", "Import", wxOK | wxICON_INFORMATION);
         return;
     }
 
-    // Show prompts in a dialog with Copy buttons.
     wxDialog viewDlg(this, wxID_ANY, "Imported Session",
                      wxDefaultPosition, wxSize(500, 600));
     auto* dlgSizer = new wxBoxSizer(wxVERTICAL);
@@ -1263,8 +1268,8 @@ void ChatFrame::OnImport(wxCommandEvent&) {
     scrolled->SetSizer(scrollSizer);
 
     int promptNum = 0;
-    for (size_t i = 0; i < msgs.size(); ++i) {
-        const auto& m = msgs[i];
+    for (size_t i = 0; i < importedMessages_.size(); ++i) {
+        const auto& m = importedMessages_[i];
         std::string role = m.value("role", std::string{});
 
         if (role == "user") {
@@ -1289,8 +1294,8 @@ void ChatFrame::OnImport(wxCommandEvent&) {
             });
             scrollSizer->Add(btn, 0, wxLEFT | wxBOTTOM, 20);
 
-            if (i + 1 < msgs.size()) {
-                const auto& next = msgs[i + 1];
+            if (i + 1 < importedMessages_.size()) {
+                const auto& next = importedMessages_[i + 1];
                 if (next.value("role", std::string{}) == "assistant") {
                     std::string resp = next.value("content", std::string{});
                     if (!resp.empty()) {
@@ -1312,8 +1317,7 @@ void ChatFrame::OnImport(wxCommandEvent&) {
     viewDlg.SetSizer(dlgSizer);
 
     if (promptNum == 0) {
-        wxMessageBox("No user prompts found in this session file.",
-                     "Import", wxOK | wxICON_INFORMATION);
+        wxMessageBox("No user prompts found.", "Import", wxOK | wxICON_INFORMATION);
         return;
     }
 

@@ -176,6 +176,7 @@ private:
     void OnPlay(wxCommandEvent&);
     void OnExport(wxCommandEvent&);
     void OnImport(wxCommandEvent&);
+    void ShowImportDialog();
 
     // Repopulate the session choice from store_.List() with the leading
     // "New Session…" entry, then restore the active selection.
