@@ -212,9 +212,12 @@ private:
     wxPanel* importPanel_ = nullptr;                  // left pane of splitter
     ChatCanvas* importCanvas_ = nullptr;              // rendered import messages
     wxPanel* importEmptyView_ = nullptr;                // empty state with Load button
+    wxStaticText* importNameLabel_ = nullptr;             // session name header
     wxSplitterWindow* splitter_ = nullptr;            // main splitter
     wxPanel* mainPanel_ = nullptr;                     // right pane (main UI)
-    wxStaticText* refLabel_ = nullptr;                 // "Referenced Session: ..."
+    wxStaticText* refLabel_ = nullptr;                 // "Referenced Session: ..." at bottom
+    wxString importedFileName_;                          // display name of imported file
+    int mainWidth_ = 600;                                // window width without import pane
 
     // Streaming HTTP callbacks (delivered on the GUI thread via CallAfter).
     // OnStreamData appends to sseBuf_ and parses any complete SSE events.

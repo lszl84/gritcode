@@ -313,6 +313,22 @@ ChatFrame::ChatFrame()
     importPanel_ = new wxPanel(splitter_);
     auto* importSizer = new wxBoxSizer(wxVERTICAL);
 
+    // Header: session name + instruction.
+    auto* importHeader = new wxBoxSizer(wxVERTICAL);
+    importNameLabel_ = new wxStaticText(importPanel_, wxID_ANY, "");
+    auto nameFont = importNameLabel_->GetFont();
+    nameFont.SetWeight(wxFONTWEIGHT_BOLD);
+    importNameLabel_->SetFont(nameFont);
+    importHeader->Add(importNameLabel_, 0, wxALL, 4);
+
+    auto* instructionLabel = new wxStaticText(importPanel_, wxID_ANY,
+        wxString::FromUTF8("Click a prompt to copy it to the current session."));
+    auto instrFont = instructionLabel->GetFont();
+    instrFont.SetPointSize(instrFont.GetPointSize() - 1);
+    instructionLabel->SetFont(instrFont);
+    instructionLabel->SetForegroundColour(wxColour(140, 140, 140));
+    importHeader->Add(instructionLabel, 0, wxLEFT | wxRIGHT | wxBOTTOM, 4);
+
     // Empty state: centered "Load Session…" button.
     importEmptyView_ = new wxPanel(importPanel_);
     auto* emptySizer = new wxBoxSizer(wxVERTICAL);
@@ -337,6 +353,7 @@ ChatFrame::ChatFrame()
     refLabel_->SetFont(refFont);
     refLabel_->SetForegroundColour(wxColour(140, 140, 140));
 
+    importSizer->Add(importHeader, 0, wxEXPAND);
     importSizer->Add(importEmptyView_, 1, wxEXPAND);
     importSizer->Add(importCanvas_, 1, wxEXPAND);
     importSizer->Add(refLabel_, 0, wxALL, 4);
@@ -675,6 +692,11 @@ ChatFrame::ChatFrame()
                     if (m.value("role", std::string{}) == "user") ++promptCount;
                 }
             }
+
+            // Store filename for display.
+            auto slash = path.rfind('/');
+            importedFileName_ = wxString::FromUTF8(
+                slash != std::string::npos ? path.substr(slash + 1) : path);
 
             // Trigger the import dialog on the GUI thread.
             CallAfter([this]() { ShowImportDialog(); });
@@ -1244,8 +1266,11 @@ void ChatFrame::OnSettings(wxCommandEvent&) {
 void ChatFrame::OnHamburger(wxCommandEvent&) {
     if (splitter_->IsSplit()) {
         splitter_->Unsplit(importPanel_);
+        SetSize(wxSize(mainWidth_, GetSize().y));
     } else {
+        mainWidth_ = GetSize().x;  // save current width
         splitter_->SplitVertically(importPanel_, mainPanel_, 400);
+        SetSize(wxSize(mainWidth_ + 420, GetSize().y));
     }
 }
 
@@ -1307,14 +1332,27 @@ void ChatFrame::OnImport(wxCommandEvent&) {
     for (const auto& m : j["messages"]) {
         if (m.is_object()) importedMessages_.push_back(m);
     }
+
+    // Store filename for display.
+    wxString fullPath = dlg.GetPath();
+    importedFileName_ = fullPath.AfterLast('/');
+    if (importedFileName_.empty()) importedFileName_ = fullPath;
+
     ShowImportDialog();
 }
 
 void ChatFrame::ShowImportDialog() {
     if (importedMessages_.empty()) return;
 
-    // Render imported messages into the side canvas using the same
-    // rendering pipeline as RestoreCanvasFromHistory.
+    importCanvas_->Clear();
+
+    // Update header with file name.
+    wxString displayName = importedFileName_.empty()
+        ? wxString::FromUTF8("Imported Session")
+        : importedFileName_;
+    importNameLabel_->SetLabel(displayName);
+
+    // Render imported messages into the side canvas.
     importCanvas_->Clear();
     MdStream importStream([this](Block b) {
         importCanvas_->AddBlock(std::move(b));
@@ -1386,9 +1424,8 @@ void ChatFrame::ShowImportDialog() {
     importEmptyView_->Hide();
     importCanvas_->Show();
 
-    // Derive a short name from the import source.
-    std::string name = "Imported Session";
-    refLabel_->SetLabel(wxString::FromUTF8("Referenced Session: " + name));
+    // Update reference label.
+    refLabel_->SetLabel(wxString::FromUTF8("Referenced Session: ") + displayName);
     importPanel_->Layout();
 
     // Split to show the import panel on the left.
