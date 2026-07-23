@@ -15,6 +15,7 @@
 #include <wx/settings.h>
 #include <wx/stdpaths.h>
 #include <wx/filedlg.h>
+#include <wx/scrolwin.h>
 #include <algorithm>
 #include <chrono>
 #include <ctime>
@@ -299,6 +300,19 @@ ChatFrame::ChatFrame()
     auto* root = new wxBoxSizer(wxVERTICAL);
     root->Add(outer, 1, wxEXPAND | wxALL, FromDIP(2));
     panel->SetSizer(root);
+
+    // Import viewer panel — right side, hidden until a session is imported.
+    importPanel_ = new wxPanel(this);
+    importPanel_->SetBackgroundColour(
+        wxSystemSettings::GetColour(wxSYS_COLOUR_WINDOW));
+    importSizer_ = new wxBoxSizer(wxVERTICAL);
+    importPanel_->SetSizer(importSizer_);
+    importPanel_->Hide();
+
+    auto* frameSizer = new wxBoxSizer(wxHORIZONTAL);
+    frameSizer->Add(panel, 1, wxEXPAND);
+    frameSizer->Add(importPanel_, 0, wxEXPAND | wxLEFT, 4);
+    SetSizer(frameSizer);
 
     // Open the most recent session if one exists; otherwise seed one for the
     // default cwd so the dropdown always has at least one entry.
@@ -1201,23 +1215,79 @@ void ChatFrame::OnImport(wxCommandEvent&) {
         return;
     }
 
-    // Extract user prompts from the imported session.
     importedMessages_ = j["messages"].get<std::vector<nlohmann::json>>();
-    importedPrompts_.clear();
-    for (const auto& m : importedMessages_) {
-        if (m.value("role", std::string{}) == "user")
-            importedPrompts_.push_back(m.value("content", std::string{}));
+
+    // Clear old import panel contents.
+    importSizer_->Clear(true);
+
+    auto* header = new wxStaticText(importPanel_, wxID_ANY,
+        wxString::FromUTF8("Imported Session"));
+    auto hdrFont = header->GetFont();
+    hdrFont.SetWeight(wxFONTWEIGHT_BOLD);
+    header->SetFont(hdrFont);
+    importSizer_->Add(header, 0, wxALL, 4);
+
+    auto* scrolled = new wxScrolled<wxPanel>(importPanel_);
+    scrolled->SetScrollRate(0, 10);
+    auto* scrollSizer = new wxBoxSizer(wxVERTICAL);
+    scrolled->SetSizer(scrollSizer);
+    scrolled->SetMinSize(wxSize(350, -1));
+
+    int promptNum = 0;
+    for (size_t i = 0; i < importedMessages_.size(); ++i) {
+        const auto& m = importedMessages_[i];
+        std::string role = m.value("role", std::string{});
+
+        if (role == "user") {
+            ++promptNum;
+            std::string text = m.value("content", std::string{});
+            if (text.empty()) continue;
+
+            // Limit display to first 300 chars.
+            wxString display = wxString::FromUTF8(text);
+            if (display.Length() > 300)
+                display = display.Left(300) + wxString::FromUTF8("\xE2\x80\xA6");
+
+            auto* label = new wxStaticText(scrolled, wxID_ANY,
+                wxString::Format("%d. %s", promptNum, display));
+            label->Wrap(340);
+            scrollSizer->Add(label, 0, wxALL, 4);
+
+            auto* btn = new wxButton(scrolled, wxID_ANY, "Copy to input");
+            std::string fullText = text;
+            btn->Bind(wxEVT_BUTTON, [this, fullText](wxCommandEvent&) {
+                input_->SetValue(wxString::FromUTF8(fullText));
+            });
+            scrollSizer->Add(btn, 0, wxLEFT | wxBOTTOM, 20);
+
+            // Show previous assistant response if it follows this user message.
+            if (i + 1 < importedMessages_.size()) {
+                const auto& next = importedMessages_[i + 1];
+                std::string nextRole = next.value("role", std::string{});
+                if (nextRole == "assistant") {
+                    std::string resp = next.value("content", std::string{});
+                    if (!resp.empty()) {
+                        wxString rDisplay = wxString::FromUTF8(resp);
+                        if (rDisplay.Length() > 400)
+                            rDisplay = rDisplay.Left(400) + wxString::FromUTF8("\xE2\x80\xA6");
+                        auto* prevLabel = new wxStaticText(scrolled, wxID_ANY,
+                            wxString::FromUTF8("Previous response:\n") + rDisplay);
+                        prevLabel->SetForegroundColour(wxColour(120, 120, 120));
+                        prevLabel->Wrap(340);
+                        scrollSizer->Add(prevLabel, 0, wxLEFT | wxBOTTOM, 14);
+                    }
+                }
+            }
+        }
     }
 
-    if (importedPrompts_.empty()) {
-        wxMessageBox("No user prompts found.", "Import", wxOK | wxICON_ERROR);
-        return;
-    }
+    importSizer_->Add(scrolled, 1, wxEXPAND | wxALL, 4);
+    importPanel_->Show();
+    importPanel_->GetParent()->Layout();
 
-    wxMessageBox(wxString::Format("Imported %zu prompts. Use the Import panel to "
-                                  "execute them one by one.",
-                                  importedPrompts_.size()),
-                 "Import", wxOK | wxICON_INFORMATION);
+    // Expand the window to accommodate the import panel.
+    SetSize(wxSize(950, GetSize().y));
+    SetMinSize(wxSize(950, 400));
 }
 
 void ChatFrame::OnSend(wxCommandEvent&) {
