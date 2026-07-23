@@ -62,6 +62,7 @@ private:
     wxBitmapButton* playBtn_ = nullptr;
     wxBitmapButton* settingsBtn_ = nullptr;
     wxBitmapButton* exportBtn_ = nullptr;
+    wxBitmapButton* hamburgerBtn_ = nullptr;
 
     // On-disk session persistence. Sessions are keyed by working directory
     // (one session per folder, gritcode model). The dropdown is rebuilt from
@@ -176,6 +177,7 @@ private:
     void OnSettings(wxCommandEvent&);
     void OnPlay(wxCommandEvent&);
     void OnExport(wxCommandEvent&);
+    void OnHamburger(wxCommandEvent&);
     void OnImport(wxCommandEvent&);
     void ShowImportDialog();
 
@@ -209,8 +211,10 @@ private:
     std::vector<nlohmann::json> importedMessages_;   // raw messages from import
     wxPanel* importPanel_ = nullptr;                  // left pane of splitter
     ChatCanvas* importCanvas_ = nullptr;              // rendered import messages
+    wxPanel* importEmptyView_ = nullptr;                // empty state with Load button
     wxSplitterWindow* splitter_ = nullptr;            // main splitter
     wxPanel* mainPanel_ = nullptr;                     // right pane (main UI)
+    wxStaticText* refLabel_ = nullptr;                 // "Referenced Session: ..."
 
     // Streaming HTTP callbacks (delivered on the GUI thread via CallAfter).
     // OnStreamData appends to sseBuf_ and parses any complete SSE events.

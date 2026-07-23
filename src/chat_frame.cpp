@@ -51,6 +51,7 @@ constexpr int ID_MODEL    = wxID_HIGHEST + 11;
 constexpr int ID_SETTINGS = wxID_HIGHEST + 12;
 constexpr int ID_PLAY     = wxID_HIGHEST + 13;
 constexpr int ID_EXPORT   = wxID_HIGHEST + 14;
+constexpr int ID_HAMBURGER = wxID_HIGHEST + 15;
 
 // Per-model routing config. Resolved fresh at each StartCompletion so a model
 // change during a tool-call loop applies on the next request.
@@ -231,6 +232,13 @@ ChatFrame::ChatFrame()
     wxBitmapBundle bbSettings = LoadThemedSvgIcon("settings.svg", kIconSize, accent);
 
     auto* toolbarRow = new wxBoxSizer(wxHORIZONTAL);
+
+    wxBitmapBundle bbHamburger = LoadThemedSvgIcon("hamburger.svg", kIconSize, accent);
+    hamburgerBtn_ = new wxBitmapButton(panel, ID_HAMBURGER, bbHamburger,
+                                        wxDefaultPosition, kBtnSize,
+                                        wxBORDER_NONE);
+    hamburgerBtn_->SetToolTip(wxString::FromUTF8("Toggle session reference"));
+
     auto* sessionLabel = new wxStaticText(panel, wxID_ANY, "Session:");
     sessionChoice_ = new wxChoice(panel, ID_SESSION);
     sessionChoice_->SetMinSize(FromDIP(wxSize(220, -1)));
@@ -258,6 +266,7 @@ ChatFrame::ChatFrame()
                                   wxBORDER_NONE);
     playBtn_->SetToolTip(wxString::FromUTF8("Build and run project"));
 
+    toolbarRow->Add(hamburgerBtn_, 0, wxALIGN_CENTER_VERTICAL | wxRIGHT, 6);
     toolbarRow->Add(sessionLabel, 0, wxALIGN_CENTER_VERTICAL | wxRIGHT, 6);
     // Session and model both get a small proportion so they share resize delta;
     // the stretch spacer absorbs most of it. Once the spacer collapses (narrow
@@ -300,11 +309,37 @@ ChatFrame::ChatFrame()
     root->Add(outer, 1, wxEXPAND | wxALL, FromDIP(2));
     panel->SetSizer(root);
 
-    // Import viewer — left pane of splitter, hidden until import.
+    // Import viewer — left pane of splitter, hidden until hamburger toggle.
     importPanel_ = new wxPanel(splitter_);
     auto* importSizer = new wxBoxSizer(wxVERTICAL);
+
+    // Empty state: centered "Load Session…" button.
+    importEmptyView_ = new wxPanel(importPanel_);
+    auto* emptySizer = new wxBoxSizer(wxVERTICAL);
+    emptySizer->AddStretchSpacer(1);
+    auto* loadBtn = new wxButton(importEmptyView_, wxID_ANY,
+        wxString::FromUTF8("Load Session\xE2\x80\xA6"));
+    emptySizer->Add(loadBtn, 0, wxALIGN_CENTER);
+    emptySizer->AddStretchSpacer(1);
+    importEmptyView_->SetSizer(emptySizer);
+    loadBtn->Bind(wxEVT_BUTTON, [this](wxCommandEvent&) {
+        wxCommandEvent dummy;
+        OnImport(dummy);
+    });
+
     importCanvas_ = new ChatCanvas(importPanel_);
+    importCanvas_->Hide();
+
+    refLabel_ = new wxStaticText(importPanel_, wxID_ANY,
+        wxString::FromUTF8("Referenced Session: None"));
+    auto refFont = refLabel_->GetFont();
+    refFont.SetPointSize(refFont.GetPointSize() - 1);
+    refLabel_->SetFont(refFont);
+    refLabel_->SetForegroundColour(wxColour(140, 140, 140));
+
+    importSizer->Add(importEmptyView_, 1, wxEXPAND);
     importSizer->Add(importCanvas_, 1, wxEXPAND);
+    importSizer->Add(refLabel_, 0, wxALL, 4);
     importPanel_->SetSizer(importSizer);
 
     // Click on import canvas copies prompt to main input.
@@ -370,6 +405,7 @@ ChatFrame::ChatFrame()
     Bind(wxEVT_CLOSE_WINDOW, &ChatFrame::OnClose, this);
     Bind(wxEVT_BUTTON, &ChatFrame::OnSettings, this, ID_SETTINGS);
     Bind(wxEVT_BUTTON, &ChatFrame::OnExport, this, ID_EXPORT);
+    Bind(wxEVT_BUTTON, &ChatFrame::OnHamburger, this, ID_HAMBURGER);
     Bind(wxEVT_BUTTON, &ChatFrame::OnPlay, this, ID_PLAY);
     Bind(wxEVT_TOOL_BATCH_DONE, &ChatFrame::OnToolBatchDone, this);
     sessionChoice_->Bind(wxEVT_CHOICE, &ChatFrame::OnSessionChoice, this);
@@ -830,52 +866,34 @@ void ChatFrame::ReloadToolbarIcons() {
     settingsBtn_->SetBitmap(LoadThemedSvgIcon("settings.svg", kIconSize, accent));
     playBtn_->SetBitmap(LoadThemedSvgIcon("play.svg", kIconSize, accent));
     exportBtn_->SetBitmap(LoadThemedSvgIcon("export.svg", kIconSize, accent));
+    hamburgerBtn_->SetBitmap(LoadThemedSvgIcon("hamburger.svg", kIconSize, accent));
 }
 
 void ChatFrame::RefreshSessionChoice() {
     sessionChoice_->Clear();
     sessionCwds_.clear();
-    sessionChoice_->Append(wxString::FromUTF8("Import Session\xE2\x80\xA6"));
     sessionChoice_->Append(wxString::FromUTF8("New Session\xE2\x80\xA6"));
     int activeRow = -1;
     for (const auto& e : store_.List()) {
         sessionChoice_->Append(DisplayPath(e.cwd));
         sessionCwds_.push_back(e.cwd);
-        if (e.cwd == activeCwd_) activeRow = (int)sessionCwds_.size() + 1;
+        if (e.cwd == activeCwd_) activeRow = (int)sessionCwds_.size();
     }
-    if (activeRow < 2 && sessionCwds_.size() >= 1) activeRow = 2;
-    if (activeRow >= 2) sessionChoice_->SetSelection(activeRow);
-    if (activeRow >= 2) {
+    if (activeRow < 1 && sessionCwds_.size() >= 1) activeRow = 1;
+    if (activeRow >= 1) sessionChoice_->SetSelection(activeRow);
+    if (activeRow >= 1) {
         sessionChoice_->SetToolTip(
-            wxString::FromUTF8(sessionCwds_[activeRow - 2]));
+            wxString::FromUTF8(sessionCwds_[activeRow - 1]));
     }
 }
 
 void ChatFrame::OnSessionChoice(wxCommandEvent& evt) {
     int sel = evt.GetSelection();
     if (sel == 0) {
-        // "Import Session…" sentinel — snap back to current session.
+        // "New Session…" sentinel — snap back.
         for (int i = 0; i < (int)sessionCwds_.size(); ++i) {
             if (sessionCwds_[i] == activeCwd_) {
-                sessionChoice_->SetSelection(i + 2);
-                break;
-            }
-        }
-        if (streaming_) {
-            wxMessageBox("Cannot import while streaming.",
-                         "gritcode", wxOK | wxICON_INFORMATION, this);
-            return;
-        }
-        wxCommandEvent dummy;
-        OnImport(dummy);
-        return;
-    }
-    if (sel == 1) {
-        // "New Session…" sentinel — snap selection back so it never sticks,
-        // then start the new-session flow.
-        for (int i = 0; i < (int)sessionCwds_.size(); ++i) {
-            if (sessionCwds_[i] == activeCwd_) {
-                sessionChoice_->SetSelection(i + 2);
+                sessionChoice_->SetSelection(i + 1);
                 break;
             }
         }
@@ -887,15 +905,14 @@ void ChatFrame::OnSessionChoice(wxCommandEvent& evt) {
         CreateNewSession();
         return;
     }
-    int idx = sel - 2;
+    int idx = sel - 1;
     if (idx < 0 || idx >= (int)sessionCwds_.size()) return;
     const std::string& target = sessionCwds_[idx];
     if (target == activeCwd_) return;
     if (streaming_) {
-        // Restore prior selection and warn.
         for (int i = 0; i < (int)sessionCwds_.size(); ++i) {
             if (sessionCwds_[i] == activeCwd_) {
-                sessionChoice_->SetSelection(i + 2);
+                sessionChoice_->SetSelection(i + 1);
                 break;
             }
         }
@@ -1224,6 +1241,14 @@ void ChatFrame::OnSettings(wxCommandEvent&) {
     dlg.ShowModal();
 }
 
+void ChatFrame::OnHamburger(wxCommandEvent&) {
+    if (splitter_->IsSplit()) {
+        splitter_->Unsplit(importPanel_);
+    } else {
+        splitter_->SplitVertically(importPanel_, mainPanel_, 400);
+    }
+}
+
 void ChatFrame::OnExport(wxCommandEvent&) {
     wxFileDialog dlg(this, "Export Session", "", "gritcode-session",
                      "Gritcode Session (*.gritsession)|*.gritsession",
@@ -1356,6 +1381,15 @@ void ChatFrame::ShowImportDialog() {
             importCanvas_->AddBlock(std::move(tb));
         }
     }
+
+    // Swap empty view → canvas, update reference label.
+    importEmptyView_->Hide();
+    importCanvas_->Show();
+
+    // Derive a short name from the import source.
+    std::string name = "Imported Session";
+    refLabel_->SetLabel(wxString::FromUTF8("Referenced Session: " + name));
+    importPanel_->Layout();
 
     // Split to show the import panel on the left.
     if (!splitter_->IsSplit()) {
