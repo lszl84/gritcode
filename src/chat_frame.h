@@ -60,6 +60,8 @@ private:
     wxChoice* modelChoice_ = nullptr;
     wxBitmapButton* playBtn_ = nullptr;
     wxBitmapButton* settingsBtn_ = nullptr;
+    wxBitmapButton* exportBtn_ = nullptr;
+    wxBitmapButton* importBtn_ = nullptr;
 
     // On-disk session persistence. Sessions are keyed by working directory
     // (one session per folder, gritcode model). The dropdown is rebuilt from
@@ -173,6 +175,8 @@ private:
     void OnModelChoice(wxCommandEvent&);
     void OnSettings(wxCommandEvent&);
     void OnPlay(wxCommandEvent&);
+    void OnExport(wxCommandEvent&);
+    void OnImport(wxCommandEvent&);
 
     // Repopulate the session choice from store_.List() with the leading
     // "New Session…" entry, then restore the active selection.
@@ -199,6 +203,10 @@ private:
     // once at construction and again on EVT_SYS_COLOUR_CHANGED so the icons
     // stay readable when the user toggles light/dark themes.
     void ReloadToolbarIcons();
+
+    // ---- Session import/export ----
+    std::vector<nlohmann::json> importedMessages_;   // raw messages from import
+    std::vector<std::string> importedPrompts_;        // user prompts extracted
 
     // Streaming HTTP callbacks (delivered on the GUI thread via CallAfter).
     // OnStreamData appends to sseBuf_ and parses any complete SSE events.

@@ -14,8 +14,11 @@
 #include <wx/bmpbndl.h>
 #include <wx/settings.h>
 #include <wx/stdpaths.h>
+#include <wx/filedlg.h>
 #include <algorithm>
+#include <chrono>
 #include <ctime>
+#include <fstream>
 #include <future>
 #include <memory>
 #include <sstream>
@@ -45,6 +48,8 @@ constexpr int ID_SESSION  = wxID_HIGHEST + 10;
 constexpr int ID_MODEL    = wxID_HIGHEST + 11;
 constexpr int ID_SETTINGS = wxID_HIGHEST + 12;
 constexpr int ID_PLAY     = wxID_HIGHEST + 13;
+constexpr int ID_EXPORT   = wxID_HIGHEST + 14;
+constexpr int ID_IMPORT   = wxID_HIGHEST + 15;
 
 // Per-model routing config. Resolved fresh at each StartCompletion so a model
 // change during a tool-call loop applies on the next request.
@@ -234,6 +239,18 @@ ChatFrame::ChatFrame()
                                       wxBORDER_NONE);
     settingsBtn_->SetToolTip(wxString::FromUTF8("Settings…"));
 
+    wxBitmapBundle bbExport = LoadThemedSvgIcon("plus.svg", kIconSize, accent);
+    exportBtn_ = new wxBitmapButton(panel, ID_EXPORT, bbExport,
+                                     wxDefaultPosition, kBtnSize,
+                                     wxBORDER_NONE);
+    exportBtn_->SetToolTip(wxString::FromUTF8("Export session to file"));
+
+    wxBitmapBundle bbImport = LoadThemedSvgIcon("plus.svg", kIconSize, accent);
+    importBtn_ = new wxBitmapButton(panel, ID_IMPORT, bbImport,
+                                     wxDefaultPosition, kBtnSize,
+                                     wxBORDER_NONE);
+    importBtn_->SetToolTip(wxString::FromUTF8("Import session from file"));
+
     wxBitmapBundle bbPlay = LoadThemedSvgIcon("play.svg", kIconSize, accent);
     playBtn_ = new wxBitmapButton(panel, ID_PLAY, bbPlay,
                                   wxDefaultPosition, kBtnSize,
@@ -250,6 +267,8 @@ ChatFrame::ChatFrame()
     toolbarRow->Add(modelChoice_, 1, wxALIGN_CENTER_VERTICAL);
     toolbarRow->AddStretchSpacer(8);
     toolbarRow->Add(settingsBtn_, 0, wxALIGN_CENTER_VERTICAL);
+    toolbarRow->Add(exportBtn_, 0, wxALIGN_CENTER_VERTICAL | wxLEFT, 4);
+    toolbarRow->Add(importBtn_, 0, wxALIGN_CENTER_VERTICAL | wxLEFT, 4);
 
     // Chip row — wraps to multiple lines if the queue gets long. Hidden
     // (via sizer Show) until the queue has at least one entry.
@@ -324,6 +343,8 @@ ChatFrame::ChatFrame()
     Bind(wxEVT_CHAR_HOOK, &ChatFrame::OnCharHook, this);
     Bind(wxEVT_CLOSE_WINDOW, &ChatFrame::OnClose, this);
     Bind(wxEVT_BUTTON, &ChatFrame::OnSettings, this, ID_SETTINGS);
+    Bind(wxEVT_BUTTON, &ChatFrame::OnExport, this, ID_EXPORT);
+    Bind(wxEVT_BUTTON, &ChatFrame::OnImport, this, ID_IMPORT);
     Bind(wxEVT_BUTTON, &ChatFrame::OnPlay, this, ID_PLAY);
     Bind(wxEVT_TOOL_BATCH_DONE, &ChatFrame::OnToolBatchDone, this);
     sessionChoice_->Bind(wxEVT_CHOICE, &ChatFrame::OnSessionChoice, this);
@@ -745,6 +766,8 @@ void ChatFrame::ReloadToolbarIcons() {
     wxColour accent = wxSystemSettings::GetColour(wxSYS_COLOUR_WINDOWTEXT);
     settingsBtn_->SetBitmap(LoadThemedSvgIcon("settings.svg", kIconSize, accent));
     playBtn_->SetBitmap(LoadThemedSvgIcon("play.svg", kIconSize, accent));
+    exportBtn_->SetBitmap(LoadThemedSvgIcon("plus.svg", kIconSize, accent));
+    importBtn_->SetBitmap(LoadThemedSvgIcon("plus.svg", kIconSize, accent));
 }
 
 void ChatFrame::RefreshSessionChoice() {
@@ -1122,6 +1145,79 @@ void ChatFrame::OnPlay(wxCommandEvent&) {
 void ChatFrame::OnSettings(wxCommandEvent&) {
     SettingsDialog dlg(this);
     dlg.ShowModal();
+}
+
+void ChatFrame::OnExport(wxCommandEvent&) {
+    wxFileDialog dlg(this, "Export Session", "", "gritcode-session",
+                     "Gritcode Session (*.gritsession)|*.gritsession",
+                     wxFD_SAVE | wxFD_OVERWRITE_PROMPT);
+    if (dlg.ShowModal() != wxID_OK) return;
+
+    nlohmann::json j;
+    j["version"] = 1;
+    j["exportedAt"] = []() {
+        auto now = std::chrono::system_clock::now();
+        auto t = std::chrono::system_clock::to_time_t(now);
+        char buf[32];
+        std::strftime(buf, sizeof(buf), "%Y-%m-%dT%H:%M:%S", std::gmtime(&t));
+        return std::string(buf);
+    }();
+    j["messages"] = history_;
+
+    std::string path = dlg.GetPath().ToStdString(wxConvUTF8);
+    if (path.find(".gritsession") == std::string::npos)
+        path += ".gritsession";
+
+    std::ofstream f(path, std::ios::binary | std::ios::trunc);
+    if (!f) {
+        wxMessageBox("Failed to write file.", "Export", wxOK | wxICON_ERROR);
+        return;
+    }
+    f << j.dump(2, ' ', false, nlohmann::json::error_handler_t::replace);
+    wxMessageBox(wxString::Format("Session exported (%zu messages).",
+                                  history_.size()),
+                 "Export", wxOK | wxICON_INFORMATION);
+}
+
+void ChatFrame::OnImport(wxCommandEvent&) {
+    wxFileDialog dlg(this, "Import Session", "", "",
+                     "Gritcode Session (*.gritsession)|*.gritsession",
+                     wxFD_OPEN | wxFD_FILE_MUST_EXIST);
+    if (dlg.ShowModal() != wxID_OK) return;
+
+    std::ifstream f(dlg.GetPath().ToStdString(wxConvUTF8));
+    if (!f) {
+        wxMessageBox("Failed to open file.", "Import", wxOK | wxICON_ERROR);
+        return;
+    }
+    nlohmann::json j;
+    try { f >> j; }
+    catch (...) {
+        wxMessageBox("Invalid session file.", "Import", wxOK | wxICON_ERROR);
+        return;
+    }
+    if (!j.contains("messages") || !j["messages"].is_array()) {
+        wxMessageBox("No messages found in file.", "Import", wxOK | wxICON_ERROR);
+        return;
+    }
+
+    // Extract user prompts from the imported session.
+    importedMessages_ = j["messages"].get<std::vector<nlohmann::json>>();
+    importedPrompts_.clear();
+    for (const auto& m : importedMessages_) {
+        if (m.value("role", std::string{}) == "user")
+            importedPrompts_.push_back(m.value("content", std::string{}));
+    }
+
+    if (importedPrompts_.empty()) {
+        wxMessageBox("No user prompts found.", "Import", wxOK | wxICON_ERROR);
+        return;
+    }
+
+    wxMessageBox(wxString::Format("Imported %zu prompts. Use the Import panel to "
+                                  "execute them one by one.",
+                                  importedPrompts_.size()),
+                 "Import", wxOK | wxICON_INFORMATION);
 }
 
 void ChatFrame::OnSend(wxCommandEvent&) {
