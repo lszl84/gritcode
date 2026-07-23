@@ -31,6 +31,10 @@ class ChatCanvas : public wxScrolledCanvas {
 public:
     ChatCanvas(wxWindow* parent);
 
+    // Override the background colour computed from system theme.
+    // Pass wxNullColour to revert to the default palette bg.
+    void SetBgColour(const wxColour& c) { bgOverride_ = c; Refresh(); }
+
     // Append a finalized block. Triggers reflow + redraw.
     void AddBlock(Block b);
 
@@ -203,6 +207,7 @@ private:
 
     // Cached palette. Rebuilt in the constructor and on wxEVT_SYS_COLOUR_CHANGED.
     Palette palette_;
+    wxColour bgOverride_;  // if set, overrides palette_.bg
     void RebuildPalette();
 
     // Font lookups — built once, cached.

@@ -311,8 +311,6 @@ ChatFrame::ChatFrame()
 
     // Import viewer — left pane of splitter, hidden until hamburger toggle.
     importPanel_ = new wxPanel(splitter_);
-    importPanel_->SetBackgroundColour(
-        wxSystemSettings::GetColour(wxSYS_COLOUR_FRAMEBK));
     auto* importSizer = new wxBoxSizer(wxVERTICAL);
 
     // Empty state: centered "Load Session…" button.
@@ -330,6 +328,8 @@ ChatFrame::ChatFrame()
     });
 
     importCanvas_ = new ChatCanvas(importPanel_);
+    importCanvas_->SetBgColour(
+        wxSystemSettings::GetColour(wxSYS_COLOUR_WINDOW));
     importCanvas_->Hide();
 
     refLabel_ = new wxStaticText(importPanel_, wxID_ANY,
