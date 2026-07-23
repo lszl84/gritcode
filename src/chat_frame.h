@@ -212,7 +212,6 @@ private:
     wxPanel* importPanel_ = nullptr;                  // left pane of splitter
     ChatCanvas* importCanvas_ = nullptr;              // rendered import messages
     wxPanel* importEmptyView_ = nullptr;                // empty state with Load button
-    wxStaticText* importNameLabel_ = nullptr;             // session name header
     wxSplitterWindow* splitter_ = nullptr;            // main splitter
     wxPanel* mainPanel_ = nullptr;                     // right pane (main UI)
     wxStaticText* refLabel_ = nullptr;                 // "Referenced Session: ..." at bottom

@@ -313,22 +313,6 @@ ChatFrame::ChatFrame()
     importPanel_ = new wxPanel(splitter_);
     auto* importSizer = new wxBoxSizer(wxVERTICAL);
 
-    // Header: session name + instruction.
-    auto* importHeader = new wxBoxSizer(wxVERTICAL);
-    importNameLabel_ = new wxStaticText(importPanel_, wxID_ANY, "");
-    auto nameFont = importNameLabel_->GetFont();
-    nameFont.SetWeight(wxFONTWEIGHT_BOLD);
-    importNameLabel_->SetFont(nameFont);
-    importHeader->Add(importNameLabel_, 0, wxALL, 4);
-
-    auto* instructionLabel = new wxStaticText(importPanel_, wxID_ANY,
-        wxString::FromUTF8("Click a prompt to copy it to the current session."));
-    auto instrFont = instructionLabel->GetFont();
-    instrFont.SetPointSize(instrFont.GetPointSize() - 1);
-    instructionLabel->SetFont(instrFont);
-    instructionLabel->SetForegroundColour(wxColour(140, 140, 140));
-    importHeader->Add(instructionLabel, 0, wxLEFT | wxRIGHT | wxBOTTOM, 4);
-
     // Empty state: centered "Load Session…" button.
     importEmptyView_ = new wxPanel(importPanel_);
     auto* emptySizer = new wxBoxSizer(wxVERTICAL);
@@ -353,10 +337,20 @@ ChatFrame::ChatFrame()
     refLabel_->SetFont(refFont);
     refLabel_->SetForegroundColour(wxColour(140, 140, 140));
 
-    importSizer->Add(importHeader, 0, wxEXPAND);
+    auto* instructionLabel = new wxStaticText(importPanel_, wxID_ANY,
+        wxString::FromUTF8("Click a prompt to copy it to the current session."));
+    auto instrFont = instructionLabel->GetFont();
+    instrFont.SetPointSize(instrFont.GetPointSize() - 1);
+    instructionLabel->SetFont(instrFont);
+    instructionLabel->SetForegroundColour(wxColour(140, 140, 140));
+
+    auto* bottomBox = new wxBoxSizer(wxVERTICAL);
+    bottomBox->Add(refLabel_, 0, wxLEFT | wxRIGHT | wxTOP, 4);
+    bottomBox->Add(instructionLabel, 0, wxLEFT | wxRIGHT | wxBOTTOM, 4);
+
     importSizer->Add(importEmptyView_, 1, wxEXPAND);
     importSizer->Add(importCanvas_, 1, wxEXPAND);
-    importSizer->Add(refLabel_, 0, wxALL, 4);
+    importSizer->Add(bottomBox, 0, wxEXPAND);
     importPanel_->SetSizer(importSizer);
 
     // Click on import canvas copies prompt to main input.
@@ -1350,7 +1344,6 @@ void ChatFrame::ShowImportDialog() {
     wxString displayName = importedFileName_.empty()
         ? wxString::FromUTF8("Imported Session")
         : importedFileName_;
-    importNameLabel_->SetLabel(displayName);
 
     // Render imported messages into the side canvas.
     importCanvas_->Clear();
