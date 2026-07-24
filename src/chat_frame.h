@@ -3,6 +3,7 @@
 #include <wx/choice.h>
 #include <wx/textctrl.h>
 #include <wx/bmpbuttn.h>
+#include <wx/splitter.h>
 #include <wx/thread.h>
 #include <nlohmann/json.hpp>
 #include "chat_canvas.h"
@@ -60,6 +61,8 @@ private:
     wxChoice* modelChoice_ = nullptr;
     wxBitmapButton* playBtn_ = nullptr;
     wxBitmapButton* settingsBtn_ = nullptr;
+    wxBitmapButton* exportBtn_ = nullptr;
+    wxBitmapButton* hamburgerBtn_ = nullptr;
 
     // On-disk session persistence. Sessions are keyed by working directory
     // (one session per folder, gritcode model). The dropdown is rebuilt from
@@ -173,6 +176,10 @@ private:
     void OnModelChoice(wxCommandEvent&);
     void OnSettings(wxCommandEvent&);
     void OnPlay(wxCommandEvent&);
+    void OnExport(wxCommandEvent&);
+    void OnHamburger(wxCommandEvent&);
+    void OnImport(wxCommandEvent&);
+    void ShowImportDialog();
 
     // Repopulate the session choice from store_.List() with the leading
     // "New Session…" entry, then restore the active selection.
@@ -199,6 +206,17 @@ private:
     // once at construction and again on EVT_SYS_COLOUR_CHANGED so the icons
     // stay readable when the user toggles light/dark themes.
     void ReloadToolbarIcons();
+
+    // ---- Session import/export ----
+    std::vector<nlohmann::json> importedMessages_;   // raw messages from import
+    wxPanel* importPanel_ = nullptr;                  // left pane of splitter
+    ChatCanvas* importCanvas_ = nullptr;              // rendered import messages
+    wxPanel* importEmptyView_ = nullptr;                // empty state with Load button
+    wxSplitterWindow* splitter_ = nullptr;            // main splitter
+    wxPanel* mainPanel_ = nullptr;                     // right pane (main UI)
+    wxStaticText* refLabel_ = nullptr;                 // "Referenced Session: ..." at bottom
+    wxString importedFileName_;                          // display name of imported file
+    int mainWidth_ = 600;                                // window width without import pane
 
     // Streaming HTTP callbacks (delivered on the GUI thread via CallAfter).
     // OnStreamData appends to sseBuf_ and parses any complete SSE events.

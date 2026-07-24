@@ -238,6 +238,18 @@ json MCPServer::HandleRequest(const json& request) {
             params["x1"].get<int>(), params["y1"].get<int>(),
             params["x2"].get<int>(), params["y2"].get<int>(), steps));
     }
+    if (method == "exportSession") {
+        if (!cb_.exportSession) return err(-32603, "not ready");
+        std::string path = params.value("path", "");
+        if (path.empty()) return err(-32602, "missing 'path' param");
+        return okResult(cb_.exportSession(path));
+    }
+    if (method == "importSession") {
+        if (!cb_.importSession) return err(-32603, "not ready");
+        std::string path = params.value("path", "");
+        if (path.empty()) return err(-32602, "missing 'path' param");
+        return okResult(cb_.importSession(path));
+    }
     return err(-32601, "unknown method: " + method);
 }
 

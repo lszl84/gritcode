@@ -14,8 +14,13 @@
 #include <wx/bmpbndl.h>
 #include <wx/settings.h>
 #include <wx/stdpaths.h>
+#include <wx/filedlg.h>
+#include <wx/scrolwin.h>
+#include <wx/splitter.h>
 #include <algorithm>
+#include <chrono>
 #include <ctime>
+#include <fstream>
 #include <future>
 #include <memory>
 #include <sstream>
@@ -45,6 +50,8 @@ constexpr int ID_SESSION  = wxID_HIGHEST + 10;
 constexpr int ID_MODEL    = wxID_HIGHEST + 11;
 constexpr int ID_SETTINGS = wxID_HIGHEST + 12;
 constexpr int ID_PLAY     = wxID_HIGHEST + 13;
+constexpr int ID_EXPORT   = wxID_HIGHEST + 14;
+constexpr int ID_HAMBURGER = wxID_HIGHEST + 15;
 
 // Per-model routing config. Resolved fresh at each StartCompletion so a model
 // change during a tool-call loop applies on the next request.
@@ -135,21 +142,19 @@ const wxString& GetAssetsDir() {
     return cached;
 }
 
+#ifdef _WIN32
 wxString GetCacertPath() {
     static wxString cached = []() -> wxString {
-#ifdef _WIN32
         wxString exeDir = wxStandardPaths::Get().GetResourcesDir();
         if (wxFileName::FileExists(exeDir + "/cacert.pem"))
             return exeDir + "/cacert.pem";
         if (wxFileName::FileExists(exeDir + "/../cacert.pem"))
             return exeDir + "/../cacert.pem";
         return exeDir + "/cacert.pem";
-#else
-        return wxString();  // Linux/macOS use system cert store
-#endif
     }();
     return cached;
 }
+#endif
 
 // Load an SVG icon from disk and recolor its #FFFFFF fills with `accent`.
 // The original assets were authored white for dark mode; substituting at load
@@ -177,11 +182,11 @@ wxIconBundle LoadAppIcon() {
     wxString path = wxStandardPaths::Get().GetResourcesDir()
                     + "/../../icons/hicolor/scalable/apps/gritcode.svg";
     wxFileName fn(path);
-    fn.Normalize();
+    fn.Normalize(wxPATH_NORM_ALL);
     if (!fn.FileExists()) {
         // Dev fallback: source-tree packaging directory.
         fn.Assign(wxString(GRITCODE_ASSETS_DIR) + "/../packaging/gritcode.svg");
-        fn.Normalize();
+        fn.Normalize(wxPATH_NORM_ALL);
     }
     if (fn.FileExists()) {
         wxBitmapBundle bb = wxBitmapBundle::FromSVGFile(fn.GetFullPath(), wxSize(64, 64));
@@ -205,7 +210,13 @@ ChatFrame::ChatFrame()
 
     SetIcons(LoadAppIcon());
 
-    auto* panel = new wxPanel(this);
+    splitter_ = new wxSplitterWindow(this, wxID_ANY,
+        wxDefaultPosition, wxDefaultSize, wxSP_LIVE_UPDATE);
+    splitter_->SetMinimumPaneSize(200);
+
+    // Main panel: right pane of splitter.
+    auto* panel = new wxPanel(splitter_);
+    mainPanel_ = panel;
     auto* outer = new wxBoxSizer(wxVERTICAL);
 
     canvas_ = new ChatCanvas(panel);
@@ -219,6 +230,13 @@ ChatFrame::ChatFrame()
     wxBitmapBundle bbSettings = LoadThemedSvgIcon("settings.svg", kIconSize, accent);
 
     auto* toolbarRow = new wxBoxSizer(wxHORIZONTAL);
+
+    wxBitmapBundle bbHamburger = LoadThemedSvgIcon("hamburger.svg", kIconSize, accent);
+    hamburgerBtn_ = new wxBitmapButton(panel, ID_HAMBURGER, bbHamburger,
+                                        wxDefaultPosition, kBtnSize,
+                                        wxBORDER_NONE);
+    hamburgerBtn_->SetToolTip(wxString::FromUTF8("Toggle session reference"));
+
     auto* sessionLabel = new wxStaticText(panel, wxID_ANY, "Session:");
     sessionChoice_ = new wxChoice(panel, ID_SESSION);
     sessionChoice_->SetMinSize(FromDIP(wxSize(220, -1)));
@@ -234,12 +252,19 @@ ChatFrame::ChatFrame()
                                       wxBORDER_NONE);
     settingsBtn_->SetToolTip(wxString::FromUTF8("Settings…"));
 
+    wxBitmapBundle bbExport = LoadThemedSvgIcon("export.svg", kIconSize, accent);
+    exportBtn_ = new wxBitmapButton(panel, ID_EXPORT, bbExport,
+                                     wxDefaultPosition, kBtnSize,
+                                     wxBORDER_NONE);
+    exportBtn_->SetToolTip(wxString::FromUTF8("Export session to file"));
+
     wxBitmapBundle bbPlay = LoadThemedSvgIcon("play.svg", kIconSize, accent);
     playBtn_ = new wxBitmapButton(panel, ID_PLAY, bbPlay,
                                   wxDefaultPosition, kBtnSize,
                                   wxBORDER_NONE);
     playBtn_->SetToolTip(wxString::FromUTF8("Build and run project"));
 
+    toolbarRow->Add(hamburgerBtn_, 0, wxALIGN_CENTER_VERTICAL | wxRIGHT, 6);
     toolbarRow->Add(sessionLabel, 0, wxALIGN_CENTER_VERTICAL | wxRIGHT, 6);
     // Session and model both get a small proportion so they share resize delta;
     // the stretch spacer absorbs most of it. Once the spacer collapses (narrow
@@ -250,6 +275,7 @@ ChatFrame::ChatFrame()
     toolbarRow->Add(modelChoice_, 1, wxALIGN_CENTER_VERTICAL);
     toolbarRow->AddStretchSpacer(8);
     toolbarRow->Add(settingsBtn_, 0, wxALIGN_CENTER_VERTICAL);
+    toolbarRow->Add(exportBtn_, 0, wxALIGN_CENTER_VERTICAL | wxLEFT, 4);
 
     // Chip row — wraps to multiple lines if the queue gets long. Hidden
     // (via sizer Show) until the queue has at least one entry.
@@ -280,6 +306,72 @@ ChatFrame::ChatFrame()
     auto* root = new wxBoxSizer(wxVERTICAL);
     root->Add(outer, 1, wxEXPAND | wxALL, FromDIP(2));
     panel->SetSizer(root);
+
+    // Import viewer — left pane of splitter, hidden until hamburger toggle.
+    importPanel_ = new wxPanel(splitter_);
+    auto* importSizer = new wxBoxSizer(wxVERTICAL);
+
+    // Empty state: centered "Load Session…" button.
+    importEmptyView_ = new wxPanel(importPanel_);
+    auto* emptySizer = new wxBoxSizer(wxVERTICAL);
+    emptySizer->AddStretchSpacer(1);
+    auto* loadBtn = new wxButton(importEmptyView_, wxID_ANY,
+        wxString::FromUTF8("Load Session\xE2\x80\xA6"));
+    emptySizer->Add(loadBtn, 0, wxALIGN_CENTER);
+    emptySizer->AddStretchSpacer(1);
+    importEmptyView_->SetSizer(emptySizer);
+    loadBtn->Bind(wxEVT_BUTTON, [this](wxCommandEvent&) {
+        wxCommandEvent dummy;
+        OnImport(dummy);
+    });
+
+    importCanvas_ = new ChatCanvas(importPanel_);
+    importCanvas_->SetBgColour(
+        wxSystemSettings::GetColour(wxSYS_COLOUR_WINDOW));
+    importCanvas_->Hide();
+
+    refLabel_ = new wxStaticText(importPanel_, wxID_ANY,
+        wxString::FromUTF8("Referenced Session: None"));
+    auto refFont = refLabel_->GetFont();
+    refFont.SetPointSize(refFont.GetPointSize() - 1);
+    refLabel_->SetFont(refFont);
+    refLabel_->SetForegroundColour(wxColour(140, 140, 140));
+
+    auto* instructionLabel = new wxStaticText(importPanel_, wxID_ANY,
+        wxString::FromUTF8("Click a prompt to copy it to the current session."));
+    auto instrFont = instructionLabel->GetFont();
+    instrFont.SetPointSize(instrFont.GetPointSize() - 1);
+    instructionLabel->SetFont(instrFont);
+    instructionLabel->SetForegroundColour(wxColour(140, 140, 140));
+
+    auto* bottomBox = new wxBoxSizer(wxVERTICAL);
+    bottomBox->Add(refLabel_, 0, wxLEFT | wxRIGHT | wxTOP, 4);
+    bottomBox->Add(instructionLabel, 0, wxLEFT | wxRIGHT | wxBOTTOM, 4);
+
+    importSizer->Add(importEmptyView_, 1, wxEXPAND);
+    importSizer->Add(importCanvas_, 1, wxEXPAND);
+    importSizer->Add(bottomBox, 0, wxEXPAND);
+    importPanel_->SetSizer(importSizer);
+
+    // Click on import canvas copies prompt to main input.
+    importCanvas_->Bind(wxEVT_LEFT_UP, [this](wxMouseEvent& e) {
+        wxPoint logical = importCanvas_->CalcUnscrolledPosition(
+            e.GetPosition());
+        BlockPos pos = importCanvas_->HitTestPublic(logical.x, logical.y);
+        if (!pos.IsValid()) { e.Skip(); return; }
+        const auto& blocks = importCanvas_->Blocks();
+        if (pos.block < 0 || pos.block >= (int)blocks.size()) { e.Skip(); return; }
+        if (blocks[pos.block].type == BlockType::UserPrompt) {
+            input_->SetValue(blocks[pos.block].rawText);
+        }
+        e.Skip();
+    });
+
+    splitter_->Initialize(mainPanel_);  // Right pane only at start
+
+    auto* frameSizer = new wxBoxSizer(wxHORIZONTAL);
+    frameSizer->Add(splitter_, 1, wxEXPAND);
+    SetSizer(frameSizer);
 
     // Open the most recent session if one exists; otherwise seed one for the
     // default cwd so the dropdown always has at least one entry.
@@ -324,6 +416,8 @@ ChatFrame::ChatFrame()
     Bind(wxEVT_CHAR_HOOK, &ChatFrame::OnCharHook, this);
     Bind(wxEVT_CLOSE_WINDOW, &ChatFrame::OnClose, this);
     Bind(wxEVT_BUTTON, &ChatFrame::OnSettings, this, ID_SETTINGS);
+    Bind(wxEVT_BUTTON, &ChatFrame::OnExport, this, ID_EXPORT);
+    Bind(wxEVT_BUTTON, &ChatFrame::OnHamburger, this, ID_HAMBURGER);
     Bind(wxEVT_BUTTON, &ChatFrame::OnPlay, this, ID_PLAY);
     Bind(wxEVT_TOOL_BATCH_DONE, &ChatFrame::OnToolBatchDone, this);
     sessionChoice_->Bind(wxEVT_CHOICE, &ChatFrame::OnSessionChoice, this);
@@ -562,10 +656,53 @@ ChatFrame::ChatFrame()
             return {{"ok", true}, {"cwd", activeCwd_}};
         });
     };
+    cb.exportSession = [this, guiSync](const std::string& path)
+        -> nlohmann::json {
+        return guiSync([this, path]() -> nlohmann::json {
+            nlohmann::json j;
+            j["version"] = 1;
+            j["messages"] = history_;
+            std::ofstream f(path, std::ios::binary | std::ios::trunc);
+            if (!f) return {{"ok", false}, {"error", "cannot write file"}};
+            f << j.dump(2, ' ', false, nlohmann::json::error_handler_t::replace);
+            return {{"ok", true}, {"messageCount", (int)history_.size()}};
+        });
+    };
+    cb.importSession = [this, guiSync](const std::string& path)
+        -> nlohmann::json {
+        return guiSync([this, path]() -> nlohmann::json {
+            std::ifstream f(path);
+            if (!f) return {{"ok", false}, {"error", "cannot open file"}};
+            nlohmann::json j;
+            try { f >> j; }
+            catch (...) { return {{"ok", false}, {"error", "invalid JSON"}}; }
+            if (!j.contains("messages") || !j["messages"].is_array())
+                return {{"ok", false}, {"error", "no messages array"}};
+
+            importedMessages_.clear();
+            int promptCount = 0;
+            for (const auto& m : j["messages"]) {
+                if (m.is_object()) {
+                    importedMessages_.push_back(m);
+                    if (m.value("role", std::string{}) == "user") ++promptCount;
+                }
+            }
+
+            // Store filename for display.
+            auto slash = path.rfind('/');
+            importedFileName_ = wxString::FromUTF8(
+                slash != std::string::npos ? path.substr(slash + 1) : path);
+
+            // Trigger the import dialog on the GUI thread.
+            CallAfter([this]() { ShowImportDialog(); });
+
+            return {{"ok", true}, {"promptCount", promptCount}};
+        });
+    };
     mcp_.Start(std::move(cb));
 
     input_->SetFocus();
-    SetMinSize(wxSize(500, 400));
+    SetMinSize(wxSize(620, 400));
 }
 
 ChatFrame::~ChatFrame() {
@@ -745,6 +882,8 @@ void ChatFrame::ReloadToolbarIcons() {
     wxColour accent = wxSystemSettings::GetColour(wxSYS_COLOUR_WINDOWTEXT);
     settingsBtn_->SetBitmap(LoadThemedSvgIcon("settings.svg", kIconSize, accent));
     playBtn_->SetBitmap(LoadThemedSvgIcon("play.svg", kIconSize, accent));
+    exportBtn_->SetBitmap(LoadThemedSvgIcon("export.svg", kIconSize, accent));
+    hamburgerBtn_->SetBitmap(LoadThemedSvgIcon("hamburger.svg", kIconSize, accent));
 }
 
 void ChatFrame::RefreshSessionChoice() {
@@ -757,11 +896,8 @@ void ChatFrame::RefreshSessionChoice() {
         sessionCwds_.push_back(e.cwd);
         if (e.cwd == activeCwd_) activeRow = (int)sessionCwds_.size();
     }
-    // Fall back to first real session if active cwd wasn't found in the list
-    // (shouldn't happen — every saved session is in the index).
     if (activeRow < 1 && sessionCwds_.size() >= 1) activeRow = 1;
     if (activeRow >= 1) sessionChoice_->SetSelection(activeRow);
-    // Tooltip shows the absolute path even when the dropdown collapses ~/ .
     if (activeRow >= 1) {
         sessionChoice_->SetToolTip(
             wxString::FromUTF8(sessionCwds_[activeRow - 1]));
@@ -771,8 +907,7 @@ void ChatFrame::RefreshSessionChoice() {
 void ChatFrame::OnSessionChoice(wxCommandEvent& evt) {
     int sel = evt.GetSelection();
     if (sel == 0) {
-        // "New Session…" sentinel — snap selection back so it never sticks,
-        // then start the new-session flow.
+        // "New Session…" sentinel — snap back.
         for (int i = 0; i < (int)sessionCwds_.size(); ++i) {
             if (sessionCwds_[i] == activeCwd_) {
                 sessionChoice_->SetSelection(i + 1);
@@ -792,7 +927,6 @@ void ChatFrame::OnSessionChoice(wxCommandEvent& evt) {
     const std::string& target = sessionCwds_[idx];
     if (target == activeCwd_) return;
     if (streaming_) {
-        // Restore prior selection and warn.
         for (int i = 0; i < (int)sessionCwds_.size(); ++i) {
             if (sessionCwds_[i] == activeCwd_) {
                 sessionChoice_->SetSelection(i + 1);
@@ -1021,7 +1155,7 @@ void ChatFrame::OnPlay(wxCommandEvent&) {
         userBlock.type = BlockType::UserPrompt;
         userBlock.rawText = userMsg;
         userBlock.visibleText = userMsg;
-        userBlock.runs.push_back({userMsg, false, false});
+        userBlock.runs.push_back({userMsg, false, false, {}});
         canvas_->AddBlock(std::move(userBlock));
 
         // Run the command on a background thread. Use a dedicated playWorker_
@@ -1122,6 +1256,178 @@ void ChatFrame::OnPlay(wxCommandEvent&) {
 void ChatFrame::OnSettings(wxCommandEvent&) {
     SettingsDialog dlg(this);
     dlg.ShowModal();
+}
+
+void ChatFrame::OnHamburger(wxCommandEvent&) {
+    if (splitter_->IsSplit()) {
+        splitter_->Unsplit(importPanel_);
+        SetMinSize(wxSize(620, 400));
+        SetClientSize(wxSize(mainWidth_, GetClientSize().y));
+    } else {
+        mainWidth_ = GetClientSize().x;
+        splitter_->SplitVertically(importPanel_, mainPanel_, 400);
+        SetMinSize(wxSize(620 + 420, 400));
+        SetClientSize(wxSize(mainWidth_ + 420, GetClientSize().y));
+    }
+}
+
+void ChatFrame::OnExport(wxCommandEvent&) {
+    wxFileDialog dlg(this, "Export Session", "", "gritcode-session",
+                     "Gritcode Session (*.gritsession)|*.gritsession",
+                     wxFD_SAVE | wxFD_OVERWRITE_PROMPT);
+    if (dlg.ShowModal() != wxID_OK) return;
+
+    nlohmann::json j;
+    j["version"] = 1;
+    j["exportedAt"] = []() {
+        auto now = std::chrono::system_clock::now();
+        auto t = std::chrono::system_clock::to_time_t(now);
+        char buf[32];
+        std::strftime(buf, sizeof(buf), "%Y-%m-%dT%H:%M:%S", std::gmtime(&t));
+        return std::string(buf);
+    }();
+    j["messages"] = history_;
+
+    std::string path = dlg.GetPath().ToStdString(wxConvUTF8);
+    if (path.find(".gritsession") == std::string::npos)
+        path += ".gritsession";
+
+    std::ofstream f(path, std::ios::binary | std::ios::trunc);
+    if (!f) {
+        wxMessageBox("Failed to write file.", "Export", wxOK | wxICON_ERROR);
+        return;
+    }
+    f << j.dump(2, ' ', false, nlohmann::json::error_handler_t::replace);
+    wxMessageBox(wxString::Format("Session exported (%zu messages).",
+                                  history_.size()),
+                 "Export", wxOK | wxICON_INFORMATION);
+}
+
+void ChatFrame::OnImport(wxCommandEvent&) {
+    wxFileDialog dlg(this, "Import Session", "", "",
+                     "Gritcode Session (*.gritsession)|*.gritsession",
+                     wxFD_OPEN | wxFD_FILE_MUST_EXIST);
+    if (dlg.ShowModal() != wxID_OK) return;
+
+    std::ifstream f(dlg.GetPath().ToStdString(wxConvUTF8));
+    if (!f) {
+        wxMessageBox("Failed to open file.", "Import", wxOK | wxICON_ERROR);
+        return;
+    }
+    nlohmann::json j;
+    try { f >> j; }
+    catch (...) {
+        wxMessageBox("Invalid session file.", "Import", wxOK | wxICON_ERROR);
+        return;
+    }
+    if (!j.contains("messages") || !j["messages"].is_array()) {
+        wxMessageBox("No messages found in file.", "Import", wxOK | wxICON_ERROR);
+        return;
+    }
+
+    importedMessages_.clear();
+    for (const auto& m : j["messages"]) {
+        if (m.is_object()) importedMessages_.push_back(m);
+    }
+
+    // Store filename for display.
+    wxString fullPath = dlg.GetPath();
+    importedFileName_ = fullPath.AfterLast('/');
+    if (importedFileName_.empty()) importedFileName_ = fullPath;
+
+    ShowImportDialog();
+}
+
+void ChatFrame::ShowImportDialog() {
+    if (importedMessages_.empty()) return;
+
+    importCanvas_->Clear();
+
+    // Update header with file name.
+    wxString displayName = importedFileName_.empty()
+        ? wxString::FromUTF8("Imported Session")
+        : importedFileName_;
+
+    // Render imported messages into the side canvas.
+    importCanvas_->Clear();
+    MdStream importStream([this](Block b) {
+        importCanvas_->AddBlock(std::move(b));
+    });
+
+    for (const auto& m : importedMessages_) {
+        std::string role = m.value("role", std::string{});
+        if (role == "system") continue;
+
+        if (role == "user") {
+            std::string content = m.value("content", std::string{});
+            Block ub;
+            ub.type = BlockType::UserPrompt;
+            ub.rawText = wxString::FromUTF8(content);
+            InlineRun r;
+            r.text = ub.rawText;
+            ub.runs.push_back(r);
+            ub.visibleText = ub.rawText;
+            importCanvas_->AddBlock(std::move(ub));
+        } else if (role == "assistant") {
+            if (m.contains("content") && m["content"].is_string() && !m["content"].get<std::string>().empty()) {
+                std::string content = m["content"].get<std::string>();
+                importStream.Feed(wxString::FromUTF8(content));
+            }
+            if (m.contains("reasoning_content") && m["reasoning_content"].is_string()) {
+                std::string rc = m["reasoning_content"].get<std::string>();
+                Block tb;
+                tb.type = BlockType::Thinking;
+                tb.rawText = wxString::FromUTF8(rc);
+                tb.visibleText = tb.rawText;
+                tb.toolExpanded = false;
+                importCanvas_->AddBlock(std::move(tb));
+            }
+            importStream.Flush();
+        } else if (role == "tool") {
+            std::string name = m.value("name", std::string{});
+            std::string result = m.value("content", std::string{});
+            // Find matching tool_call from preceding assistant message.
+            std::string displayArgs;
+            if (&m > &importedMessages_.front()) {
+                const auto* prev = &m - 1;
+                while (prev >= &importedMessages_.front()) {
+                    if (prev->value("role", std::string{}) == "assistant" &&
+                        prev->contains("tool_calls") && (*prev)["tool_calls"].is_array()) {
+                        for (const auto& tc : (*prev)["tool_calls"]) {
+                            if (tc.value("id", std::string{}) == m.value("tool_call_id", std::string{})) {
+                                if (tc.contains("function") && tc["function"].contains("arguments"))
+                                    displayArgs = tc["function"]["arguments"].get<std::string>();
+                                break;
+                            }
+                        }
+                        break;
+                    }
+                    --prev;
+                }
+            }
+            Block tb;
+            tb.type = BlockType::ToolCall;
+            tb.toolName = wxString::FromUTF8(name);
+            tb.toolArgs = wxString::FromUTF8(displayArgs);
+            tb.toolResult = wxString::FromUTF8(result);
+            tb.visibleText = tb.toolName + "(" + tb.toolArgs + ")\n\n" + tb.toolResult;
+            tb.toolExpanded = false;
+            importCanvas_->AddBlock(std::move(tb));
+        }
+    }
+
+    // Swap empty view → canvas, update reference label.
+    importEmptyView_->Hide();
+    importCanvas_->Show();
+
+    // Update reference label.
+    refLabel_->SetLabel(wxString::FromUTF8("Referenced Session: ") + displayName);
+    importPanel_->Layout();
+
+    // Split to show the import panel on the left.
+    if (!splitter_->IsSplit()) {
+        splitter_->SplitVertically(importPanel_, mainPanel_, 400);
+    }
 }
 
 void ChatFrame::OnSend(wxCommandEvent&) {

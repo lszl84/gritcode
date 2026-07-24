@@ -197,7 +197,8 @@ ChatCanvas::ChatCanvas(wxWindow* parent)
 
 void ChatCanvas::RebuildPalette() {
     palette_ = MakePalette();
-    SetBackgroundColour(palette_.bg);
+    SetBackgroundColour(
+        bgOverride_.IsOk() ? bgOverride_ : palette_.bg);
 }
 
 void ChatCanvas::EnsureFonts() {
@@ -906,7 +907,8 @@ void ChatCanvas::RenderViewport(wxDC& dc, int viewY, int width, int height,
     // Paints into `dc` in client coords (0..height). `viewY` is the canvas-coord
     // y of the topmost visible pixel. Caller arranges scroll offset translation.
     const Palette& pal = palette_;
-    dc.SetBackground(wxBrush(pal.bg));
+    wxColour bg = bgOverride_.IsOk() ? bgOverride_ : pal.bg;
+    dc.SetBackground(wxBrush(bg));
     dc.Clear();
 
     int contentW = std::min(width - 2 * kSideMargin, kMaxContentW);
