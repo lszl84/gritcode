@@ -704,7 +704,7 @@ ChatFrame::ChatFrame()
     mcp_.Start(std::move(cb));
 
     input_->SetFocus();
-    SetMinSize(wxSize(500, 400));
+    SetMinSize(wxSize(620, 400));
 }
 
 ChatFrame::~ChatFrame() {
@@ -1264,10 +1264,12 @@ void ChatFrame::OnHamburger(wxCommandEvent&) {
     if (splitter_->IsSplit()) {
         splitter_->Unsplit(importPanel_);
         SetClientSize(wxSize(mainWidth_, GetClientSize().y));
+        SetMinSize(wxSize(620, 400));
     } else {
         mainWidth_ = GetClientSize().x;
         splitter_->SplitVertically(importPanel_, mainPanel_, 400);
         SetClientSize(wxSize(mainWidth_ + 420, GetClientSize().y));
+        SetMinSize(wxSize(620 + 420, 400));
     }
 }
 
