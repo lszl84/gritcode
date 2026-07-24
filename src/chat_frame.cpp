@@ -142,21 +142,19 @@ const wxString& GetAssetsDir() {
     return cached;
 }
 
+#ifdef _WIN32
 wxString GetCacertPath() {
     static wxString cached = []() -> wxString {
-#ifdef _WIN32
         wxString exeDir = wxStandardPaths::Get().GetResourcesDir();
         if (wxFileName::FileExists(exeDir + "/cacert.pem"))
             return exeDir + "/cacert.pem";
         if (wxFileName::FileExists(exeDir + "/../cacert.pem"))
             return exeDir + "/../cacert.pem";
         return exeDir + "/cacert.pem";
-#else
-        return wxString();  // Linux/macOS use system cert store
-#endif
     }();
     return cached;
 }
+#endif
 
 // Load an SVG icon from disk and recolor its #FFFFFF fills with `accent`.
 // The original assets were authored white for dark mode; substituting at load
@@ -184,11 +182,11 @@ wxIconBundle LoadAppIcon() {
     wxString path = wxStandardPaths::Get().GetResourcesDir()
                     + "/../../icons/hicolor/scalable/apps/gritcode.svg";
     wxFileName fn(path);
-    fn.Normalize();
+    fn.Normalize(wxPATH_NORM_ALL);
     if (!fn.FileExists()) {
         // Dev fallback: source-tree packaging directory.
         fn.Assign(wxString(GRITCODE_ASSETS_DIR) + "/../packaging/gritcode.svg");
-        fn.Normalize();
+        fn.Normalize(wxPATH_NORM_ALL);
     }
     if (fn.FileExists()) {
         wxBitmapBundle bb = wxBitmapBundle::FromSVGFile(fn.GetFullPath(), wxSize(64, 64));
@@ -1157,7 +1155,7 @@ void ChatFrame::OnPlay(wxCommandEvent&) {
         userBlock.type = BlockType::UserPrompt;
         userBlock.rawText = userMsg;
         userBlock.visibleText = userMsg;
-        userBlock.runs.push_back({userMsg, false, false});
+        userBlock.runs.push_back({userMsg, false, false, {}});
         canvas_->AddBlock(std::move(userBlock));
 
         // Run the command on a background thread. Use a dedicated playWorker_
