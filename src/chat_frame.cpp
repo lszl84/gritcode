@@ -1263,13 +1263,16 @@ void ChatFrame::OnSettings(wxCommandEvent&) {
 void ChatFrame::OnHamburger(wxCommandEvent&) {
     if (splitter_->IsSplit()) {
         splitter_->Unsplit(importPanel_);
-        SetSize(wxSize(mainWidth_, GetSize().y));
+        SetClientSize(wxSize(mainWidth_, GetClientSize().y));
         SetMinSize(wxSize(620, 400));
         Layout();
     } else {
-        mainWidth_ = GetSize().x;
+        mainWidth_ = GetClientSize().x;
         splitter_->SplitVertically(importPanel_, mainPanel_, 400);
-        SetSize(wxSize(mainWidth_ + 420, GetSize().y));
+        // Don't enlarge the window on first open — just split within current size.
+        if (GetClientSize().x < mainWidth_ + 400) {
+            SetClientSize(wxSize(mainWidth_ + 400, GetClientSize().y));
+        }
         SetMinSize(wxSize(620 + 420, 400));
         Layout();
     }
