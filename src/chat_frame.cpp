@@ -1267,6 +1267,10 @@ void ChatFrame::OnHamburger(wxCommandEvent&) {
         SetClientSize(wxSize(mainWidth_, GetClientSize().y));
     } else {
         mainWidth_ = GetClientSize().x;
+        // Reset to empty state so user can load a different session.
+        importEmptyView_->Show();
+        importCanvas_->Hide();
+        refLabel_->SetLabel(wxString::FromUTF8("Referenced Session: None"));
         importPanel_->Show();
         splitter_->SplitVertically(importPanel_, mainPanel_, 400);
         SetMinSize(wxSize(620 + 420, 400));
