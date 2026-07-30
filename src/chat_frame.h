@@ -215,6 +215,7 @@ private:
     wxSplitterWindow* splitter_ = nullptr;            // main splitter
     wxPanel* mainPanel_ = nullptr;                     // right pane (main UI)
     wxStaticText* refLabel_ = nullptr;                 // "Referenced Session: ..." at bottom
+    wxButton* changeBtn_ = nullptr;                      // "Load another…" button
     wxString importedFileName_;                          // display name of imported file
     int mainWidth_ = 600;                                // window width without import pane
 
