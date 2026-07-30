@@ -356,7 +356,8 @@ ChatFrame::ChatFrame()
     auto cf = changeBtn->GetFont();
     cf.SetPointSize(cf.GetPointSize() - 1);
     changeBtn->SetFont(cf);
-    changeBtn->SetForegroundColour(wxColour(140, 140, 140));
+    changeBtn->SetForegroundColour(
+        wxSystemSettings::GetColour(wxSYS_COLOUR_HOTLIGHT));
     changeBtn->Hide();
     changeBtn->Bind(wxEVT_BUTTON, [this](wxCommandEvent&) {
         wxCommandEvent dummy;
@@ -1175,7 +1176,7 @@ void ChatFrame::OnPlay(wxCommandEvent&) {
         userBlock.type = BlockType::UserPrompt;
         userBlock.rawText = userMsg;
         userBlock.visibleText = userMsg;
-        userBlock.runs.push_back({userMsg, false, false, {}});
+        userBlock.runs.push_back({userMsg, false, false, false, {}});
         canvas_->AddBlock(std::move(userBlock));
 
         // Run the command on a background thread. Use a dedicated playWorker_
