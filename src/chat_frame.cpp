@@ -345,7 +345,26 @@ ChatFrame::ChatFrame()
     instructionLabel->SetForegroundColour(wxColour(140, 140, 140));
 
     auto* bottomBox = new wxBoxSizer(wxVERTICAL);
-    bottomBox->Add(refLabel_, 0, wxLEFT | wxRIGHT | wxTOP, 4);
+
+    auto* refRow = new wxBoxSizer(wxHORIZONTAL);
+    refRow->Add(refLabel_, 0, wxALIGN_CENTER_VERTICAL);
+    refRow->AddStretchSpacer(1);
+    auto* changeBtn = new wxButton(importPanel_, wxID_ANY,
+        wxString::FromUTF8("Load another\xE2\x80\xA6"),
+        wxDefaultPosition, wxDefaultSize, wxBORDER_NONE);
+    changeBtn_ = changeBtn;
+    auto cf = changeBtn->GetFont();
+    cf.SetPointSize(cf.GetPointSize() - 1);
+    changeBtn->SetFont(cf);
+    changeBtn->SetForegroundColour(wxColour(100, 100, 220));
+    changeBtn->Hide();  // only visible after a session is loaded
+    changeBtn->Bind(wxEVT_BUTTON, [this](wxCommandEvent&) {
+        wxCommandEvent dummy;
+        OnImport(dummy);
+    });
+    refRow->Add(changeBtn, 0, wxALIGN_CENTER_VERTICAL);
+
+    bottomBox->Add(refRow, 0, wxLEFT | wxRIGHT | wxTOP, 4);
     bottomBox->Add(instructionLabel, 0, wxLEFT | wxRIGHT | wxBOTTOM, 4);
 
     importSizer->Add(importEmptyView_, 1, wxEXPAND);
@@ -1267,10 +1286,6 @@ void ChatFrame::OnHamburger(wxCommandEvent&) {
         SetClientSize(wxSize(mainWidth_, GetClientSize().y));
     } else {
         mainWidth_ = GetClientSize().x;
-        // Reset to empty state so user can load a different session.
-        importEmptyView_->Show();
-        importCanvas_->Hide();
-        refLabel_->SetLabel(wxString::FromUTF8("Referenced Session: None"));
         importPanel_->Show();
         splitter_->SplitVertically(importPanel_, mainPanel_, 400);
         SetMinSize(wxSize(620 + 420, 400));
@@ -1429,6 +1444,7 @@ void ChatFrame::ShowImportDialog() {
 
     // Update reference label.
     refLabel_->SetLabel(wxString::FromUTF8("Referenced Session: ") + displayName);
+    changeBtn_->Show();
     importPanel_->Layout();
 
     // Split to show the import panel on the left.
