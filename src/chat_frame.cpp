@@ -356,8 +356,13 @@ ChatFrame::ChatFrame()
     auto cf = changeBtn->GetFont();
     cf.SetPointSize(cf.GetPointSize() - 1);
     changeBtn->SetFont(cf);
-    changeBtn->SetForegroundColour(
-        wxSystemSettings::GetColour(wxSYS_COLOUR_HOTLIGHT));
+    // Match tool accent colour from ChatCanvas palette.
+    {
+        wxColour bg = wxSystemSettings::GetColour(wxSYS_COLOUR_WINDOW);
+        bool isDark = (bg.Red() * 299 + bg.Green() * 587 + bg.Blue() * 114) < 50000;
+        changeBtn->SetForegroundColour(
+            isDark ? wxColour(140, 200, 255) : wxColour(30, 90, 170));
+    }
     changeBtn->Hide();
     changeBtn->Bind(wxEVT_BUTTON, [this](wxCommandEvent&) {
         wxCommandEvent dummy;
