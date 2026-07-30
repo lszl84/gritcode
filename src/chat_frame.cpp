@@ -356,7 +356,8 @@ ChatFrame::ChatFrame()
     auto cf = changeBtn->GetFont();
     cf.SetPointSize(cf.GetPointSize() - 1);
     changeBtn->SetFont(cf);
-    changeBtn->SetForegroundColour(wxColour(140, 140, 140));
+    changeBtn->SetForegroundColour(
+        wxSystemSettings::GetColour(wxSYS_COLOUR_HOTLIGHT));
     changeBtn->Hide();
     changeBtn->Bind(wxEVT_BUTTON, [this](wxCommandEvent&) {
         wxCommandEvent dummy;
