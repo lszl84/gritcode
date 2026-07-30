@@ -348,21 +348,21 @@ ChatFrame::ChatFrame()
 
     auto* refRow = new wxBoxSizer(wxHORIZONTAL);
     refRow->Add(refLabel_, 0, wxALIGN_CENTER_VERTICAL);
-    refRow->AddStretchSpacer(1);
+
     auto* changeBtn = new wxButton(importPanel_, wxID_ANY,
-        wxString::FromUTF8("Load another\xE2\x80\xA6"),
+        wxString::FromUTF8("load another\xE2\x80\xA6"),
         wxDefaultPosition, wxDefaultSize, wxBORDER_NONE);
     changeBtn_ = changeBtn;
     auto cf = changeBtn->GetFont();
     cf.SetPointSize(cf.GetPointSize() - 1);
     changeBtn->SetFont(cf);
-    changeBtn->SetForegroundColour(wxColour(100, 100, 220));
-    changeBtn->Hide();  // only visible after a session is loaded
+    changeBtn->SetForegroundColour(wxColour(140, 140, 140));
+    changeBtn->Hide();
     changeBtn->Bind(wxEVT_BUTTON, [this](wxCommandEvent&) {
         wxCommandEvent dummy;
         OnImport(dummy);
     });
-    refRow->Add(changeBtn, 0, wxALIGN_CENTER_VERTICAL);
+    refRow->Add(changeBtn, 0, wxALIGN_CENTER_VERTICAL | wxLEFT, 2);
 
     bottomBox->Add(refRow, 0, wxLEFT | wxRIGHT | wxTOP, 4);
     bottomBox->Add(instructionLabel, 0, wxLEFT | wxRIGHT | wxBOTTOM, 4);
@@ -1443,7 +1443,8 @@ void ChatFrame::ShowImportDialog() {
     importCanvas_->Show();
 
     // Update reference label.
-    refLabel_->SetLabel(wxString::FromUTF8("Referenced Session: ") + displayName);
+    refLabel_->SetLabel(wxString::FromUTF8("Referenced Session: ") + displayName
+                        + wxString::FromUTF8(" \xe2\x80\x94 "));
     changeBtn_->Show();
     importPanel_->Layout();
 
