@@ -1176,7 +1176,7 @@ void ChatFrame::OnPlay(wxCommandEvent&) {
         userBlock.type = BlockType::UserPrompt;
         userBlock.rawText = userMsg;
         userBlock.visibleText = userMsg;
-        userBlock.runs.push_back({userMsg, false, false, {}});
+        userBlock.runs.push_back({userMsg, false, false, false, {}});
         canvas_->AddBlock(std::move(userBlock));
 
         // Run the command on a background thread. Use a dedicated playWorker_
