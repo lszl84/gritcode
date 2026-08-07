@@ -24,8 +24,12 @@ SettingsDialog::SettingsDialog(wxWindow* parent)
 
     auto* keyRow = new wxBoxSizer(wxHORIZONTAL);
     // Pre-fill with the existing key so the user can see they have one set
-    // (masked) and can edit it. Show toggle reveals plaintext.
+    // (masked) and can edit it.  Show toggle reveals plaintext.
     wxString existing = Preferences::GetApiKey(Preferences::Provider::DeepSeek);
+    if (existing.IsEmpty()) {
+        existing = Preferences::GetApiKeyPlaintext(
+            Preferences::Provider::DeepSeek);
+    }
     keyCtrl_ = new wxTextCtrl(this, wxID_ANY, existing,
                               wxDefaultPosition, FromDIP(wxSize(380, -1)),
                               wxTE_PASSWORD);
@@ -39,12 +43,26 @@ SettingsDialog::SettingsDialog(wxWindow* parent)
         "https://platform.deepseek.com/");
     outer->Add(link, 0, wxLEFT | wxRIGHT | wxTOP, 12);
 
-    auto* hint = new wxStaticText(this, wxID_ANY,
-        "Stored securely in your system keyring.");
-    wxFont smaller = hint->GetFont();
+    // Snapshot the keyring health so the hint is consistent for the
+    // lifetime of this dialog instance (even if the daemon state changes
+    // mid-session, which it normally shouldn't).
+    keyringWasBroken_ = Preferences::IsKeyringBroken();
+
+    hint_ = new wxStaticText(this, wxID_ANY, "");
+    wxFont smaller = hint_->GetFont();
     smaller.SetPointSize(smaller.GetPointSize() - 1);
-    hint->SetFont(smaller);
-    outer->Add(hint, 0, wxLEFT | wxRIGHT | wxTOP, 12);
+    hint_->SetFont(smaller);
+
+    if (keyringWasBroken_) {
+        hint_->SetLabel(
+            "System keyring not fully initialized — "
+            "known Debian/XFCE issue on first login.\n"
+            "Keys will be stored in the application settings file\n"
+            "(~/.gritcode/gritcode.conf) in plaintext.");
+    } else {
+        hint_->SetLabel("Stored securely in your system keyring.");
+    }
+    outer->Add(hint_, 0, wxLEFT | wxRIGHT | wxTOP, 12);
 
     outer->AddStretchSpacer(1);
 
@@ -79,13 +97,58 @@ void SettingsDialog::OnToggleShow(wxCommandEvent&) {
 void SettingsDialog::OnSave(wxCommandEvent& evt) {
     wxString key = keyCtrl_->GetValue();
     key.Trim().Trim(false);
-    if (!Preferences::SetApiKey(Preferences::Provider::DeepSeek, key)) {
-        wxMessageBox(
-            "Could not save the API key to the system keyring.\n\n"
-            "If you're running headless or without a keyring daemon, the "
-            "secret store may be unavailable.",
-            "gritcode", wxOK | wxICON_ERROR, this);
-        return;  // keep dialog open
+
+    auto provider = Preferences::Provider::DeepSeek;
+
+    if (keyringWasBroken_ && !key.IsEmpty()) {
+        // The keyring daemon is in the known broken-first-launch state.
+        // Warn the user and offer to store in plaintext instead.
+        int answer = wxMessageBox(
+            "The system keyring (gnome-keyring) is not fully initialized.\n\n"
+            "This is a known issue on Debian/XFCE systems after a fresh "
+            "install —\n"
+            "the first login doesn't unlock the keyring, and the unlock "
+            "prompt never appears.\n\n"
+            "A system reboot fixes it, but until then the API key cannot "
+            "be stored\n"
+            "in the keyring.\n\n"
+            "Store the key in gritcode's settings file as plaintext instead?\n"
+            "(~/.gritcode/gritcode.conf)\n\n"
+            "Alternatively, cancel and reboot your system to clear the issue "
+            "at\n"
+            "the source — after a reboot the keyring will work normally.",
+            "Keyring not available",
+            wxYES_NO | wxICON_WARNING, this);
+        if (answer != wxYES) return;  // keep dialog open
+
+        // User accepted the plaintext fallback.
+        if (!Preferences::SetApiKeyPlaintext(provider, key)) {
+            wxMessageBox(
+                "Could not write the API key to the settings file.",
+                "gritcode", wxOK | wxICON_ERROR, this);
+            return;
+        }
+        // Update the hint to reflect where the key is now stored.
+        hint_->SetLabel("Stored in application settings (plaintext).");
+    } else {
+        // Normal path: store in the OS keyring.
+        if (!Preferences::SetApiKey(provider, key)) {
+            if (key.IsEmpty()) {
+                // Deleting the key — also clear any plaintext copy so
+                // HasApiKey is consistent.
+                Preferences::SetApiKeyPlaintext(provider, wxString());
+            }
+            wxMessageBox(
+                "Could not save the API key to the system keyring.\n\n"
+                "If you're running headless or without a keyring daemon, the "
+                "secret store may be unavailable.",
+                "gritcode", wxOK | wxICON_ERROR, this);
+            return;  // keep dialog open
+        }
+        // Also clear any stale plaintext copy so the keyring is the
+        // single source of truth.
+        Preferences::SetApiKeyPlaintext(provider, wxString());
     }
+
     evt.Skip();  // let default handler close with wxID_OK
 }

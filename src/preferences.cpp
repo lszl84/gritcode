@@ -5,6 +5,7 @@
 #include <wx/secretstore.h>
 #else
 #include <libsecret/secret.h>
+#include <gio/gio.h>
 #endif
 
 namespace {
@@ -15,8 +16,11 @@ namespace {
 const wxString kServicePrefix = "gritcode/";
 const wxString kUsername      = "api_key";
 
-const char* kModelIndexKey = "/UI/LastModelIndex";
+const char* kModelIndexKey    = "/UI/LastModelIndex";
 const char* kModelExplicitKey = "/UI/ModelExplicit";
+
+// wxFileConfig key for the plaintext API-key fallback.
+const char* kApiKeyPlaintext  = "/ApiKey/DeepSeek";
 
 wxString ServiceFor(Preferences::Provider p) {
     switch (p) {
@@ -75,6 +79,8 @@ void Preferences::SetLastModelIndex(int idx) {
     cfg->Flush();
 }
 
+// ---- OS keyring (wxSecretStore / libsecret) ----
+
 wxString Preferences::GetApiKey(Provider p) {
 #if wxUSE_SECRETSTORE
     wxSecretStore store = wxSecretStore::GetDefault();
@@ -132,5 +138,117 @@ bool Preferences::SetApiKey(Provider p, const wxString& key) {
 }
 
 bool Preferences::HasApiKey(Provider p) {
-    return !GetApiKey(p).IsEmpty();
+    if (!GetApiKey(p).IsEmpty()) return true;
+    if (!GetApiKeyPlaintext(p).IsEmpty()) return true;
+    return false;
+}
+
+// ---- Keyring-health probe ----
+
+bool Preferences::IsKeyringBroken() {
+#if wxUSE_SECRETSTORE
+    // wxSecretStore doesn't expose this level of introspection; assume
+    // the platform secret store is functional.
+    return false;
+#else
+    // Known gnome-keyring first-launch bug (Chromium 7a77463):
+    //   Debian/XFCE/lightdm — after a fresh install the daemon reports
+    //   a path for the default collection via ReadAlias("default"), but
+    //   the object at that path doesn't actually exist.  Operations on
+    //   the default collection (e.g. secret_password_store_sync) hang
+    //   forever waiting for a password-create prompt that never renders.
+    //
+    //   Detection: call ReadAlias, then try to read the Locked property
+    //   on the returned path.  If the object doesn't exist → broken.
+
+    GError* err = nullptr;
+    GDBusConnection* conn = g_bus_get_sync(G_BUS_TYPE_SESSION, nullptr, &err);
+    if (!conn) {
+        if (err) g_error_free(err);
+        return false;  // no session bus — not our broken-keyring case
+    }
+
+    // 1. Read the default-collection alias.
+    GVariant* aliasResult = g_dbus_connection_call_sync(
+        conn,
+        "org.freedesktop.secrets",
+        "/org/freedesktop/secrets",
+        "org.freedesktop.Secret.Service",
+        "ReadAlias",
+        g_variant_new("(s)", "default"),
+        G_VARIANT_TYPE("(o)"),
+        G_DBUS_CALL_FLAGS_NONE,
+        2000,   // 2 s timeout — more than enough for a local D-Bus call
+        nullptr,
+        &err);
+
+    if (err) {
+        // Service not reachable — the keyring daemon may not be running
+        // at all.  That's a different failure mode (SetApiKey will return
+        // false quickly via libsecret).  Don't flag as "broken".
+        g_error_free(err);
+        g_object_unref(conn);
+        return false;
+    }
+
+    gchar* collectionPath = nullptr;
+    g_variant_get(aliasResult, "(o)", &collectionPath);
+    g_variant_unref(aliasResult);
+
+    if (!collectionPath || !*collectionPath) {
+        g_free(collectionPath);
+        g_object_unref(conn);
+        return false;  // no default collection at all — not our case
+    }
+
+    // 2. Probe the collection object: try to read the Locked property.
+    GVariant* lockedResult = g_dbus_connection_call_sync(
+        conn,
+        "org.freedesktop.secrets",
+        collectionPath,
+        "org.freedesktop.DBus.Properties",
+        "Get",
+        g_variant_new("(ss)",
+                      "org.freedesktop.Secret.Collection", "Locked"),
+        nullptr,
+        G_DBUS_CALL_FLAGS_NONE,
+        2000,
+        nullptr,
+        &err);
+
+    g_object_unref(conn);
+    g_free(collectionPath);
+
+    if (err) {
+        // If the object doesn't exist at the aliased path, we're in the
+        // Chromium-documented deadlock scenario.
+        bool broken = (strstr(err->message, "does not exist") != nullptr);
+        g_error_free(err);
+        return broken;
+    }
+
+    g_variant_unref(lockedResult);
+    return false;  // collection object exists → keyring is healthy
+#endif
+}
+
+// ---- Plaintext fallback (wxFileConfig) ----
+
+bool Preferences::SetApiKeyPlaintext(Provider p, const wxString& key) {
+    auto* cfg = wxConfigBase::Get();
+    if (!cfg) return false;
+
+    if (key.IsEmpty()) {
+        cfg->DeleteEntry(kApiKeyPlaintext);
+    } else {
+        cfg->Write(kApiKeyPlaintext, key);
+    }
+    cfg->Flush();
+    return true;
+}
+
+wxString Preferences::GetApiKeyPlaintext(Provider p) {
+    auto* cfg = wxConfigBase::Get();
+    if (!cfg) return wxString();
+    return cfg->Read(kApiKeyPlaintext, wxString());
 }
