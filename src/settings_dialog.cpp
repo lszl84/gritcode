@@ -56,7 +56,7 @@ SettingsDialog::SettingsDialog(wxWindow* parent)
     if (keyringWasBroken_) {
         hint_->SetLabel(
             "System keyring not fully initialized - "
-            "known Debian/XFCE issue on first login.\n"
+            "known issue on some Debian-based systems on first login.\n"
             "Keys will be stored in the application settings file\n"
             "(~/.gritcode/gritcode.conf) in plaintext.");
     } else {
@@ -105,7 +105,7 @@ void SettingsDialog::OnSave(wxCommandEvent& evt) {
         // Warn the user and offer to store in plaintext instead.
         int answer = wxMessageBox(
             "The system keyring (gnome-keyring) is not fully initialized.\n\n"
-            "This is a known issue on Debian/XFCE systems after a fresh "
+            "This is a known issue on some Debian-based systems after a fresh "
             "install -\n"
             "the first login doesn't unlock the keyring, and the unlock "
             "prompt never appears.\n\n"
