@@ -1047,7 +1047,7 @@ void ChatFrame::PersistActive() {
 void ChatFrame::SeedSystemPrompt() {
     std::string platformInfo;
 #ifdef _WIN32
-    platformInfo = "You are running on Windows. The shell tool uses cmd /c — "
+    platformInfo = "You are running on Windows. The shell tool uses cmd /c - "
                    "use Windows commands (dir, type, findstr, del, etc.). "
                    "Path separators are backslashes.";
 #elif defined(__APPLE__)
@@ -1068,7 +1068,7 @@ void ChatFrame::SeedSystemPrompt() {
          "formatting and fenced code blocks for code.\n\n"
          + platformInfo + "\n\n"
          "Play button: the ▶ button runs a single stored shell command "
-         "directly from the project root — it does NOT invoke the AI. "
+         "directly from the project root - it does NOT invoke the AI. "
          "When clicked with no stored command, you'll be asked to "
          "configure it. Test your command via bash first, then store "
          "it with run_project set.\n\n"
@@ -1079,7 +1079,7 @@ void ChatFrame::SeedSystemPrompt() {
          "projects and returns short snippets with session_id + "
          "turn_index. Follow up with grit_history_fetch(session_id, "
          "turn_index) to read full turns. Start with ONE broad keyword "
-         "query — if it returns no relevant hits, stop and answer from "
+         "query - if it returns no relevant hits, stop and answer from "
          "what you have rather than firing speculative variants."}
     });
 }
@@ -1234,7 +1234,7 @@ void ChatFrame::OnPlay(wxCommandEvent&) {
             "point.\n"
             "2. Construct a SINGLE self-contained command that builds (if "
             "compiled) AND runs the project from the root directory.\n"
-            "3. Test it with bash — debug until it succeeds.\n"
+            "3. Test it with bash - debug until it succeeds.\n"
             "4. Use run_project set to store the working command.\n\n"
             "The Play button runs exactly the stored command every time.");
         std::string hidden =
@@ -1255,7 +1255,7 @@ void ChatFrame::OnPlay(wxCommandEvent&) {
             "correct because hugo serve blocks. Instead use "
             "'hugo serve --noBrowser & sleep 1 && xdg-open http://localhost:1313 && wait' "
             "or a similar pattern."
-            "\n\nFor compiled projects, just build and run — no browser needed."
+            "\n\nFor compiled projects, just build and run - no browser needed."
             "[/hidden]";
 
         // Show only the visible prompt on the canvas.
@@ -2263,7 +2263,7 @@ void ChatFrame::RunSummaryThenSend(int splitIdx) {
     summaryText_.clear();
 
     RenderErrorBlock(FormatU8(
-        "📦 Compacting context — summarizing {} older messages before "
+        "📦 Compacting context - summarizing {} older messages before "
         "continuing. This usually takes a few seconds…",
         compactionHeadCount_));
 
@@ -2447,7 +2447,7 @@ void ChatFrame::ApplyCompaction(bool success, const std::string& summary,
     std::string summaryBody;
     if (success) {
         summaryBody =
-            "[Prior conversation summary — the earlier turns have been "
+            "[Prior conversation summary - the earlier turns have been "
             "compacted into this summary to fit the model's context "
             "window. Treat it as authoritative background for continuing "
             "the current task.]\n\n" + summary;
@@ -2463,7 +2463,7 @@ void ChatFrame::ApplyCompaction(bool success, const std::string& summary,
             "context window. Summary unavailable" +
             (error.empty() ? std::string{} : (": " + error)) + ".]";
         RenderErrorBlock(FormatU8(
-            "⚠️ Compaction summary failed{} — dropping {} older messages "
+            "⚠️ Compaction summary failed{} - dropping {} older messages "
             "without a summary so the next request can fit.",
             error.empty() ? std::string{} : (" (" + error + ")"),
             origHeadCount));

@@ -109,7 +109,7 @@ std::string ToolEditFile(const nlohmann::json& args) {
         return "Error: 'old_str' not found in " + path;
     if (content.find(oldStr, pos + oldStr.size()) != std::string::npos)
         return "Error: 'old_str' is not unique in " + path
-             + " (matches multiple times — make it more specific)";
+             + " (matches multiple times - make it more specific)";
 
     content.replace(pos, oldStr.size(), newStr);
 
@@ -455,8 +455,8 @@ std::string DecodeEntities(std::string s) {
     repl(s, "&#39;", "'");
     repl(s, "&apos;", "'");
     repl(s, "&nbsp;", " ");
-    repl(s, "&mdash;", "—");
-    repl(s, "&ndash;", "–");
+    repl(s, "&mdash;", "-");
+    repl(s, "&ndash;", "-");
     repl(s, "&hellip;", "…");
     return s;
 }
@@ -825,13 +825,13 @@ nlohmann::json GetToolDefinitions() {
         "grit_history_search",
         "Search the transcripts of past gritcode conversations across "
         "every project the user has worked on (excludes the current session). "
-        "This is the AUTHORITATIVE source of prior-conversation recall — use "
+        "This is the AUTHORITATIVE source of prior-conversation recall - use "
         "it first whenever the user references any past work (\"last time\", "
         "\"once again\", \"we had\", \"how did we\", \"in <project>\"). "
         "Query budget: typically 1-3 searches per user question. Start with "
         "ONE broad keyword query; only run more if the first returned strong "
         "hits. Returns short snippets (~20-token window) with session_id, "
-        "turn_index, and full_chars — follow up with grit_history_fetch.",
+        "turn_index, and full_chars - follow up with grit_history_fetch.",
         {{"type", "object"},
          {"properties", {
              {"query", StrParam("2-5 keywords. FTS5 MATCH expression (phrases in quotes, AND/OR/NOT, prefix*).")},
@@ -861,7 +861,7 @@ nlohmann::json GetToolDefinitions() {
     tools.push_back(ToolDef(
         "run_project",
         "Get, set, forget, or detect the command used to build and run the current project. "
-        "The stored command is executed directly by the Play button — it does NOT go "
+        "The stored command is executed directly by the Play button - it does NOT go "
         "through the AI loop, so it must be a single, self-contained shell command "
         "that works from the project root with no prior setup. "
         "Actions: "
@@ -873,18 +873,18 @@ nlohmann::json GetToolDefinitions() {
         "IMPORTANT: The Play button automatically prefixes the command with "
         "`cd <cwd> &&` so relative paths always resolve against the project "
         "directory. You do NOT need to include `cd` in the command itself. "
-        "When calling `set`, always pass `cwd` explicitly — set it to the "
+        "When calling `set`, always pass `cwd` explicitly - set it to the "
         "absolute path of the project root. "
         "For compiled projects, include both the build step and the run step "
         "in a single shell command (e.g. `cmake --build build && ./build/gritcode`). "
-        "Always test the command via bash BEFORE storing it — run it, check the "
+        "Always test the command via bash BEFORE storing it - run it, check the "
         "output, and only call set once it succeeds. "
         "For interpreted languages the build step can be omitted.",
         {{"type", "object"},
          {"properties", {
              {"action", {{"type", "string"},
                          {"description", "One of: get, set, forget, detect."}}},
-             {"command", StrParam("Shell command that builds (if needed) and runs the project. Required for set action. Should be a single command — use && to chain build + run steps.")},
+             {"command", StrParam("Shell command that builds (if needed) and runs the project. Required for set action. Should be a single command - use && to chain build + run steps.")},
              {"cwd", StrParam("Project directory (absolute path). Defaults to current session directory, but you SHOULD always set this explicitly to the project's root directory so the config is stored under the correct key.")},
          }},
          {"required", {"action"}}}));

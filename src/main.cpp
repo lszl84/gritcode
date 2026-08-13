@@ -59,7 +59,7 @@ static int RunReindex() {
             skipped++;
             continue;
         }
-        std::printf("  indexed %s (%zu turns) — %s\n",
+        std::printf("  indexed %s (%zu turns) - %s\n",
                     sessionId.c_str(), messages.size(), cwd.c_str());
         indexed++;
     }

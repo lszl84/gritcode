@@ -579,7 +579,7 @@ void ChatCanvas::LayoutBlock(wxDC& dc, Block& b, int contentWidth, int /*topSpac
             toolHeaderVisCharsInArgs = (int)b.toolArgsFit.size();
         } else {
             // Need to truncate. Measure only the capped candidate.
-            const wxString ell = "…)";
+            const wxString ell = "...)";
             wxCoord ellW = 0, ellH = 0;
             dc.GetTextExtent(ell, &ellW, &ellH);
             int budget = argsAvail - ellW;

@@ -55,7 +55,7 @@ SettingsDialog::SettingsDialog(wxWindow* parent)
 
     if (keyringWasBroken_) {
         hint_->SetLabel(
-            "System keyring not fully initialized — "
+            "System keyring not fully initialized - "
             "known Debian/XFCE issue on first login.\n"
             "Keys will be stored in the application settings file\n"
             "(~/.gritcode/gritcode.conf) in plaintext.");
@@ -106,7 +106,7 @@ void SettingsDialog::OnSave(wxCommandEvent& evt) {
         int answer = wxMessageBox(
             "The system keyring (gnome-keyring) is not fully initialized.\n\n"
             "This is a known issue on Debian/XFCE systems after a fresh "
-            "install —\n"
+            "install -\n"
             "the first login doesn't unlock the keyring, and the unlock "
             "prompt never appears.\n\n"
             "A system reboot fixes it, but until then the API key cannot "
@@ -116,7 +116,7 @@ void SettingsDialog::OnSave(wxCommandEvent& evt) {
             "(~/.gritcode/gritcode.conf)\n\n"
             "Alternatively, cancel and reboot your system to clear the issue "
             "at\n"
-            "the source — after a reboot the keyring will work normally.",
+            "the source - after a reboot the keyring will work normally.",
             "Keyring not available",
             wxYES_NO | wxICON_WARNING, this);
         if (answer != wxYES) return;  // keep dialog open
@@ -134,7 +134,7 @@ void SettingsDialog::OnSave(wxCommandEvent& evt) {
         // Normal path: store in the OS keyring.
         if (!Preferences::SetApiKey(provider, key)) {
             if (key.IsEmpty()) {
-                // Deleting the key — also clear any plaintext copy so
+                // Deleting the key - also clear any plaintext copy so
                 // HasApiKey is consistent.
                 Preferences::SetApiKeyPlaintext(provider, wxString());
             }
