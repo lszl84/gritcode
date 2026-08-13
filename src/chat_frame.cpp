@@ -81,7 +81,7 @@ ModelRoute RouteFor(ModelChoice m) {
         // No API key needed; endpoint is open.
         return {"https://opencode.ai/zen/v1/chat/completions",
                 "deepseek-v4-flash-free", false, Preferences::Provider::DeepSeek,
-                384000, 200000};
+                128000, 200000};
     case ModelChoice::DeepseekFlash:
         return {"https://api.deepseek.com/chat/completions",
                 "deepseek-v4-flash", true, Preferences::Provider::DeepSeek,
@@ -93,7 +93,7 @@ ModelRoute RouteFor(ModelChoice m) {
     }
     return {"https://opencode.ai/zen/v1/chat/completions",
             "deepseek-v4-flash-free", false, Preferences::Provider::DeepSeek,
-            384000, 200000};
+            128000, 200000};
 }
 
 // chdir() into the session's directory so tool subprocesses (bash,
