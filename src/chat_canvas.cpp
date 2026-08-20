@@ -260,6 +260,23 @@ int ChatCanvas::FontHeight(wxDC& dc, int fi, const wxFont& f) const {
     return fontHeightCache_[fi];
 }
 
+const std::vector<int>& ChatCanvas::LineGlyphs(wxDC& dc, const Block& b,
+                                               const WrappedLine& wl) const {
+    if (wl.glyphX.empty()) {
+        wl.glyphX.push_back(0);
+        int xoff = 0;
+        for (const auto& r : wl.runs) {
+            const wxFont& f = FontFor(r, b.type, b.headingLevel);
+            dc.SetFont(f);
+            wxArrayInt parts;
+            dc.GetPartialTextExtents(r.text, parts);
+            for (auto p : parts) wl.glyphX.push_back(xoff + p);
+            xoff += parts.empty() ? 0 : parts.back();
+        }
+    }
+    return wl.glyphX;
+}
+
 void ChatCanvas::ToggleToolCall(int blockIdx) {
     if (blockIdx < 0 || blockIdx >= (int)blocks_.size()) return;
     Block& b = blocks_[blockIdx];
@@ -782,17 +799,7 @@ void ChatCanvas::WrapRuns(wxDC& dc, const std::vector<InlineRun>& runs,
 
     auto finalizeLine = [&]() {
         if (cur.runs.empty() && cur.text.IsEmpty()) return;
-        cur.glyphX.clear();
-        cur.glyphX.push_back(0);
-        int xoff = 0;
-        for (const auto& r : cur.runs) {
-            const wxFont& f = FontFor(r, bt, hLvl);
-            MeasSetFont(dc, f);
-            wxArrayInt parts;
-            MeasPartial(dc, r.text, parts);
-            for (auto p : parts) cur.glyphX.push_back(xoff + p);
-            xoff += parts.empty() ? 0 : parts.back();
-        }
+        cur.lineWidth = curX;  // glyphX is computed lazily on first hit-test
         cur.textEnd = cur.textStart + (int)cur.text.size();
         cur.height = lineHeight > 0 ? lineHeight : styleFontHeight();
         outLines.push_back(std::move(cur));
@@ -809,8 +816,7 @@ void ChatCanvas::WrapRuns(wxDC& dc, const std::vector<InlineRun>& runs,
             if (cur.text.IsEmpty() && cur.runs.empty()) {
                 cur.height = styleFontHeight();
                 cur.textEnd = cur.textStart;
-                cur.glyphX.clear();
-                cur.glyphX.push_back(0);
+                cur.lineWidth = 0;
                 outLines.push_back(std::move(cur));
                 cur = WrappedLine();
             } else {
@@ -892,12 +898,9 @@ void ChatCanvas::WrapMonospace(wxDC& dc, const wxString& text, int maxW,
         r.code = true;
         wl.runs.push_back(r);
         wl.runX.push_back(0);
-        wl.glyphX.push_back(0);
-        if (!seg.IsEmpty()) {
-            wxArrayInt parts;
-            MeasPartial(dc, seg, parts);
-            for (auto p : parts) wl.glyphX.push_back(p);
-        }
+        wxCoord w = 0, h = 0;
+        MeasExtent(dc, seg, &w, &h);
+        wl.lineWidth = w;  // glyphX is computed lazily on first hit-test
         outLines.push_back(std::move(wl));
     };
 
@@ -1172,6 +1175,16 @@ void ChatCanvas::PaintBlock(wxDC& dc, const Block& b, int yTop, BlockPos selStar
     int blockX = xLeft;
     int blockW = contentW;
 
+    // Line-relative selection -> pixel x bounds. Full-line selections use
+    // lineWidth (no glyphX); partial lines compute glyphX lazily.
+    auto selX = [&](const WrappedLine& wl, int ss, int se) {
+        if (ss == 0 && se == (int)wl.text.size()) {
+            return std::make_pair(0, wl.lineWidth);
+        }
+        const auto& g = LineGlyphs(dc, b, wl);
+        return std::make_pair(g[ss], g[se]);
+    };
+
     if (b.type == BlockType::Table) {
         const int N = (int)b.tableAligns.size();
         const int R = (int)b.tableRows.size();
@@ -1215,7 +1228,7 @@ void ChatCanvas::PaintBlock(wxDC& dc, const Block& b, int yTop, BlockPos selStar
                 int yLine = rowTextY0 + std::max(0, (rowH - innerH) / 2);
 
                 for (const auto& wl : cell.lines) {
-                    int lineW = wl.glyphX.empty() ? 0 : wl.glyphX.back();
+                    int lineW = wl.lineWidth;
                     int xBase = colTextX0;
                     TableAlign al = b.tableAligns[c];
                     if (al == TableAlign::Center)      xBase = colTextX0 + (colTextW - lineW) / 2;
@@ -1227,8 +1240,9 @@ void ChatCanvas::PaintBlock(wxDC& dc, const Block& b, int yTop, BlockPos selStar
                         int lineSelEnd = std::min(cellSelEnd - wl.textStart, (int)wl.text.size());
                         if (lineSelEnd > lineSelStart && lineSelStart < (int)wl.text.size()
                             && wl.textStart < cellSelEnd && wl.textEnd > cellSelStart) {
-                            int x1 = xBase + wl.glyphX[lineSelStart];
-                            int x2 = xBase + wl.glyphX[lineSelEnd];
+                            auto _sx = selX(wl, lineSelStart, lineSelEnd);
+                            int x1 = xBase + _sx.first;
+                            int x2 = xBase + _sx.second;
                             dc.SetBrush(wxBrush(pal.selectionBg));
                             dc.SetPen(*wxTRANSPARENT_PEN);
                             dc.DrawRectangle(x1, yLine, x2 - x1, wl.height);
@@ -1309,8 +1323,9 @@ void ChatCanvas::PaintBlock(wxDC& dc, const Block& b, int yTop, BlockPos selStar
                     int lineSelStart = std::max(bSelStart - wl.textStart, 0);
                     int lineSelEnd = std::min(bSelEnd - wl.textStart, (int)wl.text.size());
                     if (lineSelEnd > lineSelStart && lineSelStart < (int)wl.text.size() && lineSelEnd > 0) {
-                        int x1 = textXLeft + wl.glyphX[lineSelStart];
-                        int x2 = textXLeft + wl.glyphX[lineSelEnd];
+                        auto _sx = selX(wl, lineSelStart, lineSelEnd);
+                        int x1 = textXLeft + _sx.first;
+                        int x2 = textXLeft + _sx.second;
                         dc.SetBrush(wxBrush(pal.selectionBg));
                         dc.SetPen(*wxTRANSPARENT_PEN);
                         dc.DrawRectangle(x1, yLine, x2 - x1, wl.height);
@@ -1339,8 +1354,9 @@ void ChatCanvas::PaintBlock(wxDC& dc, const Block& b, int yTop, BlockPos selStar
                     int lineSelStart = std::max(bSelStart - wl.textStart, 0);
                     int lineSelEnd = std::min(bSelEnd - wl.textStart, (int)wl.text.size());
                     if (lineSelEnd > lineSelStart && lineSelStart < (int)wl.text.size() && lineSelEnd > 0) {
-                        int x1 = textXLeft + wl.glyphX[lineSelStart];
-                        int x2 = textXLeft + wl.glyphX[lineSelEnd];
+                        auto _sx = selX(wl, lineSelStart, lineSelEnd);
+                        int x1 = textXLeft + _sx.first;
+                        int x2 = textXLeft + _sx.second;
                         dc.SetBrush(wxBrush(pal.selectionBg));
                         dc.SetPen(*wxTRANSPARENT_PEN);
                         dc.DrawRectangle(x1, yLine, x2 - x1, wl.height);
@@ -1489,8 +1505,9 @@ void ChatCanvas::PaintBlock(wxDC& dc, const Block& b, int yTop, BlockPos selStar
                     int lineSelStart = std::max(bSelStart - wl.textStart, 0);
                     int lineSelEnd = std::min(bSelEnd - wl.textStart, (int)wl.text.size());
                     if (lineSelEnd > lineSelStart && lineSelStart < (int)wl.text.size() && lineSelEnd > 0) {
-                        int x1 = textXLeft + wl.glyphX[lineSelStart];
-                        int x2 = textXLeft + wl.glyphX[lineSelEnd];
+                        auto _sx = selX(wl, lineSelStart, lineSelEnd);
+                        int x1 = textXLeft + _sx.first;
+                        int x2 = textXLeft + _sx.second;
                         dc.SetBrush(wxBrush(pal.selectionBg));
                         dc.SetPen(*wxTRANSPARENT_PEN);
                         dc.DrawRectangle(x1, yLine, x2 - x1, wl.height);
@@ -1527,8 +1544,9 @@ void ChatCanvas::PaintBlock(wxDC& dc, const Block& b, int yTop, BlockPos selStar
                 int lineSelStart = std::max(bSelStart - wl.textStart, 0);
                 int lineSelEnd = std::min(bSelEnd - wl.textStart, (int)wl.text.size());
                 if (lineSelEnd > lineSelStart && lineSelStart < (int)wl.text.size() && lineSelEnd > 0) {
-                    int x1 = blockX + kCodePadding + wl.glyphX[lineSelStart];
-                    int x2 = blockX + kCodePadding + wl.glyphX[lineSelEnd];
+                    auto _sx = selX(wl, lineSelStart, lineSelEnd);
+                    int x1 = blockX + kCodePadding + _sx.first;
+                    int x2 = blockX + kCodePadding + _sx.second;
                     dc.SetBrush(wxBrush(pal.selectionBg));
                     dc.SetPen(*wxTRANSPARENT_PEN);
                     dc.DrawRectangle(x1, yLine, x2 - x1, wl.height);
@@ -1547,7 +1565,7 @@ void ChatCanvas::PaintBlock(wxDC& dc, const Block& b, int yTop, BlockPos selStar
         // Right-aligned bubble — width fits the longest line content.
         int bubbleW = 0;
         for (const auto& wl : b.lines) {
-            if (!wl.glyphX.empty()) bubbleW = std::max<int>(bubbleW, wl.glyphX.back());
+            bubbleW = std::max<int>(bubbleW, wl.lineWidth);
         }
         bubbleW += kUserBubblePad * 2;
         if (bubbleW > blockW) bubbleW = blockW;
@@ -1566,8 +1584,9 @@ void ChatCanvas::PaintBlock(wxDC& dc, const Block& b, int yTop, BlockPos selStar
             int lineSelEnd = std::min(bSelEnd - wl.textStart, (int)wl.text.size());
             if (lineSelEnd > lineSelStart && lineSelStart < (int)wl.text.size() && lineSelEnd > 0
                 && wl.textStart < bSelEnd && wl.textEnd > bSelStart) {
-                int x1 = textXLeft + wl.glyphX[lineSelStart];
-                int x2 = textXLeft + wl.glyphX[lineSelEnd];
+                auto _sx = selX(wl, lineSelStart, lineSelEnd);
+                int x1 = textXLeft + _sx.first;
+                int x2 = textXLeft + _sx.second;
                 dc.SetBrush(wxBrush(pal.selectionBg));
                 dc.SetPen(*wxTRANSPARENT_PEN);
                 dc.DrawRectangle(x1, yLine, x2 - x1, wl.height);
@@ -1656,6 +1675,7 @@ BlockPos ChatCanvas::HitTest(const wxPoint& canvasPt) const {
     int xLeft = (sz.x - contentW) / 2;
     if (xLeft < kSideMargin) xLeft = kSideMargin;
 
+    wxClientDC dc(const_cast<ChatCanvas*>(this));  // for lazy LineGlyphs
     int y = kTopMargin;
     int lastVisitedBlock = -1;
     for (size_t i = 0; i < blocks_.size(); ++i) {
@@ -1714,7 +1734,7 @@ BlockPos ChatCanvas::HitTest(const wxPoint& canvasPt) const {
                 for (const auto& wl : cell.lines) {
                     if (cellY >= yLine && cellY < yLine + wl.height) {
                         // Found the line. Compute xBase (text start after alignment).
-                        int lineW = wl.glyphX.empty() ? 0 : wl.glyphX.back();
+                        int lineW = wl.lineWidth;
                         int xBase = colTextX0;
                         TableAlign al = b.tableAligns[col];
                         if (al == TableAlign::Center)      xBase = colTextX0 + (colTextW - lineW) / 2;
@@ -1723,8 +1743,9 @@ BlockPos ChatCanvas::HitTest(const wxPoint& canvasPt) const {
                         int charIdx = (int)wl.text.size();
                         if (xRel < 0) charIdx = 0;
                         else {
-                            for (size_t k = 0; k + 1 < wl.glyphX.size(); ++k) {
-                                int mid = (wl.glyphX[k] + wl.glyphX[k + 1]) / 2;
+                            const auto& _g = LineGlyphs(dc, b, wl);
+                            for (size_t k = 0; k + 1 < _g.size(); ++k) {
+                                int mid = (_g[k] + _g[k + 1]) / 2;
                                 if (xRel < mid) { charIdx = (int)k; break; }
                             }
                         }
@@ -1754,8 +1775,9 @@ BlockPos ChatCanvas::HitTest(const wxPoint& canvasPt) const {
                         int xRel = canvasPt.x - textXLeft;
                         if (xRel < 0) return {(int)i, wl.textStart};
                         int charIdx = (int)wl.text.size();
-                        for (size_t k = 0; k + 1 < wl.glyphX.size(); ++k) {
-                            int mid = (wl.glyphX[k] + wl.glyphX[k + 1]) / 2;
+                        const auto& _g = LineGlyphs(dc, b, wl);
+                        for (size_t k = 0; k + 1 < _g.size(); ++k) {
+                            int mid = (_g[k] + _g[k + 1]) / 2;
                             if (xRel < mid) { charIdx = (int)k; break; }
                         }
                         return {(int)i, wl.textStart + charIdx};
@@ -1777,8 +1799,9 @@ BlockPos ChatCanvas::HitTest(const wxPoint& canvasPt) const {
                         int xRel = canvasPt.x - textXLeft;
                         if (xRel < 0) return {(int)i, wl.textStart};
                         int charIdx = (int)wl.text.size();
-                        for (size_t k = 0; k + 1 < wl.glyphX.size(); ++k) {
-                            int mid = (wl.glyphX[k] + wl.glyphX[k + 1]) / 2;
+                        const auto& _g = LineGlyphs(dc, b, wl);
+                        for (size_t k = 0; k + 1 < _g.size(); ++k) {
+                            int mid = (_g[k] + _g[k + 1]) / 2;
                             if (xRel < mid) { charIdx = (int)k; break; }
                         }
                         return {(int)i, wl.textStart + charIdx};
@@ -1835,8 +1858,9 @@ BlockPos ChatCanvas::HitTest(const wxPoint& canvasPt) const {
                         int xRel = canvasPt.x - textXLeft;
                         if (xRel < 0) return {(int)i, wl.textStart};
                         int charIdx = (int)wl.text.size();
-                        for (size_t k = 0; k + 1 < wl.glyphX.size(); ++k) {
-                            int mid = (wl.glyphX[k] + wl.glyphX[k + 1]) / 2;
+                        const auto& _g = LineGlyphs(dc, b, wl);
+                        for (size_t k = 0; k + 1 < _g.size(); ++k) {
+                            int mid = (_g[k] + _g[k + 1]) / 2;
                             if (xRel < mid) { charIdx = (int)k; break; }
                         }
                         return {(int)i, wl.textStart + charIdx};
@@ -1852,7 +1876,7 @@ BlockPos ChatCanvas::HitTest(const wxPoint& canvasPt) const {
             if (b.type == BlockType::UserPrompt) {
                 int bubbleW = 0;
                 for (const auto& wl : b.lines)
-                    if (!wl.glyphX.empty()) bubbleW = std::max<int>(bubbleW, wl.glyphX.back());
+                    bubbleW = std::max<int>(bubbleW, wl.lineWidth);
                 bubbleW += kUserBubblePad * 2;
                 if (bubbleW > contentW) bubbleW = contentW;
                 textXLeft = xLeft + contentW - bubbleW + kUserBubblePad;
@@ -1875,8 +1899,9 @@ BlockPos ChatCanvas::HitTest(const wxPoint& canvasPt) const {
                     if (xRel < 0) return {(int)i, wl.textStart};
                     // Find char by binary scan on glyphX.
                     int charIdx = (int)wl.text.size();
-                    for (size_t k = 0; k + 1 < wl.glyphX.size(); ++k) {
-                        int mid = (wl.glyphX[k] + wl.glyphX[k + 1]) / 2;
+                    const auto& _g = LineGlyphs(dc, b, wl);
+                    for (size_t k = 0; k + 1 < _g.size(); ++k) {
+                        int mid = (_g[k] + _g[k + 1]) / 2;
                         if (xRel < mid) { charIdx = (int)k; break; }
                     }
                     return {(int)i, wl.textStart + charIdx};

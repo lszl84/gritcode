@@ -186,6 +186,12 @@ private:
     int FontIndex(const InlineRun& r, BlockType bt, int hLvl) const;
     int FontHeight(wxDC& dc, int fi, const wxFont& f) const;
 
+    // Lazily compute and return the per-char x positions for a wrapped line.
+    // Only used for partial-line selection and hit-testing; full-line work
+    // uses WrappedLine::lineWidth instead.
+    const std::vector<int>& LineGlyphs(wxDC& dc, const Block& b,
+                                       const WrappedLine& wl) const;
+
     // Layout (or re-layout) all blocks to the given content width.
     void Relayout(int width);
     void LayoutBlock(wxDC& dc, Block& b, int contentWidth, int topSpacing) const;
