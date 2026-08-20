@@ -1,4 +1,5 @@
 #include "session_store.h"
+#include "perf_log.h"
 #include <algorithm>
 #include <chrono>
 #include <cstdio>
@@ -75,6 +76,7 @@ void SessionStore::Init() {
 
 bool SessionStore::Load(const std::string& cwd,
                         std::vector<nlohmann::json>& outHistory) const {
+    PERF_SCOPE("SessionStore::Load");
     std::string path = sessionsDir_ + "/" + IdForCwd(cwd) + ".json";
     std::ifstream f(path);
     if (!f.good()) return false;
@@ -91,6 +93,7 @@ bool SessionStore::Load(const std::string& cwd,
 
 void SessionStore::Save(const std::string& cwd,
                         const std::vector<nlohmann::json>& history) {
+    PERF_SCOPE("SessionStore::Save");
     std::string id = IdForCwd(cwd);
     std::string lastUsed = NowIso();
 

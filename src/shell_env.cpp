@@ -1,4 +1,5 @@
 #include "shell_env.h"
+#include "perf_log.h"
 
 #include <cstdlib>
 #include <cstring>
@@ -41,6 +42,7 @@ int CloexecPipe(int fds[2]) {
 }  // namespace
 
 void ImportShellEnv() {
+    PERF_SCOPE("ImportShellEnv");
     const char* shell = std::getenv("SHELL");
     if (!shell || !*shell) shell = "/bin/bash";
 

@@ -259,6 +259,23 @@ void ChatCanvas::AddBlock(Block b) {
     // blocks land in rapid succession.
     blocks_.push_back(std::move(b));
     layoutDirty_ = true;
+    if (batchAdd_) return;  // EndBatch() does the single reflow + redraw
+    Relayout(GetClientSize().x);
+    if (stickToBottom_) {
+        int xu, yu;
+        GetScrollPixelsPerUnit(&xu, &yu);
+        if (yu > 0) Scroll(0, contentHeight_ / yu);
+    }
+    Refresh();
+}
+
+void ChatCanvas::BeginBatch() {
+    batchAdd_ = true;
+}
+
+void ChatCanvas::EndBatch() {
+    batchAdd_ = false;
+    layoutDirty_ = true;
     Relayout(GetClientSize().x);
     if (stickToBottom_) {
         int xu, yu;
@@ -861,6 +878,15 @@ void ChatCanvas::WrapMonospace(wxDC& dc, const wxString& text, int maxW,
 
 void ChatCanvas::Relayout(int width) {
     PERF_SCOPE_T("Relayout", 1000);
+    // Defer the expensive reflow until the canvas is actually on screen.
+    // During session restore (before Show) the client width is a bogus few
+    // pixels, so laying out now would wrap every block into ~100px columns
+    // and then throw the result away on the first real paint.
+    if (!IsShownOnScreen()) {
+        layoutWidth_ = -1;
+        return;
+    }
+
     EnsureFonts();
 
     // O(1) fast path. Mutators flip layoutDirty_; nothing dirty + same width =

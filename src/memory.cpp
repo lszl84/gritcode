@@ -1,4 +1,5 @@
 #include "memory.h"
+#include "perf_log.h"
 #include <sqlite3.h>
 #include <cstdio>
 #include <cstdlib>
@@ -30,6 +31,7 @@ std::string MemoryDB::SessionsDir() {
 }
 
 bool MemoryDB::Open(const std::string& path) {
+    PERF_SCOPE("MemoryDB::Open");
     std::lock_guard<std::mutex> lk(mu_);
     if (db_) return true;
 
@@ -173,6 +175,7 @@ bool MemoryDB::RebuildSession(const std::string& session_id,
                               const std::string& cwd,
                               const nlohmann::json& messages,
                               const std::string& timestamp) {
+    PERF_SCOPE("MemoryDB::RebuildSession");
     std::lock_guard<std::mutex> lk(mu_);
     if (!db_) return false;
     if (!messages.is_array()) return false;

@@ -38,6 +38,13 @@ public:
     // Append a finalized block. Triggers reflow + redraw.
     void AddBlock(Block b);
 
+    // Bulk-add mode for session restore: BeginBatch(), then any number of
+    // AddBlock() calls accumulate with no reflow/redraw, then EndBatch()
+    // reflows and redraws once. If the canvas isn't shown yet, the reflow
+    // is deferred to the first paint anyway.
+    void BeginBatch();
+    void EndBatch();
+
     // Toggle a ToolCall block's collapsed/expanded state. No-op for other types.
     void ToggleToolCall(int blockIdx);
 
@@ -115,6 +122,7 @@ private:
     // Single dirty bit — fast path through Relayout when nothing changed.
     // Mutators flip it; Relayout clears it after a successful pass.
     bool layoutDirty_ = true;
+    bool batchAdd_ = false;   // set between BeginBatch() and EndBatch()
     // Cumulative top Y of each block in canvas (unscrolled) coords.
     // Size = blocks_.size() + 1. blockTops_[i] = top of blocks_[i],
     // blockTops_[N] = bottom of last block (before thinking dots/margin).

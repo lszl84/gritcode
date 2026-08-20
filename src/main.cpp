@@ -4,6 +4,7 @@
 #include "preferences.h"
 #include "memory.h"
 #include "mcp_stdio.h"
+#include "perf_log.h"
 
 #include <nlohmann/json.hpp>
 #include <cstdio>
@@ -72,6 +73,7 @@ static int RunReindex() {
 class App : public wxApp {
 public:
     bool OnInit() override {
+        PERF_SCOPE("OnInit");
         SetAppName("gritcode");
 #if wxCHECK_VERSION(3, 3, 0)
         // On Windows, wx 3.3 defaults to light mode — the app must
@@ -83,9 +85,10 @@ public:
         // Pull PATH and friends from the user's login shell so tool subprocesses
         // see the same env they'd see in a terminal — matters when launched
         // from a .desktop file or DE menu where rc-files never ran.
-        ImportShellEnv();
+        { PERF_SCOPE("ImportShellEnv"); ImportShellEnv(); }
 
-        auto* frame = new ChatFrame();
+        ChatFrame* frame;
+        { PERF_SCOPE("new ChatFrame"); frame = new ChatFrame(); }
         frame->Show(true);
         return true;
     }

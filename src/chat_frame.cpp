@@ -5,6 +5,7 @@
 #include "preferences.h"
 #include "run_config_store.h"
 #include "settings_dialog.h"
+#include "perf_log.h"
 #include <wx/sizer.h>
 #include <wx/wrapsizer.h>
 #include <wx/stattext.h>
@@ -207,8 +208,9 @@ wxIconBundle LoadAppIcon() {
 ChatFrame::ChatFrame()
     : wxFrame(nullptr, wxID_ANY, "gritcode",
               wxDefaultPosition, wxSize(600, 850)) {
+    PERF_SCOPE("ChatFrame::ctor");
 
-    SetIcons(LoadAppIcon());
+    { PERF_SCOPE("LoadAppIcon"); SetIcons(LoadAppIcon()); }
 
     splitter_ = new wxSplitterWindow(this, wxID_ANY,
         wxDefaultPosition, wxDefaultSize, wxSP_LIVE_UPDATE);
@@ -401,11 +403,12 @@ ChatFrame::ChatFrame()
 
     // Open the most recent session if one exists; otherwise seed one for the
     // default cwd so the dropdown always has at least one entry.
-    store_.Init();
+    { PERF_SCOPE("SessionStore::Init"); store_.Init(); }
     // Open the FTS5 memory index. Failure (e.g. read-only home) is silent;
     // grit_history_search returns "Memory index unavailable" in that case.
-    memory_.Open(MemoryDB::DefaultPath());
+    { PERF_SCOPE("MemoryDB::Open"); memory_.Open(MemoryDB::DefaultPath()); }
     bool restored = false;
+    { PERF_SCOPE("RestoreLastSession");
     if (auto last = store_.LastActiveCwd()) {
         std::vector<nlohmann::json> hist;
         if (store_.Load(*last, hist)) {
@@ -426,9 +429,10 @@ ChatFrame::ChatFrame()
     if (!restored) {
         activeCwd_ = DefaultCwd();
         SeedSystemPrompt();
-        store_.Save(activeCwd_, history_);
+        { PERF_SCOPE("PersistActive:Save"); store_.Save(activeCwd_, history_); }
         store_.SetLastActiveCwd(activeCwd_);
     }
+    } // RestoreLastSession
     ChdirToCwd(activeCwd_);
     RefreshSessionChoice();
     RestoreCanvasFromHistory();
@@ -913,6 +917,7 @@ void ChatFrame::ReloadToolbarIcons() {
 }
 
 void ChatFrame::RefreshSessionChoice() {
+    PERF_SCOPE("RefreshSessionChoice");
     sessionChoice_->Clear();
     sessionCwds_.clear();
     sessionChoice_->Append(wxString::FromUTF8("New Session\xE2\x80\xA6"));
@@ -998,6 +1003,7 @@ void ChatFrame::CreateNewSession() {
 }
 
 void ChatFrame::SwitchToCwd(const std::string& cwd) {
+    PERF_SCOPE("SwitchToCwd");
     PersistActive();
     std::vector<nlohmann::json> hist;
     bool existed = store_.Load(cwd, hist);
@@ -1019,6 +1025,7 @@ void ChatFrame::SwitchToCwd(const std::string& cwd) {
 }
 
 void ChatFrame::PersistActive() {
+    PERF_SCOPE("PersistActive");
     if (activeCwd_.empty()) return;
     // Always save — keeps the lastUsed timestamp current so the dropdown
     // ordering is stable and the index reflects the most recent activity.
@@ -1039,8 +1046,8 @@ void ChatFrame::PersistActive() {
             return std::string(buf);
         }();
         nlohmann::json msgs = history_;  // shallow copy → array of json messages
-        memory_.RebuildSession(SessionStore::IdForCwd(activeCwd_),
-                               activeCwd_, msgs, now);
+        { PERF_SCOPE("PersistActive:RebuildSession"); memory_.RebuildSession(SessionStore::IdForCwd(activeCwd_),
+                               activeCwd_, msgs, now); }
     }
 }
 
@@ -1085,6 +1092,8 @@ void ChatFrame::SeedSystemPrompt() {
 }
 
 void ChatFrame::RestoreCanvasFromHistory() {
+    PERF_SCOPE("RestoreCanvasFromHistory");
+    canvas_->BeginBatch();
     // Walk the message list and re-emit blocks. Tool call/result pairs are
     // stitched back together: an assistant message's tool_calls are matched
     // against the immediately-following "tool" messages by tool_call_id.
@@ -1155,6 +1164,7 @@ void ChatFrame::RestoreCanvasFromHistory() {
         // role == "system" or "tool": skipped (system not visible; tool was
         // consumed above by the matching assistant pairing).
     }
+    canvas_->EndBatch();
 }
 
 void ChatFrame::OnModelChoice(wxCommandEvent& evt) {
