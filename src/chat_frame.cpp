@@ -767,6 +767,7 @@ ChatFrame::~ChatFrame() {
         }
         playWorker_.join();
     }
+    if (persistWorker_.joinable()) persistWorker_.join();
 }
 
 nlohmann::json ChatFrame::BuildBlocksSnapshot() const {
@@ -1027,28 +1028,28 @@ void ChatFrame::SwitchToCwd(const std::string& cwd) {
 void ChatFrame::PersistActive() {
     PERF_SCOPE("PersistActive");
     if (activeCwd_.empty()) return;
-    // Always save — keeps the lastUsed timestamp current so the dropdown
-    // ordering is stable and the index reflects the most recent activity.
-    store_.Save(activeCwd_, history_);
-    // Re-index into the FTS5 memory so grit_history_search picks up the
-    // turns we just persisted. RebuildSession is idempotent: it deletes
-    // every prior row for this session_id and re-inserts the current
-    // history. Cheap in absolute terms (a 500-turn rebuild is sub-100ms).
-    if (memory_.IsOpen()) {
-        auto now = []{
-            std::time_t t = std::time(nullptr); std::tm tm;
-#ifdef _WIN32
-            localtime_s(&tm, &t);
-#else
-            localtime_r(&t, &tm);
-#endif
-            char buf[32]; std::strftime(buf, sizeof(buf), "%Y-%m-%dT%H:%M:%S", &tm);
-            return std::string(buf);
-        }();
-        nlohmann::json msgs = history_;  // shallow copy → array of json messages
-        { PERF_SCOPE("PersistActive:RebuildSession"); memory_.RebuildSession(SessionStore::IdForCwd(activeCwd_),
-                               activeCwd_, msgs, now); }
-    }
+
+    // Snapshot everything the worker needs up front. The worker must not
+    // read history_/activeCwd_ while the GUI thread keeps mutating them.
+    std::string cwd = activeCwd_;
+    std::vector<nlohmann::json> msgs = history_;
+    std::string ts = SessionStore::NowIso();
+
+    // The index update is tiny and touches entries_/sessions.json - keep it on
+    // the GUI thread so SessionStore stays single-threaded. The heavy parts
+    // (session-file JSON dump + write, and the FTS5 reindex) run on the worker.
+    store_.UpdateIndex(cwd, ts);
+
+    // Serialize with any previous persist so we don't reuse the std::thread
+    // slot while it's still joinable. Normally it finished long ago, so this
+    // join is instant; it only blocks if the user switches sessions rapidly.
+    if (persistWorker_.joinable()) persistWorker_.join();
+    persistWorker_ = std::thread([this, cwd, msgs = std::move(msgs), ts]() {
+        store_.WriteSessionFile(cwd, msgs, ts);
+        if (memory_.IsOpen()) {
+            memory_.RebuildSession(SessionStore::IdForCwd(cwd), cwd, msgs, ts);
+        }
+    });
 }
 
 void ChatFrame::SeedSystemPrompt() {

@@ -131,6 +131,11 @@ private:
     std::shared_ptr<ToolCancelToken> currentPlayToken_;
     std::thread playWorker_;
 
+    // Persist worker: runs the heavy SessionStore::WriteSessionFile +
+    // MemoryDB::RebuildSession off the UI thread. Owned (not detached) so the
+    // destructor joins it before the frame goes away.
+    std::thread persistWorker_;
+
     // Graceful close — see OnClose.
     bool quitRequested_ = false;
 

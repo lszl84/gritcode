@@ -38,9 +38,27 @@ public:
               std::vector<nlohmann::json>& outHistory) const;
 
     // Writes the full session and updates the index (lastUsed timestamp).
-    // Creates a new entry if this cwd hasn't been seen before.
+    // Creates a new entry if this cwd hasn't been seen before. This is the
+    // synchronous variant used where the UI thread must block (startup seed,
+    // new-session create); the hot persist path splits it into the two
+    // methods below so the heavy parts can run on a worker thread.
     void Save(const std::string& cwd,
               const std::vector<nlohmann::json>& history);
+
+    // Thread-safe: writes only the per-session JSON file (no index mutation).
+    // Uses `lastUsed` as the recorded timestamp so the caller can keep the
+    // index entry consistent with the file. Safe to call from a worker.
+    void WriteSessionFile(const std::string& cwd,
+                          const std::vector<nlohmann::json>& history,
+                          const std::string& lastUsed) const;
+
+    // UI-thread only: update the in-memory index (lastUsed) + write
+    // sessions.json. Cheap relative to WriteSessionFile.
+    void UpdateIndex(const std::string& cwd, const std::string& lastUsed);
+
+    // ISO-8601 "now" string used as lastUsed. Exposed so callers can compute
+    // one timestamp and feed it to both WriteSessionFile and UpdateIndex.
+    static std::string NowIso();
 
     // Persists the "lastActiveCwd" pointer in the index without touching
     // session files. Called when the user switches sessions.

@@ -12,21 +12,6 @@
 namespace fs = std::filesystem;
 
 namespace {
-
-std::string NowIso() {
-    auto now = std::chrono::system_clock::now();
-    auto t = std::chrono::system_clock::to_time_t(now);
-    std::tm tm{};
-#if defined(_WIN32)
-    localtime_s(&tm, &t);
-#else
-    localtime_r(&t, &tm);
-#endif
-    char buf[32];
-    std::strftime(buf, sizeof(buf), "%Y-%m-%dT%H:%M:%S", &tm);
-    return buf;
-}
-
 std::string DataRoot() {
     if (const char* xdg = std::getenv("XDG_DATA_HOME")) {
         if (xdg[0] != '\0') return std::string(xdg) + "/gritcode";
@@ -91,12 +76,32 @@ bool SessionStore::Load(const std::string& cwd,
     return true;
 }
 
+std::string SessionStore::NowIso() {
+    auto now = std::chrono::system_clock::now();
+    auto t = std::chrono::system_clock::to_time_t(now);
+    std::tm tm{};
+#if defined(_WIN32)
+    localtime_s(&tm, &t);
+#else
+    localtime_r(&t, &tm);
+#endif
+    char buf[32];
+    std::strftime(buf, sizeof(buf), "%Y-%m-%dT%H:%M:%S", &tm);
+    return buf;
+}
+
 void SessionStore::Save(const std::string& cwd,
                         const std::vector<nlohmann::json>& history) {
     PERF_SCOPE("SessionStore::Save");
-    std::string id = IdForCwd(cwd);
     std::string lastUsed = NowIso();
+    WriteSessionFile(cwd, history, lastUsed);
+    UpdateIndex(cwd, lastUsed);
+}
 
+void SessionStore::WriteSessionFile(const std::string& cwd,
+                                    const std::vector<nlohmann::json>& history,
+                                    const std::string& lastUsed) const {
+    std::string id = IdForCwd(cwd);
     nlohmann::json j;
     j["id"] = id;
     j["cwd"] = cwd;
@@ -106,8 +111,11 @@ void SessionStore::Save(const std::string& cwd,
     std::string body = j.dump(2, ' ', false,
                               nlohmann::json::error_handler_t::replace);
     AtomicWrite(sessionsDir_ + "/" + id + ".json", body);
+}
 
-    // Update or insert the index entry.
+void SessionStore::UpdateIndex(const std::string& cwd,
+                               const std::string& lastUsed) {
+    std::string id = IdForCwd(cwd);
     bool found = false;
     for (auto& e : entries_) {
         if (e.cwd == cwd) {
