@@ -33,7 +33,11 @@ struct WrappedLine {
     wxString text;
     std::vector<InlineRun> runs;
     std::vector<int> runX;          // x of each run's start (line-local)
-    std::vector<int> glyphX;        // x of each char boundary in `text`, size = text.size()+1
+    // x of each char boundary in `text`, size = text.size()+1. Computed lazily
+    // on first selection/hit-test (mutable so const paint/hit-test paths can
+    // fill it in); empty means "not computed yet".
+    mutable std::vector<int> glyphX;
+    int lineWidth = 0;              // pixel width of the trimmed line text
     int height = 0;
     // Range of visible chars (in the block's visibleText) that this line covers.
     int textStart = 0;
