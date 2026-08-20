@@ -29,6 +29,7 @@ constexpr int kTableMinColW  = 30;   // floor on per-column text width
 constexpr int kToolPadX      = 10;
 constexpr int kToolPadY      = 6;
 constexpr int kToolGap       = 4;    // space between header and body (when expanded)
+constexpr int kMaxCacheTokenChars = 256;  // don't memoize longer tokens (URLs/blobs)
 
 bool IsDarkMode() {
     auto appearance = wxSystemSettings::GetAppearance();
@@ -239,6 +240,26 @@ const wxFont& ChatCanvas::FontFor(const InlineRun& r, BlockType bt, int hLvl) co
     return fontBody_;
 }
 
+int ChatCanvas::FontIndex(const InlineRun& r, BlockType bt, int hLvl) const {
+    if (r.code) return 4;
+    if (bt == BlockType::Heading) return 6 + ClampInt(hLvl - 1, 0, 5);
+    if (bt == BlockType::Thinking) return 5;
+    if (r.bold && r.italic) return 3;
+    if (r.bold) return 1;
+    if (r.italic) return 2;
+    return 0;
+}
+
+int ChatCanvas::FontHeight(wxDC& dc, int fi, const wxFont& f) const {
+    if (fontHeightCache_[fi] <= 0) {
+        MeasSetFont(dc, f);
+        wxCoord w = 0, h = 0;
+        MeasExtent(dc, "Hg", &w, &h);
+        fontHeightCache_[fi] = h > 0 ? h : 1;
+    }
+    return fontHeightCache_[fi];
+}
+
 void ChatCanvas::ToggleToolCall(int blockIdx) {
     if (blockIdx < 0 || blockIdx >= (int)blocks_.size()) return;
     Block& b = blocks_[blockIdx];
@@ -367,6 +388,33 @@ void ChatCanvas::OnResizeSettle(wxTimerEvent&) {
 
 // ---------- Layout ----------
 
+void ChatCanvas::MeasExtent(wxDC& dc, const wxString& s, wxCoord* w, wxCoord* h) const {
+    if (!perf_log::Enabled()) { dc.GetTextExtent(s, w, h); return; }
+    auto t0 = std::chrono::steady_clock::now();
+    dc.GetTextExtent(s, w, h);
+    auto d = std::chrono::duration_cast<std::chrono::microseconds>(
+        std::chrono::steady_clock::now() - t0).count();
+    extentUs_ += d; ++extentCalls_;
+}
+
+void ChatCanvas::MeasPartial(wxDC& dc, const wxString& s, wxArrayInt& parts) const {
+    if (!perf_log::Enabled()) { dc.GetPartialTextExtents(s, parts); return; }
+    auto t0 = std::chrono::steady_clock::now();
+    dc.GetPartialTextExtents(s, parts);
+    auto d = std::chrono::duration_cast<std::chrono::microseconds>(
+        std::chrono::steady_clock::now() - t0).count();
+    partialUs_ += d; ++partialCalls_;
+}
+
+void ChatCanvas::MeasSetFont(wxDC& dc, const wxFont& f) const {
+    if (!perf_log::Enabled()) { dc.SetFont(f); return; }
+    auto t0 = std::chrono::steady_clock::now();
+    dc.SetFont(f);
+    auto d = std::chrono::duration_cast<std::chrono::microseconds>(
+        std::chrono::steady_clock::now() - t0).count();
+    setfontUs_ += d; ++setfontCalls_;
+}
+
 void ChatCanvas::LayoutBlock(wxDC& dc, Block& b, int contentWidth, int /*topSpacing*/) const {
     PERF_SCOPE_T("LayoutBlock", 2000);
     b.lines.clear();
@@ -405,9 +453,9 @@ void ChatCanvas::LayoutBlock(wxDC& dc, Block& b, int contentWidth, int /*topSpac
             auto toks = Tokenize(tmp);
             for (auto& t : toks) {
                 const wxFont& f = FontFor(t.style, BlockType::Paragraph, 0);
-                dc.SetFont(f);
+                MeasSetFont(dc, f);
                 wxCoord ww = 0, hh = 0;
-                dc.GetTextExtent(t.text, &ww, &hh);
+                MeasExtent(dc, t.text, &ww, &hh);
                 w += ww;
             }
             return w;
@@ -450,9 +498,9 @@ void ChatCanvas::LayoutBlock(wxDC& dc, Block& b, int contentWidth, int /*topSpac
                 for (const auto& wl : cell.lines) h += wl.height;
                 if (h == 0) {
                     // Empty cell still needs a single line of height for the row.
-                    dc.SetFont(fontBody_);
+                    MeasSetFont(dc, fontBody_);
                     wxCoord ww = 0, hh = 0;
-                    dc.GetTextExtent("Hg", &ww, &hh);
+                    MeasExtent(dc, "Hg", &ww, &hh);
                     h = hh;
                 }
                 cell.height = h;
@@ -493,7 +541,7 @@ void ChatCanvas::LayoutBlock(wxDC& dc, Block& b, int contentWidth, int /*topSpac
         const bool hasNewline = (b.rawText.Find('\n') != wxNOT_FOUND);
         b.thinkingSingleLine = (!hasNewline && b.lines.size() <= 1);
 
-        dc.SetFont(fontThinking_);
+        MeasSetFont(dc, fontThinking_);
         int lineH = dc.GetCharHeight();
         // Chevron size for the expand/collapse triangle (drawn, not text).
         // Sized to ~2/3 of char height so it looks like a small indicator,
@@ -525,7 +573,7 @@ void ChatCanvas::LayoutBlock(wxDC& dc, Block& b, int contentWidth, int /*topSpac
     }
 
     if (b.type == BlockType::ToolCall) {
-        dc.SetFont(fontCode_);
+        MeasSetFont(dc, fontCode_);
         int charH = dc.GetCharHeight();
         b.toolHeaderH = charH + kToolPadY * 2;
         b.lines.clear();
@@ -537,7 +585,7 @@ void ChatCanvas::LayoutBlock(wxDC& dc, Block& b, int contentWidth, int /*topSpac
         b.toolChevStr = wxString(b.toolExpanded ? L'▾' : L'▸') + " ";
         b.toolChevW = dc.GetCharHeight() * 2 / 3;
         wxCoord nw = 0, nh = 0;
-        dc.GetTextExtent(b.toolName, &nw, &nh);
+        MeasExtent(dc, b.toolName, &nw, &nh);
         b.toolNameW = nw;
 
         // Hint (collapsed only): "· N lines" or "· ok".
@@ -556,7 +604,7 @@ void ChatCanvas::LayoutBlock(wxDC& dc, Block& b, int contentWidth, int /*topSpac
             }
             if (!b.toolHint.IsEmpty()) {
                 wxCoord hw = 0, hh = 0;
-                dc.GetTextExtent(b.toolHint, &hw, &hh);
+                MeasExtent(dc, b.toolHint, &hw, &hh);
                 b.toolHintW = hw;
             }
         }
@@ -575,7 +623,7 @@ void ChatCanvas::LayoutBlock(wxDC& dc, Block& b, int contentWidth, int /*topSpac
         // Estimate the worst-case char width with two reference glyphs and
         // pick the smaller (so we don't undercount narrow chars).
         wxCoord refW = 0, refH = 0;
-        dc.GetTextExtent("M", &refW, &refH);
+        MeasExtent(dc, "M", &refW, &refH);
         int minCharW = refW > 0 ? refW : 8;
         // Hard cap: at minimum char width, this many chars *could* fit. Add
         // generous margin for narrow chars + the leading "(" + trailing ")".
@@ -584,7 +632,7 @@ void ChatCanvas::LayoutBlock(wxDC& dc, Block& b, int contentWidth, int /*topSpac
 
         wxString argsDisplay = "(" + b.toolArgs.Left(maxChars) + ")";
         wxCoord aw = 0, ah = 0;
-        dc.GetTextExtent(argsDisplay, &aw, &ah);
+        MeasExtent(dc, argsDisplay, &aw, &ah);
         // toolHeaderVisCharsInArgs = number of leading chars in toolArgsFit
         // that still map 1:1 to source ("(prefix"). The trailing "…)" maps
         // to the full header end. For the non-truncated case, all chars
@@ -598,11 +646,11 @@ void ChatCanvas::LayoutBlock(wxDC& dc, Block& b, int contentWidth, int /*topSpac
             // Need to truncate. Measure only the capped candidate.
             const wxString ell = "...)";
             wxCoord ellW = 0, ellH = 0;
-            dc.GetTextExtent(ell, &ellW, &ellH);
+            MeasExtent(dc, ell, &ellW, &ellH);
             int budget = argsAvail - ellW;
             if (budget < 1) budget = 1;
             wxArrayInt parts;
-            dc.GetPartialTextExtents(argsDisplay, parts);
+            MeasPartial(dc, argsDisplay, parts);
             size_t cut = argsDisplay.size();
             for (size_t i = 0; i < parts.size(); ++i) {
                 if (parts[i] > budget) { cut = i; break; }
@@ -627,7 +675,7 @@ void ChatCanvas::LayoutBlock(wxDC& dc, Block& b, int contentWidth, int /*topSpac
         b.toolHeaderGlyphX.push_back(0);
         if (!headerDisplay.IsEmpty()) {
             wxArrayInt hparts;
-            dc.GetPartialTextExtents(headerDisplay, hparts);
+            MeasPartial(dc, headerDisplay, hparts);
             for (auto p : hparts) b.toolHeaderGlyphX.push_back(p);
         }
 
@@ -665,9 +713,9 @@ void ChatCanvas::LayoutBlock(wxDC& dc, Block& b, int contentWidth, int /*topSpac
     for (const auto& wl : b.lines) totalH += wl.height;
     if (b.lines.empty()) {
         const wxFont& f = FontFor({}, b.type, hLvl);
-        dc.SetFont(f);
+        MeasSetFont(dc, f);
         wxCoord ww = 0, hh = 0;
-        dc.GetTextExtent("Hg", &ww, &hh);
+        MeasExtent(dc, "Hg", &ww, &hh);
         totalH = hh;
     }
     if (b.type == BlockType::UserPrompt) totalH += kUserBubblePad * 2;
@@ -686,18 +734,36 @@ void ChatCanvas::WrapRuns(wxDC& dc, const std::vector<InlineRun>& runs,
 
     auto styleFontHeight = [&]() {
         const wxFont& f = FontFor({}, bt, hLvl);
-        wxCoord ww = 0, hh = 0;
-        dc.SetFont(f);
-        dc.GetTextExtent("Hg", &ww, &hh);
-        return hh;
+        return FontHeight(dc, FontIndex({}, bt, hLvl), f);
     };
 
     auto measureToken = [&](const Tok& t) {
         const wxFont& f = FontFor(t.style, bt, hLvl);
-        dc.SetFont(f);
-        wxCoord ww = 0, hh = 0;
-        dc.GetTextExtent(t.text, &ww, &hh);
-        return std::pair<int, int>{ww, hh};
+        int fi = FontIndex(t.style, bt, hLvl);
+
+        int tw = 0;
+        // Long unbroken tokens (huge URLs, base64 blobs) are rare and expensive
+        // to keep as cache keys, so measure them directly and skip the cache.
+        if ((int)t.text.size() > kMaxCacheTokenChars) {
+            MeasSetFont(dc, f);
+            wxCoord ww = 0, hh = 0;
+            MeasExtent(dc, t.text, &ww, &hh);
+            tw = ww;
+        } else {
+            std::wstring key = std::to_wstring(fi) + L'\x1f' + t.text.ToStdWstring();
+            auto it = widthCache_.find(key);
+            if (it != widthCache_.end()) {
+                tw = it->second;
+            } else {
+                MeasSetFont(dc, f);
+                wxCoord ww = 0, hh = 0;
+                MeasExtent(dc, t.text, &ww, &hh);
+                tw = ww;
+                if (widthCache_.size() > 250000) widthCache_.clear();
+                widthCache_[key] = tw;
+            }
+        }
+        return std::pair<int, int>{tw, FontHeight(dc, fi, f)};
     };
 
     auto appendToLine = [&](const Tok& t, int tw, int th) {
@@ -721,9 +787,9 @@ void ChatCanvas::WrapRuns(wxDC& dc, const std::vector<InlineRun>& runs,
         int xoff = 0;
         for (const auto& r : cur.runs) {
             const wxFont& f = FontFor(r, bt, hLvl);
-            dc.SetFont(f);
+            MeasSetFont(dc, f);
             wxArrayInt parts;
-            dc.GetPartialTextExtents(r.text, parts);
+            MeasPartial(dc, r.text, parts);
             for (auto p : parts) cur.glyphX.push_back(xoff + p);
             xoff += parts.empty() ? 0 : parts.back();
         }
@@ -740,9 +806,6 @@ void ChatCanvas::WrapRuns(wxDC& dc, const std::vector<InlineRun>& runs,
         const Tok& t = toks[i];
 
         if (t.isNewline) {
-            // Hard line break. If the current visual line is empty, emit a
-            // blank line at the default font height so consecutive newlines
-            // render as visible empty rows.
             if (cur.text.IsEmpty() && cur.runs.empty()) {
                 cur.height = styleFontHeight();
                 cur.textEnd = cur.textStart;
@@ -779,13 +842,13 @@ void ChatCanvas::WrapRuns(wxDC& dc, const std::vector<InlineRun>& runs,
             if (curX == 0) cur.textStart = t.srcStart;
             appendToLine(t, tw, th);
         } else {
-            // Single token wider than maxW (long URL, path, base64 blob, …).
-            // Split it at character boundaries so the line wraps instead of
+            // Single token wider than maxW (long URL, path, base64 blob). Split
+            // it at character boundaries so the line wraps instead of
             // overflowing the content column.
             const wxFont& f = FontFor(t.style, bt, hLvl);
-            dc.SetFont(f);
+            MeasSetFont(dc, f);
             wxArrayInt parts;
-            dc.GetPartialTextExtents(t.text, parts);
+            MeasPartial(dc, t.text, parts);
             size_t pos = 0;
             while (pos < t.text.size()) {
                 int startW = (pos > 0) ? parts[pos - 1] : 0;
@@ -801,7 +864,7 @@ void ChatCanvas::WrapRuns(wxDC& dc, const std::vector<InlineRun>& runs,
                 piece.text = t.text.SubString(pos, j - 1);
                 piece.srcStart = t.srcStart + (int)pos;
                 wxCoord pw = 0, ph = 0;
-                dc.GetTextExtent(piece.text, &pw, &ph);
+                MeasExtent(dc, piece.text, &pw, &ph);
                 if (curX == 0) cur.textStart = piece.srcStart;
                 appendToLine(piece, pw, ph);
                 pos = j;
@@ -815,7 +878,7 @@ void ChatCanvas::WrapRuns(wxDC& dc, const std::vector<InlineRun>& runs,
 void ChatCanvas::WrapMonospace(wxDC& dc, const wxString& text, int maxW,
                                std::vector<WrappedLine>& outLines,
                                int textOffBase) const {
-    dc.SetFont(fontCode_);
+    MeasSetFont(dc, fontCode_);
     int charH = dc.GetCharHeight();
 
     auto emitLine = [&](const wxString& seg, int srcStart) {
@@ -832,7 +895,7 @@ void ChatCanvas::WrapMonospace(wxDC& dc, const wxString& text, int maxW,
         wl.glyphX.push_back(0);
         if (!seg.IsEmpty()) {
             wxArrayInt parts;
-            dc.GetPartialTextExtents(seg, parts);
+            MeasPartial(dc, seg, parts);
             for (auto p : parts) wl.glyphX.push_back(p);
         }
         outLines.push_back(std::move(wl));
@@ -848,7 +911,7 @@ void ChatCanvas::WrapMonospace(wxDC& dc, const wxString& text, int maxW,
             emitLine(wxString{}, lineSrcStart);
         } else {
             wxArrayInt parts;
-            dc.GetPartialTextExtents(srcLine, parts);
+            MeasPartial(dc, srcLine, parts);
             // parts[i] = pixel width of srcLine[0..i+1]
 
             size_t i = 0;
@@ -923,6 +986,11 @@ void ChatCanvas::Relayout(int width) {
     layoutDirty_ = false;
 
     PERF_LOG("Relayout n=%d w=%d h=%d", relaidCount, width, contentHeight_);
+    PERF_LOG("meas extent=%lldus/%lldc partial=%lldus/%lldc setfont=%lldus/%lldc",
+             extentUs_, extentCalls_, partialUs_, partialCalls_,
+             setfontUs_, setfontCalls_);
+    extentUs_ = partialUs_ = setfontUs_ = 0;
+    extentCalls_ = partialCalls_ = setfontCalls_ = 0;
     SetVirtualSize(width, contentHeight_);
 }
 
