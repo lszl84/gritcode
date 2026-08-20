@@ -32,6 +32,13 @@ public:
     ChatFrame();
     ~ChatFrame() override;
 
+    // Deferred startup restore. For large sessions the constructor shows
+    // a "Loading Session..." placeholder and returns without rendering the
+    // canvas; main() calls this after Show() so the placeholder paints
+    // before the heavy restore runs on the main thread. No-op for small
+    // sessions (they are restored synchronously in the constructor).
+    void StartSessionRestore();
+
 private:
     ChatCanvas* canvas_ = nullptr;
     wxTextCtrl* input_ = nullptr;
@@ -137,6 +144,8 @@ private:
     std::thread persistWorker_;
 
     // Graceful close — see OnClose.
+    bool deferRestore_ = false;  // set when the constructor deferred the canvas restore
+    void RestoreSession();       // renders history_ into the canvas + clears loading
     bool quitRequested_ = false;
 
     // Set in ~ChatFrame before stopping MCP. Read by guiSync (on the MCP

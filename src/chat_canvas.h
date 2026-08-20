@@ -59,6 +59,10 @@ public:
     // prototype but useful for future extensions).
     void Clear();
 
+    // Show a centered "Loading Session..." placeholder instead of blocks.
+    // Used while a large session is being restored on the main thread.
+    void SetLoading(bool on) { loading_ = on; Refresh(); }
+
     // Returns concatenated visible text of the current selection, or empty
     // string if no selection. Used for clipboard copy.
     wxString GetSelectedText() const;
@@ -125,6 +129,7 @@ private:
     // Mutators flip it; Relayout clears it after a successful pass.
     bool layoutDirty_ = true;
     bool batchAdd_ = false;   // set between BeginBatch() and EndBatch()
+    bool loading_ = false;    // draw loading placeholder instead of blocks
     // Cumulative top Y of each block in canvas (unscrolled) coords.
     // Size = blocks_.size() + 1. blockTops_[i] = top of blocks_[i],
     // blockTops_[N] = bottom of last block (before thinking dots/margin).
