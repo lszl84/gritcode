@@ -146,6 +146,8 @@ private:
     // Graceful close — see OnClose.
     bool deferRestore_ = false;  // set when the constructor deferred the canvas restore
     void RestoreSession();       // renders history_ into the canvas + clears loading
+    bool HistoryIsLarge() const;           // >200 msgs or >250KB content
+    void RestoreCanvasMaybeDeferred();     // loading placeholder + deferred restore when large
     bool quitRequested_ = false;
 
     // Set in ~ChatFrame before stopping MCP. Read by guiSync (on the MCP

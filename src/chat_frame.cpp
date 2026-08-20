@@ -439,32 +439,11 @@ ChatFrame::ChatFrame()
     // Large sessions show a centered placeholder first and render the canvas
     // after the window is on screen (StartSessionRestore). Small sessions are
     // restored synchronously, as before.
-    {
-        bool large = history_.size() > 200;
-        if (!large) {
-            size_t chars = 0;
-            for (const auto& m : history_) {
-                if (!m.is_object()) continue;
-                if (m.contains("content") && m["content"].is_string())
-                    chars += m["content"].get<std::string>().size();
-                if (m.contains("tool_calls") && m["tool_calls"].is_array()) {
-                    for (const auto& tc : m["tool_calls"]) {
-                        if (tc.is_object() && tc.contains("function")
-                            && tc["function"].is_object()
-                            && tc["function"].contains("arguments")
-                            && tc["function"]["arguments"].is_string())
-                            chars += tc["function"]["arguments"].get<std::string>().size();
-                    }
-                }
-            }
-            large = chars > 250000;
-        }
-        if (large) {
-            deferRestore_ = true;
-            canvas_->SetLoading(true);
-        } else {
-            RestoreCanvasFromHistory();
-        }
+    if (HistoryIsLarge()) {
+        deferRestore_ = true;
+        canvas_->SetLoading(true);
+    } else {
+        RestoreCanvasFromHistory();
     }
 
     Bind(wxEVT_BUTTON, &ChatFrame::OnSend, this, ID_SEND);
@@ -777,6 +756,36 @@ void ChatFrame::RestoreSession() {
     canvas_->Refresh();
 }
 
+bool ChatFrame::HistoryIsLarge() const {
+    if (history_.size() > 200) return true;
+    size_t chars = 0;
+    for (const auto& m : history_) {
+        if (!m.is_object()) continue;
+        if (m.contains("content") && m["content"].is_string())
+            chars += m["content"].get<std::string>().size();
+        if (m.contains("tool_calls") && m["tool_calls"].is_array()) {
+            for (const auto& tc : m["tool_calls"]) {
+                if (tc.is_object() && tc.contains("function")
+                    && tc["function"].is_object()
+                    && tc["function"].contains("arguments")
+                    && tc["function"]["arguments"].is_string())
+                    chars += tc["function"]["arguments"].get<std::string>().size();
+            }
+        }
+    }
+    return chars > 250000;
+}
+
+void ChatFrame::RestoreCanvasMaybeDeferred() {
+    canvas_->Clear();
+    if (HistoryIsLarge()) {
+        canvas_->SetLoading(true);
+        CallAfter([this] { RestoreSession(); });
+    } else {
+        RestoreCanvasFromHistory();
+    }
+}
+
 ChatFrame::~ChatFrame() {
     // Signal MCP's guiSync callers to bail out of their future.get() polls
     // before we stop the server — otherwise mcp_.Stop()'s join would deadlock
@@ -1040,8 +1049,7 @@ void ChatFrame::CreateNewSession() {
     }
     historyCompactBaseCount_ = 0;  // fresh compaction gate for the new session
     store_.SetLastActiveCwd(activeCwd_);
-    canvas_->Clear();
-    RestoreCanvasFromHistory();
+    RestoreCanvasMaybeDeferred();
     RefreshSessionChoice();
 }
 
@@ -1062,8 +1070,7 @@ void ChatFrame::SwitchToCwd(const std::string& cwd) {
     historyCompactBaseCount_ = 0;  // fresh compaction gate for the new session
     store_.SetLastActiveCwd(activeCwd_);
     ChdirToCwd(activeCwd_);
-    canvas_->Clear();
-    RestoreCanvasFromHistory();
+    RestoreCanvasMaybeDeferred();
     RefreshSessionChoice();
 }
 
