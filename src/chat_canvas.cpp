@@ -1099,6 +1099,21 @@ void ChatCanvas::OnPaint(wxPaintEvent&) {
     }
 #endif
 
+    if (loading_) {
+        // Centered placeholder while a large session restores. Blocks are
+        // empty here, so clear the background and draw a static label.
+        const wxColour bg = bgOverride_.IsOk() ? bgOverride_ : palette_.bg;
+        paintDC->SetBackground(wxBrush(bg));
+        paintDC->Clear();
+        const wxString msg = "Loading Session...";
+        paintDC->SetFont(fontBody_);
+        paintDC->SetTextForeground(palette_.text);
+        wxCoord tw = 0, th = 0;
+        paintDC->GetTextExtent(msg, &tw, &th);
+        paintDC->DrawText(msg, (sz.x - tw) / 2, (sz.y - th) / 2);
+        return;
+    }
+
     RenderViewport(*paintDC, viewY, sz.x, sz.y, selStart, selEnd);
 
     if (thinking_) {

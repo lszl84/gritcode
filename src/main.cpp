@@ -90,6 +90,7 @@ public:
         ChatFrame* frame;
         { PERF_SCOPE("new ChatFrame"); frame = new ChatFrame(); }
         frame->Show(true);
+        frame->StartSessionRestore();
         return true;
     }
 };

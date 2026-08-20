@@ -435,7 +435,37 @@ ChatFrame::ChatFrame()
     } // RestoreLastSession
     ChdirToCwd(activeCwd_);
     RefreshSessionChoice();
-    RestoreCanvasFromHistory();
+
+    // Large sessions show a centered placeholder first and render the canvas
+    // after the window is on screen (StartSessionRestore). Small sessions are
+    // restored synchronously, as before.
+    {
+        bool large = history_.size() > 200;
+        if (!large) {
+            size_t chars = 0;
+            for (const auto& m : history_) {
+                if (!m.is_object()) continue;
+                if (m.contains("content") && m["content"].is_string())
+                    chars += m["content"].get<std::string>().size();
+                if (m.contains("tool_calls") && m["tool_calls"].is_array()) {
+                    for (const auto& tc : m["tool_calls"]) {
+                        if (tc.is_object() && tc.contains("function")
+                            && tc["function"].is_object()
+                            && tc["function"].contains("arguments")
+                            && tc["function"]["arguments"].is_string())
+                            chars += tc["function"]["arguments"].get<std::string>().size();
+                    }
+                }
+            }
+            large = chars > 250000;
+        }
+        if (large) {
+            deferRestore_ = true;
+            canvas_->SetLoading(true);
+        } else {
+            RestoreCanvasFromHistory();
+        }
+    }
 
     Bind(wxEVT_BUTTON, &ChatFrame::OnSend, this, ID_SEND);
     Bind(wxEVT_BUTTON, &ChatFrame::OnContinueQueue, this, ID_QUEUE_CONTINUE);
@@ -733,6 +763,18 @@ ChatFrame::ChatFrame()
 
     input_->SetFocus();
     SetMinSize(wxSize(620, 400));
+}
+
+void ChatFrame::StartSessionRestore() {
+    if (!deferRestore_) return;
+    CallAfter([this] { RestoreSession(); });
+}
+
+void ChatFrame::RestoreSession() {
+    PERF_SCOPE("RestoreSession");
+    RestoreCanvasFromHistory();
+    canvas_->SetLoading(false);
+    canvas_->Refresh();
 }
 
 ChatFrame::~ChatFrame() {
