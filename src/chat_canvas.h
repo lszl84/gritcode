@@ -2,6 +2,8 @@
 #include <wx/wx.h>
 #include <wx/scrolwin.h>
 #include "block.h"
+#include <array>
+#include <unordered_map>
 #include <vector>
 
 struct Palette {
@@ -164,6 +166,25 @@ private:
     // viewport alone; re-engage when they scroll back near the bottom.
     bool stickToBottom_ = true;
     void UpdateStickToBottom();
+
+    // Measurement accounting for profiling (WX_GRITCODE_PROF=1). Filled by
+    // MeasExtent/MeasPartial/MeasSetFont wrappers and dumped at the end of
+    // Relayout so we can see where layout time actually goes.
+    mutable long long extentUs_ = 0, partialUs_ = 0, setfontUs_ = 0;
+    mutable long long extentCalls_ = 0, partialCalls_ = 0, setfontCalls_ = 0;
+
+    void MeasExtent(wxDC& dc, const wxString& s, wxCoord* w, wxCoord* h) const;
+    void MeasPartial(wxDC& dc, const wxString& s, wxArrayInt& parts) const;
+    void MeasSetFont(wxDC& dc, const wxFont& f) const;
+
+    // Memoized text-measurement state. Token widths repeat enormously in chat
+    // text (spaces, punctuation, common words), so cache by (font, text).
+    // Heights are constant per font, cached separately in fontHeightCache_.
+    mutable std::unordered_map<std::wstring, int> widthCache_;
+    mutable std::array<int, 12> fontHeightCache_{};  // 0 = not cached
+
+    int FontIndex(const InlineRun& r, BlockType bt, int hLvl) const;
+    int FontHeight(wxDC& dc, int fi, const wxFont& f) const;
 
     // Layout (or re-layout) all blocks to the given content width.
     void Relayout(int width);
