@@ -1647,10 +1647,40 @@ void ChatFrame::DoSendActualRequest() {
         }
     }
 
+    // Estimate the prompt size and clamp max_tokens so prompt + completion
+    // fits the model context. The API reserves max_tokens against the window
+    // even when the completion doesn't use it, so a fixed 384K cap overflows
+    // once history is large. Use chars/3 (real ratio is ~3.3) and rely on
+    // contextWindow being ~48K under the model's true limit as extra slack.
+    size_t promptChars = 0;
+    for (const auto& m : messages) {
+        if (!m.is_object()) continue;
+        if (m.contains("content") && m["content"].is_string())
+            promptChars += m["content"].get_ref<const std::string&>().size();
+        if (m.contains("reasoning_content") && m["reasoning_content"].is_string())
+            promptChars += m["reasoning_content"].get_ref<const std::string&>().size();
+        if (m.contains("tool_calls") && m["tool_calls"].is_array()) {
+            for (const auto& tc : m["tool_calls"]) {
+                if (tc.is_object() && tc.contains("function")
+                    && tc["function"].is_object()
+                    && tc["function"].contains("arguments")
+                    && tc["function"]["arguments"].is_string())
+                    promptChars += tc["function"]["arguments"]
+                                     .get_ref<const std::string&>().size();
+            }
+        }
+    }
+    promptChars += 32000;  // tool definitions + JSON structural overhead
+    int promptTokens = (int)(promptChars / 3);
+    int maxTokens = route.maxTokens;
+    int avail = route.contextWindow - promptTokens - 8000;
+    if (avail < 8000) avail = 8000;
+    if (maxTokens > avail) maxTokens = avail;
+
     nlohmann::json req;
     req["model"] = route.model;
     req["stream"] = true;
-    req["max_tokens"] = route.maxTokens;
+    req["max_tokens"] = maxTokens;
     req["messages"] = std::move(messages);
     req["tools"] = GetToolDefinitions();
 
