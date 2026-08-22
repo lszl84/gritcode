@@ -78,11 +78,11 @@ struct ModelRoute {
 ModelRoute RouteFor(ModelChoice m) {
     switch (m) {
     case ModelChoice::OpencodeFree:
-        // OpenCode Zen free tier. Models rotate — currently deepseek-v4-flash-free.
-        // No API key needed; endpoint is open.
+        // OpenCode Zen free tier. Models rotate — currently big-pickle
+        // (200K context, 32K output). No API key needed; endpoint is open.
         return {"https://opencode.ai/zen/v1/chat/completions",
-                "deepseek-v4-flash-free", false, Preferences::Provider::DeepSeek,
-                128000, 200000};
+                "big-pickle", false, Preferences::Provider::DeepSeek,
+                32000, 200000};
     case ModelChoice::DeepseekFlash:
         return {"https://api.deepseek.com/chat/completions",
                 "deepseek-v4-flash", true, Preferences::Provider::DeepSeek,
@@ -93,8 +93,8 @@ ModelRoute RouteFor(ModelChoice m) {
                 384000, 1000000};
     }
     return {"https://opencode.ai/zen/v1/chat/completions",
-            "deepseek-v4-flash-free", false, Preferences::Provider::DeepSeek,
-            128000, 200000};
+            "big-pickle", false, Preferences::Provider::DeepSeek,
+            32000, 200000};
 }
 
 // chdir() into the session's directory so tool subprocesses (bash,
@@ -1696,6 +1696,12 @@ void ChatFrame::DoSendActualRequest() {
     spec.body = std::move(body);
     spec.bodyContentType = "application/json";
     spec.headers.push_back({"Accept", "text/event-stream"});
+    // OpenCode's free-tier models gate capacity by User-Agent: the official
+    // TUI sends "opencode/<version>" and other UAs get 429 FreeUsageLimitError.
+    // Match it so the no-key free model works from a custom client.
+    if (!route.needsApiKey && std::string(route.url).find("opencode.ai/zen") != std::string::npos) {
+        spec.headers.push_back({"User-Agent", "opencode/1.18.16"});
+    }
     if (route.needsApiKey) {
         spec.headers.push_back({"Authorization",
                                 "Bearer " + std::string(apiKey.utf8_string())});
@@ -2452,6 +2458,12 @@ void ChatFrame::RunSummaryThenSend(int splitIdx) {
     spec.body = std::move(body);
     spec.bodyContentType = "application/json";
     spec.headers.push_back({"Accept", "text/event-stream"});
+    // OpenCode's free-tier models gate capacity by User-Agent: the official
+    // TUI sends "opencode/<version>" and other UAs get 429 FreeUsageLimitError.
+    // Match it so the no-key free model works from a custom client.
+    if (!route.needsApiKey && std::string(route.url).find("opencode.ai/zen") != std::string::npos) {
+        spec.headers.push_back({"User-Agent", "opencode/1.18.16"});
+    }
     if (route.needsApiKey) {
         spec.headers.push_back({"Authorization",
                                 "Bearer " + std::string(apiKey.utf8_string())});
