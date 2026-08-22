@@ -1,5 +1,6 @@
 #pragma once
 #include <wx/string.h>
+#include <wx/bitmap.h>
 #include <vector>
 
 enum class BlockType {
@@ -10,6 +11,7 @@ enum class BlockType {
     Table,
     ToolCall,
     Thinking,
+    Image,
 };
 
 enum class TableAlign { Left, Center, Right };
@@ -100,6 +102,13 @@ struct Block {
     std::vector<int> toolHeaderGlyphX;
     int toolHeaderSrcLen = 0;
     int toolHeaderVisChars = 0;
+
+    // Image-specific. An attached image rendered as a clickable thumbnail.
+    wxString imagePath;   // absolute path to the sidecar blob (empty if missing)
+    wxString imageName;   // original filename, shown as tooltip
+    wxBitmap imageBmp;    // scaled bitmap built during layout
+    int imageW = 0;       // laid-out display width
+    int imageH = 0;       // laid-out display height
 
     // Thinking-block-specific. Reasoning text lives in rawText/visibleText.
     // toolExpanded reused for the collapsed/expanded toggle. lines holds the

@@ -29,6 +29,7 @@ constexpr int kTableMinColW  = 30;   // floor on per-column text width
 constexpr int kToolPadX      = 10;
 constexpr int kToolPadY      = 6;
 constexpr int kToolGap       = 4;    // space between header and body (when expanded)
+constexpr int kImagePad      = 4;    // padding around image thumbnails
 constexpr int kMaxCacheTokenChars = 256;  // don't memoize longer tokens (URLs/blobs)
 
 bool IsDarkMode() {
@@ -438,6 +439,32 @@ void ChatCanvas::LayoutBlock(wxDC& dc, Block& b, int contentWidth, int /*topSpac
     b.cachedWidth = contentWidth;
 
     const int hLvl = b.headingLevel;
+
+    if (b.type == BlockType::Image) {
+        b.imageW = 0;
+        b.imageH = 0;
+        b.imageBmp = wxNullBitmap;
+
+        wxImage img;
+        if (!b.imagePath.IsEmpty() && img.LoadFile(b.imagePath)) {
+            const int maxW = contentWidth;
+            const int maxH = 420;
+            int w = img.GetWidth();
+            int h = img.GetHeight();
+            if (w <= 0 || h <= 0) {
+                b.cachedHeight = 24;
+                return;
+            }
+            double scale = std::min(1.0, std::min((double)maxW / w, (double)maxH / h));
+            int dw = std::max(1, (int)(w * scale));
+            int dh = std::max(1, (int)(h * scale));
+            b.imageBmp = wxBitmap(img.Scale(dw, dh, wxIMAGE_QUALITY_HIGH));
+            b.imageW = dw;
+            b.imageH = dh;
+        }
+        b.cachedHeight = (b.imageH > 0 ? b.imageH : 24) + 2 * kImagePad;
+        return;
+    }
 
     if (b.type == BlockType::CodeBlock) {
         // Source text already excludes the fences themselves (md_parser strips
@@ -1200,6 +1227,24 @@ void ChatCanvas::PaintBlock(wxDC& dc, const Block& b, int yTop, BlockPos selStar
         return std::make_pair(g[ss], g[se]);
     };
 
+    if (b.type == BlockType::Image) {
+        // Subtle card behind the thumbnail; the bitmap is drawn inside.
+        const int cardW = (b.imageW > 0 ? b.imageW : contentW) + 2 * kImagePad;
+        const int cardH = (b.imageH > 0 ? b.imageH : 24) + 2 * kImagePad;
+        dc.SetPen(*wxTRANSPARENT_PEN);
+        dc.SetBrush(wxBrush(pal.tableHeaderBg));
+        dc.DrawRoundedRectangle(blockX, yTop, cardW, cardH, 6);
+
+        if (b.imageBmp.IsOk()) {
+            dc.DrawBitmap(b.imageBmp, blockX + kImagePad, yTop + kImagePad, true);
+        } else {
+            dc.SetFont(fontBody_);
+            dc.SetTextForeground(pal.text);
+            dc.DrawText("Image unavailable", blockX + kImagePad, yTop + kImagePad);
+        }
+        return;
+    }
+
     if (b.type == BlockType::Table) {
         const int N = (int)b.tableAligns.size();
         const int R = (int)b.tableRows.size();
@@ -1701,6 +1746,11 @@ BlockPos ChatCanvas::HitTest(const wxPoint& canvasPt) const {
         int blockBottom = y + b.cachedHeight;
         if (canvasPt.y >= blockTop - spacing / 2 && canvasPt.y < blockBottom) {
 
+            // Images are opaque click targets; no text to hit-test.
+            if (b.type == BlockType::Image) {
+                return {(int)i, 0};
+            }
+
             // Table: per-cell, per-character hit-test.
             if (b.type == BlockType::Table) {
                 // Degenerate table (e.g. empty rows/aligns): LayoutBlock left
@@ -2031,6 +2081,16 @@ void ChatCanvas::OnLeftDown(wxMouseEvent& e) {
     CalcUnscrolledPosition(p.x, p.y, &p.x, &p.y);
     BlockPos hp = HitTest(p);
     if (!hp.IsValid()) return;
+
+    // Image click: open the file with the system viewer, don't select.
+    if (hp.block >= 0 && hp.block < (int)blocks_.size()
+        && blocks_[hp.block].type == BlockType::Image) {
+        const Block& ib = blocks_[hp.block];
+        if (!ib.imagePath.IsEmpty()) {
+            wxLaunchDefaultApplication(ib.imagePath);
+        }
+        return;
+    }
 
     // Link click: open in browser, don't start a selection.
     wxString linkUrl = LinkUrlAt(hp);

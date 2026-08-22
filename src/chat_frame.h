@@ -286,6 +286,7 @@ private:
 
     void StartTurn(const wxString& userText, std::vector<PendingImage> images = {});
     void EnqueueMessage(const wxString& text);
+    void EmitImageBlock(const std::string& hash, const std::string& mime, const std::string& name);
     // Builds and sends the next chat completion request from the current
     // history_ vector. Used both to start a turn and to continue after tool
     // results have been appended.
