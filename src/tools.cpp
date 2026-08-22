@@ -1,6 +1,7 @@
 #include "tools.h"
 #include "format_u8.h"
 #include "memory.h"
+#include "preferences.h"
 #include "run_config_store.h"
 #include "streaming_web_request.h"
 
@@ -632,6 +633,119 @@ std::string ToolWebSearch(const nlohmann::json& args) {
     return "No results (Exa MCP returned no parseable content).";
 }
 
+// ---------------- vision (experimental) ----------------
+
+std::string Base64Encode(const std::string& data) {
+    static const char* tbl =
+        "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    std::string out;
+    out.reserve(((data.size() + 2) / 3) * 4);
+    for (size_t i = 0; i < data.size(); i += 3) {
+        unsigned n = (unsigned char)data[i] << 16;
+        if (i + 1 < data.size()) n |= (unsigned char)data[i + 1] << 8;
+        if (i + 2 < data.size()) n |= (unsigned char)data[i + 2];
+        out.push_back(tbl[(n >> 18) & 63]);
+        out.push_back(tbl[(n >> 12) & 63]);
+        out.push_back(i + 1 < data.size() ? tbl[(n >> 6) & 63] : '=');
+        out.push_back(i + 2 < data.size() ? tbl[n & 63] : '=');
+    }
+    return out;
+}
+
+std::string MimeForImagePath(const std::string& path) {
+    std::string ext = std::filesystem::path(path).extension().string();
+    std::transform(ext.begin(), ext.end(), ext.begin(),
+                   [](unsigned char c) { return (char)std::tolower(c); });
+    if (ext == ".png") return "image/png";
+    if (ext == ".jpg" || ext == ".jpeg") return "image/jpeg";
+    if (ext == ".gif") return "image/gif";
+    if (ext == ".webp") return "image/webp";
+    return {};
+}
+
+std::string ToolAskVision(const nlohmann::json& args) {
+    std::string path = GetStringArg(args, "path");
+    if (path.empty()) return "Error: missing 'path' argument";
+
+    std::string question = GetStringArg(args, "question");
+    if (question.empty()) {
+        question =
+            "Describe this image in exhaustive detail. Transcribe all visible "
+            "text verbatim, and describe the layout, UI elements, colors, any "
+            "error messages, code, filenames, line numbers, and anything else "
+            "a person would need to act on this image without seeing it.";
+    }
+
+    std::ifstream f(path, std::ios::binary);
+    if (!f) return "Error: cannot open " + path;
+    std::ostringstream ss;
+    ss << f.rdbuf();
+    std::string bytes = ss.str();
+    if (bytes.empty()) return "Error: image file is empty: " + path;
+    if (bytes.size() > 32u * 1024u * 1024u)
+        return "Error: image too large (max 32 MiB inline): " + path;
+
+    std::string mime = MimeForImagePath(path);
+    if (mime.empty())
+        return "Error: unsupported image format (use png, jpg, gif, or webp): "
+               + path;
+
+    std::string key =
+        Preferences::GetApiKey(Preferences::Provider::DeepSeek)
+            .ToStdString(wxConvUTF8);
+    if (key.empty())
+        return "Error: no DeepSeek API key configured (Settings). Vision "
+               "requires a DeepSeek key and is not available on the free tier.";
+
+    std::string dataUrl = "data:" + mime + ";base64," + Base64Encode(bytes);
+
+    nlohmann::json req;
+    req["model"] = "deepseek-v4-flash-vision-exp";
+    req["messages"] = nlohmann::json::array();
+    req["messages"].push_back({
+        {"role", "user"},
+        {"content", nlohmann::json::array({
+            {{"type", "text"}, {"text", question}},
+            {{"type", "image_url"}, {"image_url", {{"url", dataUrl}}}},
+        })},
+    });
+    req["max_tokens"] = 4096;
+
+    WebRequestSpec spec;
+    spec.url = "https://api.deepseek.com/chat/completions";
+    spec.method = "POST";
+    spec.body = req.dump();
+    spec.bodyContentType = "application/json";
+    spec.headers.push_back({"Authorization", "Bearer " + key});
+    spec.connectTimeoutSeconds = 30;
+
+    WebResponse r = RequestSync(std::move(spec));
+    if (!r.ok) {
+        std::string detail = r.body;
+        if (detail.size() > 300) detail.resize(300);
+        return "Error: vision request failed (HTTP " + std::to_string(r.status)
+               + "): " + (r.error.empty() ? detail : r.error);
+    }
+
+    try {
+        nlohmann::json j = nlohmann::json::parse(r.body);
+        if (j.contains("choices") && j["choices"].is_array()
+            && !j["choices"].empty()) {
+            const auto& msg = j["choices"][0]["message"];
+            if (msg.contains("content") && msg["content"].is_string())
+                return CapOutput(msg["content"].get<std::string>());
+        }
+        if (j.contains("error")) return "Error: " + j["error"].dump();
+        std::string detail = r.body;
+        if (detail.size() > 300) detail.resize(300);
+        return "Error: unexpected vision response: " + detail;
+    } catch (...) {
+        std::string detail = r.body;
+        if (detail.size() > 300) detail.resize(300);
+        return "Error: could not parse vision response: " + detail;
+    }
+}
+
 // ---------------- definitions ----------------
 
 nlohmann::json ToolDef(const char* name, const char* desc, nlohmann::json params) {
@@ -812,6 +926,20 @@ nlohmann::json GetToolDefinitions() {
         {{"type", "object"},
          {"properties", {{"url", StrParam("Absolute URL (https assumed if scheme is omitted).")}}},
          {"required", {"url"}}}));
+
+    tools.push_back(ToolDef(
+        "ask_vision",
+        "Analyze a local image (screenshot, chart, photo, etc.) using the "
+        "DeepSeek vision model and return a textual description. Use this to "
+        "read text or understand visual content the user refers to by path. "
+        "Pass a specific question to focus the analysis; omit it for an "
+        "exhaustive verbatim transcription.",
+        {{"type", "object"},
+         {"properties", {
+             {"path", StrParam("Path to the image file (png/jpg/gif/webp).")},
+             {"question", StrParam("What to ask about the image (optional; defaults to exhaustive description).")},
+         }},
+         {"required", {"path"}}}));
 
     tools.push_back(ToolDef(
         "web_search",
@@ -1074,6 +1202,7 @@ std::string DispatchTool(const std::string& name, const nlohmann::json& args,
         if (name == "bash")          return CapOutput(ToolBash(args, token));
         if (name == "list_directory")return CapOutput(ToolListDirectory(args));
         if (name == "web_fetch")     return ToolWebFetch(args);   // already capped
+        if (name == "ask_vision")    return CapOutput(ToolAskVision(args));
         if (name == "web_search")    return ToolWebSearch(args);  // already capped
         if (name == "grit_history_search")
             return ToolGritHistorySearch(args, memory, currentSessionId);
