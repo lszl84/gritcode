@@ -582,7 +582,7 @@ ChatFrame::ChatFrame()
     cb.getStatus = [this, guiSync]() {
         return guiSync([this]() -> nlohmann::json {
             nlohmann::json queue = nlohmann::json::array();
-            for (const auto& q : pendingQueue_) queue.push_back(q);
+            for (const auto& q : pendingQueue_) queue.push_back(q.text);
             return {
                 {"streaming", streaming_},
                 {"toolIter", toolIter_},
@@ -615,8 +615,7 @@ ChatFrame::ChatFrame()
                 if (pendingQueue_.size() >= kMaxQueue_) {
                     return {{"sent", false}, {"reason", "queue_full"}};
                 }
-                pendingQueue_.push_back(text.ToStdString(wxConvUTF8));
-                UpdateQueueUI();
+                EnqueueMessage(text);
                 return {{"sent", true}, {"queued", true},
                         {"queueLen", (int)pendingQueue_.size()}};
             }
@@ -1732,17 +1731,20 @@ void ChatFrame::OnSend(wxCommandEvent&) {
     // synthesized event from MCP / Enter key.
     if (streaming_) {
         if (pendingQueue_.size() >= kMaxQueue_) return;
-        pendingQueue_.push_back(text.ToStdString(wxConvUTF8));
+        EnqueueMessage(text);
         input_->Clear();
-        UpdateQueueUI();
         return;
     }
 
     input_->Clear();
-    StartTurn(text);
+    std::vector<PendingImage> images = std::move(pendingImages_);
+    pendingImages_.clear();
+    RebuildImageRow();
+    StartTurn(text, std::move(images));
 }
 
-void ChatFrame::StartTurn(const wxString& userText) {
+void ChatFrame::StartTurn(const wxString& userText,
+                        std::vector<PendingImage> images) {
     // Render the user prompt block immediately.
     Block ub;
     ub.type = BlockType::UserPrompt;
@@ -1757,16 +1759,14 @@ void ChatFrame::StartTurn(const wxString& userText) {
         {"role", "user"},
         {"content", userText.ToStdString(wxConvUTF8)},
     };
-    if (!pendingImages_.empty()) {
+    if (!images.empty()) {
         nlohmann::json arr = nlohmann::json::array();
-        for (const auto& pi : pendingImages_) {
+        for (const auto& pi : images) {
             arr.push_back({{"sha256", pi.hash},
                            {"mime", pi.mime},
                            {"name", pi.name}});
         }
         userMsg["images"] = std::move(arr);
-        pendingImages_.clear();
-        RebuildImageRow();
     }
     history_.push_back(std::move(userMsg));
 
@@ -1776,6 +1776,16 @@ void ChatFrame::StartTurn(const wxString& userText) {
     toolIter_ = 0;
 
     StartCompletion();
+}
+
+void ChatFrame::EnqueueMessage(const wxString& text) {
+    QueuedMessage q;
+    q.text = text.ToStdString(wxConvUTF8);
+    q.images = std::move(pendingImages_);
+    pendingImages_.clear();
+    RebuildImageRow();
+    pendingQueue_.push_back(std::move(q));
+    UpdateQueueUI();
 }
 
 void ChatFrame::StartCompletion() {
@@ -2384,9 +2394,9 @@ void ChatFrame::EmitPendingThinking() {
 
 void ChatFrame::DispatchNextQueued() {
     if (pendingQueue_.empty()) return;
-    std::string next = std::move(pendingQueue_.front());
+    QueuedMessage next = std::move(pendingQueue_.front());
     pendingQueue_.erase(pendingQueue_.begin());
-    StartTurn(wxString::FromUTF8(next));
+    StartTurn(wxString::FromUTF8(next.text), std::move(next.images));
 }
 
 void ChatFrame::OnContinueQueue(wxCommandEvent&) {
@@ -2446,13 +2456,17 @@ void ChatFrame::RebuildChips() {
 
     constexpr size_t kMaxChars = 60;
     for (size_t i = 0; i < pendingQueue_.size(); ++i) {
-        wxString full = wxString::FromUTF8(pendingQueue_[i]);
+        const QueuedMessage& q = pendingQueue_[i];
+        wxString full = wxString::FromUTF8(q.text);
         wxString label = full;
         label.Replace("\n", " ");
         label.Replace("\r", " ");
         label.Replace("\t", " ");
         while (label.Replace("  ", " ")) {}
         label.Trim().Trim(false);
+        if (!q.images.empty()) {
+            label = FormatU8("[img {}] ", q.images.size()) + label;
+        }
         if (label.length() > kMaxChars)
             label = label.Left(kMaxChars - 1) + wxString::FromUTF8("\xE2\x80\xA6");
         if (label.IsEmpty()) label = "(empty)";
@@ -2484,11 +2498,12 @@ void ChatFrame::RebuildChips() {
         // has already shifted under the first CallAfter, and a stale `i`
         // would erase the wrong (or, at end-of-queue, a no-longer-valid)
         // entry.
-        std::string entry = pendingQueue_[i];
+        std::string entry = q.text;
         close->Bind(wxEVT_LEFT_DOWN, [this, entry](wxMouseEvent&) {
             CallAfter([this, entry]() {
-                auto it = std::find(pendingQueue_.begin(),
-                                    pendingQueue_.end(), entry);
+                auto it = std::find_if(
+                    pendingQueue_.begin(), pendingQueue_.end(),
+                    [&](const QueuedMessage& q) { return q.text == entry; });
                 if (it == pendingQueue_.end()) return;
                 pendingQueue_.erase(it);
                 UpdateQueueUI();

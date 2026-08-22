@@ -74,10 +74,16 @@ private:
     wxPanel* imageRow_ = nullptr;
     wxSizer* imageSizer_ = nullptr;
 
+    // A queued user message plus any images attached to it.
+    struct QueuedMessage {
+        std::string text;
+        std::vector<PendingImage> images;
+    };
+
     // Pending user messages typed/queued while a turn was in flight. On
     // natural turn end the front auto-dispatches; on error/cancel we land
     // in idle-queue mode.
-    std::vector<std::string> pendingQueue_;
+    std::vector<QueuedMessage> pendingQueue_;
     static constexpr size_t kMaxQueue_ = 5;
 
     // Toolbar row above the input. Plain wxBoxSizer with two labelled
@@ -278,7 +284,8 @@ private:
     // sseBuf_ (which doubles as raw-body capture under Storage_None).
     wxString ExtractErrorBody() const;
 
-    void StartTurn(const wxString& userText);
+    void StartTurn(const wxString& userText, std::vector<PendingImage> images = {});
+    void EnqueueMessage(const wxString& text);
     // Builds and sends the next chat completion request from the current
     // history_ vector. Used both to start a turn and to continue after tool
     // results have been appended.
