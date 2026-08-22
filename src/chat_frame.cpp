@@ -1020,6 +1020,7 @@ nlohmann::json ChatFrame::BuildBlocksSnapshot() const {
         case BlockType::Table:      return "table";
         case BlockType::ToolCall:   return "tool";
         case BlockType::Thinking:   return "thinking";
+        case BlockType::Image:      return "image";
         }
         return "?";
     };
@@ -1357,6 +1358,15 @@ void ChatFrame::RestoreCanvasFromHistory() {
             ub.runs.push_back(r);
             ub.visibleText = text;
             canvas_->AddBlock(std::move(ub));
+
+            if (m.contains("images") && m["images"].is_array()) {
+                for (const auto& img : m["images"]) {
+                    if (!img.is_object()) continue;
+                    EmitImageBlock(img.value("sha256", std::string{}),
+                                   img.value("mime", "image/png"),
+                                   img.value("name", std::string{}));
+                }
+            }
             continue;
         }
 
@@ -1754,6 +1764,9 @@ void ChatFrame::StartTurn(const wxString& userText,
     ub.runs.push_back(r);
     ub.visibleText = userText;
     canvas_->AddBlock(std::move(ub));
+    for (const auto& pi : images) {
+        EmitImageBlock(pi.hash, pi.mime, pi.name);
+    }
 
     nlohmann::json userMsg = {
         {"role", "user"},
@@ -1786,6 +1799,15 @@ void ChatFrame::EnqueueMessage(const wxString& text) {
     RebuildImageRow();
     pendingQueue_.push_back(std::move(q));
     UpdateQueueUI();
+}
+
+void ChatFrame::EmitImageBlock(const std::string& hash, const std::string& mime,
+                               const std::string& name) {
+    Block b;
+    b.type = BlockType::Image;
+    b.imagePath = wxString::FromUTF8(ImageStore::PathFor(hash, mime));
+    b.imageName = wxString::FromUTF8(name);
+    canvas_->AddBlock(std::move(b));
 }
 
 void ChatFrame::StartCompletion() {
