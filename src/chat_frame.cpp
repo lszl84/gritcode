@@ -8,6 +8,7 @@
 #include "image_store.h"
 #include <wx/clipbrd.h>
 #include <wx/dataobj.h>
+#include <wx/dcbuffer.h>
 #include "perf_log.h"
 #include <wx/sizer.h>
 #include <wx/wrapsizer.h>
@@ -75,6 +76,61 @@ public:
     }
 private:
     ChatFrame* frame_;
+};
+
+// Thumbnail with a small "x" badge overlaid on its top-right corner. The
+// badge is the delete affordance; the rest of the tile is inert for now.
+class ThumbnailItem : public wxPanel {
+public:
+    ThumbnailItem(wxWindow* parent, const wxBitmap& bmp,
+                  std::function<void()> onRemove)
+        : wxPanel(parent, wxID_ANY, wxDefaultPosition, wxSize(kSize, kSize)),
+          bmp_(bmp), onRemove_(std::move(onRemove)) {
+        SetMinSize(wxSize(kSize, kSize));
+        SetMaxSize(wxSize(kSize, kSize));
+        SetBackgroundStyle(wxBG_STYLE_PAINT);
+        SetToolTip("Remove image");
+        Bind(wxEVT_PAINT, &ThumbnailItem::OnPaint, this);
+        Bind(wxEVT_LEFT_DOWN, &ThumbnailItem::OnLeftDown, this);
+    }
+
+private:
+    static constexpr int kSize = 64;
+    static constexpr int kPad = 4;
+    static constexpr int kBadgeR = 9;
+
+    wxBitmap bmp_;
+    std::function<void()> onRemove_;
+
+    wxPoint BadgeCenter() const {
+        return wxPoint(kSize - kBadgeR - 1, kBadgeR + 1);
+    }
+
+    bool InBadge(const wxPoint& p) const {
+        wxPoint c = BadgeCenter();
+        int dx = p.x - c.x, dy = p.y - c.y;
+        return dx * dx + dy * dy <= (kBadgeR + 2) * (kBadgeR + 2);
+    }
+
+    void OnPaint(wxPaintEvent&) {
+        wxAutoBufferedPaintDC dc(this);
+        dc.SetBackground(wxBrush(wxColour(46, 46, 52)));
+        dc.Clear();
+        dc.DrawBitmap(bmp_, kPad, kPad, true);
+
+        wxPoint c = BadgeCenter();
+        dc.SetBrush(wxBrush(wxColour(28, 28, 32)));
+        dc.SetPen(wxPen(wxColour(90, 90, 98)));
+        dc.DrawCircle(c, kBadgeR);
+        dc.SetPen(wxPen(wxColour(225, 225, 230), 2));
+        dc.DrawLine(c.x - 4, c.y - 4, c.x + 4, c.y + 4);
+        dc.DrawLine(c.x - 4, c.y + 4, c.x + 4, c.y - 4);
+    }
+
+    void OnLeftDown(wxMouseEvent& e) {
+        if (InBadge(e.GetPosition())) onRemove_();
+        e.Skip();
+    }
 };
 
 // Per-model routing config. Resolved fresh at each StartCompletion so a model
@@ -821,25 +877,11 @@ void ChatFrame::RebuildImageRow() {
     imageSizer_->Clear(true);  // destroy old thumbnails and clear sizer items
 
     for (size_t i = 0; i < pendingImages_.size(); ++i) {
-        auto* item = new wxPanel(imageRow_);
-        auto* row = new wxBoxSizer(wxHORIZONTAL);
-
         wxImage img;
-        if (img.LoadFile(pendingImages_[i].path)) {
-            wxImage thumb = img.Scale(56, 56, wxIMAGE_QUALITY_HIGH);
-            auto* bmp = new wxStaticBitmap(item, wxID_ANY, wxBitmap(thumb));
-            row->Add(bmp, 0, wxALIGN_CENTER_VERTICAL | wxALL, 2);
-        }
-
-        auto* rm = new wxButton(item, wxID_ANY, "x",
-                                wxDefaultPosition, wxSize(20, 20));
-        rm->SetToolTip("Remove image");
-        rm->Bind(wxEVT_BUTTON, [this, i](wxCommandEvent&) {
-            RemovePendingImage((int)i);
-        });
-        row->Add(rm, 0, wxALIGN_CENTER_VERTICAL | wxLEFT, 2);
-
-        item->SetSizer(row);
+        if (!img.LoadFile(pendingImages_[i].path)) continue;
+        wxImage thumb = img.Scale(56, 56, wxIMAGE_QUALITY_HIGH);
+        auto* item = new ThumbnailItem(imageRow_, wxBitmap(thumb),
+                                       [this, i] { RemovePendingImage((int)i); });
         imageSizer_->Add(item, 0, wxALL, 2);
     }
 
