@@ -1734,7 +1734,7 @@ void ChatFrame::ShowImportDialog() {
 void ChatFrame::OnSend(wxCommandEvent&) {
     wxString text = input_->GetValue();
     text.Trim().Trim(false);
-    if (text.IsEmpty()) return;
+    if (text.IsEmpty() && pendingImages_.empty()) return;
 
     // Agent busy: append to the queue (the Send button is "Add" while busy).
     // Reaching kMaxQueue_ disables the button — defensive check for a
@@ -1755,15 +1755,17 @@ void ChatFrame::OnSend(wxCommandEvent&) {
 
 void ChatFrame::StartTurn(const wxString& userText,
                         std::vector<PendingImage> images) {
-    // Render the user prompt block immediately.
-    Block ub;
-    ub.type = BlockType::UserPrompt;
-    ub.rawText = userText;
-    InlineRun r;
-    r.text = userText;
-    ub.runs.push_back(r);
-    ub.visibleText = userText;
-    canvas_->AddBlock(std::move(ub));
+    // Render the user prompt block (skipped for image-only messages).
+    if (!userText.IsEmpty()) {
+        Block ub;
+        ub.type = BlockType::UserPrompt;
+        ub.rawText = userText;
+        InlineRun r;
+        r.text = userText;
+        ub.runs.push_back(r);
+        ub.visibleText = userText;
+        canvas_->AddBlock(std::move(ub));
+    }
     for (const auto& pi : images) {
         EmitImageBlock(pi.hash, pi.mime, pi.name);
     }
@@ -2487,7 +2489,11 @@ void ChatFrame::RebuildChips() {
         while (label.Replace("  ", " ")) {}
         label.Trim().Trim(false);
         if (!q.images.empty()) {
-            label = FormatU8("[img {}] ", q.images.size()) + label;
+            if (label.IsEmpty()) {
+                label = FormatU8("[img {}]", q.images.size());
+            } else {
+                label = FormatU8("[img {}] ", q.images.size()) + label;
+            }
         }
         if (label.length() > kMaxChars)
             label = label.Left(kMaxChars - 1) + wxString::FromUTF8("\xE2\x80\xA6");

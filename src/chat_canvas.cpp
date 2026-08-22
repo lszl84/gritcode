@@ -447,7 +447,8 @@ void ChatCanvas::LayoutBlock(wxDC& dc, Block& b, int contentWidth, int /*topSpac
 
         wxImage img;
         if (!b.imagePath.IsEmpty() && img.LoadFile(b.imagePath)) {
-            const int maxW = contentWidth;
+            int maxW = contentWidth - 2 * kImagePad;
+            if (maxW < 50) maxW = 50;
             const int maxH = 420;
             int w = img.GetWidth();
             int h = img.GetHeight();
@@ -1229,7 +1230,8 @@ void ChatCanvas::PaintBlock(wxDC& dc, const Block& b, int yTop, BlockPos selStar
 
     if (b.type == BlockType::Image) {
         // Subtle card behind the thumbnail; the bitmap is drawn inside.
-        const int cardW = (b.imageW > 0 ? b.imageW : contentW) + 2 * kImagePad;
+        const int cardW = (b.imageW > 0 ? b.imageW : (contentW - 2 * kImagePad))
+                          + 2 * kImagePad;
         const int cardH = (b.imageH > 0 ? b.imageH : 24) + 2 * kImagePad;
         dc.SetPen(*wxTRANSPARENT_PEN);
         dc.SetBrush(wxBrush(pal.tableHeaderBg));
