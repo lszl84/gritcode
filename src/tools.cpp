@@ -46,11 +46,52 @@ std::string GetStringArg(const nlohmann::json& args, const char* key) {
     return v.get<std::string>();
 }
 
+// Expand a leading "~" (and "~/...") to $HOME and expand $VAR / ${VAR}
+// environment-variable references. Everything else (including relative
+// paths) is left untouched so the process cwd still resolves it.
+std::string ExpandPath(const std::string& path) {
+    if (path.empty()) return path;
+    std::string out;
+    out.reserve(path.size() + 16);
+    size_t i = 0;
+    if (path[0] == '~' && (path.size() == 1 || path[1] == '/')) {
+        const char* home = std::getenv("HOME");
+        if (home && *home) { out += home; i = 1; }
+    }
+    for (; i < path.size(); ++i) {
+        if (path[i] == '$' && i + 1 < path.size()) {
+            if (path[i + 1] == '{') {
+                size_t close = path.find('}', i + 2);
+                if (close != std::string::npos) {
+                    std::string var = path.substr(i + 2, close - i - 2);
+                    const char* v = std::getenv(var.c_str());
+                    if (v) out += v;
+                    i = close;
+                    continue;
+                }
+            } else if (std::isalpha((unsigned char)path[i + 1]) || path[i + 1] == '_') {
+                size_t j = i + 1;
+                while (j < path.size()
+                       && (std::isalnum((unsigned char)path[j]) || path[j] == '_'))
+                    ++j;
+                std::string var = path.substr(i + 1, j - i - 1);
+                const char* v = std::getenv(var.c_str());
+                if (v) out += v;
+                i = j - 1;
+                continue;
+            }
+        }
+        out += path[i];
+    }
+    return out;
+}
+
 // ---------------- file/shell tools ----------------
 
 std::string ToolReadFile(const nlohmann::json& args) {
     std::string path = GetStringArg(args, "path");
     if (path.empty()) return "Error: missing 'path' argument";
+    path = ExpandPath(path);
 
     std::ifstream f(path);
     if (!f) return "Error: cannot open " + path;
@@ -73,6 +114,7 @@ std::string ToolReadFile(const nlohmann::json& args) {
 std::string ToolWriteFile(const nlohmann::json& args) {
     std::string path = GetStringArg(args, "path");
     if (path.empty()) return "Error: missing 'path' argument";
+    path = ExpandPath(path);
     if (!args.contains("content") || !args["content"].is_string())
         return "Error: missing 'content' argument";
     std::string content = args["content"].get<std::string>();
@@ -96,6 +138,7 @@ std::string ToolEditFile(const nlohmann::json& args) {
     std::string oldStr = GetStringArg(args, "old_str");
     std::string newStr = GetStringArg(args, "new_str");
     if (path.empty()) return "Error: missing 'path' argument";
+    path = ExpandPath(path);
     if (oldStr.empty()) return "Error: 'old_str' must not be empty";
 
     std::ifstream in(path, std::ios::binary);
@@ -364,6 +407,7 @@ std::string ToolBash(const nlohmann::json& args, ToolCancelToken* token) {
 std::string ToolListDirectory(const nlohmann::json& args) {
     std::string path = GetStringArg(args, "path");
     if (path.empty()) path = ".";
+    path = ExpandPath(path);
 
     namespace fs = std::filesystem;
     std::error_code ec;
@@ -666,6 +710,7 @@ std::string MimeForImagePath(const std::string& path) {
 std::string ToolAskVision(const nlohmann::json& args) {
     std::string path = GetStringArg(args, "path");
     if (path.empty()) return "Error: missing 'path' argument";
+    path = ExpandPath(path);
 
     std::string question = GetStringArg(args, "question");
     if (question.empty()) {
