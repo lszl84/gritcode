@@ -75,6 +75,8 @@ public:
     bool OnInit() override {
         PERF_SCOPE("OnInit");
         SetAppName("gritcode");
+        // Register JPEG/PNG/GIF/etc. decoders so image attachments load.
+        wxInitAllImageHandlers();
 #if wxCHECK_VERSION(3, 3, 0)
         // On Windows, wx 3.3 defaults to light mode — the app must
         // explicitly opt in to follow the system appearance.
