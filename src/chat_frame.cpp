@@ -1405,7 +1405,12 @@ void ChatFrame::OnImport(wxCommandEvent&) {
     nlohmann::json j;
     try { f >> j; }
     catch (...) {
-        wxMessageBox("Invalid session file.", "Import", wxOK | wxICON_ERROR);
+        wxMessageBox(
+            "Couldn't read this file as a gritcode session.\n\n"
+            "If you're sure it's a valid session file, it may have been "
+            "created by a newer gritcode version - try updating to the "
+            "latest version.",
+            "Import", wxOK | wxICON_ERROR);
         return;
     }
     if (!j.contains("messages") || !j["messages"].is_array()) {
