@@ -128,7 +128,11 @@ private:
     }
 
     void OnLeftDown(wxMouseEvent& e) {
-        if (InBadge(e.GetPosition())) onRemove_();
+        if (InBadge(e.GetPosition())) {
+            // Defer via the app so we don't destroy this window from inside
+            // its own mouse handler (wx use-after-free -> GTK crash).
+            wxTheApp->CallAfter(onRemove_);
+        }
         e.Skip();
     }
 };
@@ -880,8 +884,9 @@ void ChatFrame::RebuildImageRow() {
         wxImage img;
         if (!img.LoadFile(pendingImages_[i].path)) continue;
         wxImage thumb = img.Scale(56, 56, wxIMAGE_QUALITY_HIGH);
-        auto* item = new ThumbnailItem(imageRow_, wxBitmap(thumb),
-                                       [this, i] { RemovePendingImage((int)i); });
+        auto* item = new ThumbnailItem(
+            imageRow_, wxBitmap(thumb),
+            [this, hash = pendingImages_[i].hash] { RemovePendingImageByHash(hash); });
         imageSizer_->Add(item, 0, wxALL, 2);
     }
 
@@ -891,9 +896,11 @@ void ChatFrame::RebuildImageRow() {
     if (auto* fs = GetSizer()) fs->Layout();
 }
 
-void ChatFrame::RemovePendingImage(int index) {
-    if (index < 0 || index >= (int)pendingImages_.size()) return;
-    pendingImages_.erase(pendingImages_.begin() + index);
+void ChatFrame::RemovePendingImageByHash(const std::string& hash) {
+    auto it = std::find_if(pendingImages_.begin(), pendingImages_.end(),
+                           [&](const PendingImage& p) { return p.hash == hash; });
+    if (it == pendingImages_.end()) return;
+    pendingImages_.erase(it);
     RebuildImageRow();
 }
 

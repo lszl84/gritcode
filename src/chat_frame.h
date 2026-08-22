@@ -166,7 +166,7 @@ private:
     void RestoreSession();       // renders history_ into the canvas + clears loading
 
     void RebuildImageRow();
-    void RemovePendingImage(int index);
+    void RemovePendingImageByHash(const std::string& hash);
     bool TryPasteImage();
     bool HistoryIsLarge() const;           // >200 msgs or >250KB content
     void RestoreCanvasMaybeDeferred();     // loading placeholder + deferred restore when large
