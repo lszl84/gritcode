@@ -67,6 +67,19 @@ std::string MimeForImageFile(const std::string& path) {
     return {};
 }
 
+// Scale `img` to fill a square `size` x `size`, center-cropping any overflow,
+// so thumbnails keep a uniform square shape without distortion.
+wxBitmap SquareThumbnail(const wxImage& img, int size) {
+    int w = img.GetWidth();
+    int h = img.GetHeight();
+    if (w <= 0 || h <= 0) return wxNullBitmap;
+    int side = std::min(w, h);
+    int x = (w - side) / 2;
+    int y = (h - side) / 2;
+    wxImage crop = img.GetSubImage(wxRect(x, y, side, side));
+    return wxBitmap(crop.Scale(size, size, wxIMAGE_QUALITY_HIGH));
+}
+
 class FrameFileDropTarget : public wxFileDropTarget {
 public:
     explicit FrameFileDropTarget(ChatFrame* frame) : frame_(frame) {}
@@ -882,9 +895,8 @@ void ChatFrame::RebuildImageRow() {
     for (size_t i = 0; i < pendingImages_.size(); ++i) {
         wxImage img;
         if (!img.LoadFile(pendingImages_[i].path)) continue;
-        wxImage thumb = img.Scale(56, 56, wxIMAGE_QUALITY_HIGH);
         auto* item = new ThumbnailItem(
-            imageRow_, wxBitmap(thumb),
+            imageRow_, SquareThumbnail(img, 56),
             [this, hash = pendingImages_[i].hash] { RemovePendingImageByHash(hash); });
         imageSizer_->Add(item, 0, wxALL, 2);
     }
