@@ -55,6 +55,26 @@ constexpr int ID_PLAY     = wxID_HIGHEST + 13;
 constexpr int ID_EXPORT   = wxID_HIGHEST + 14;
 constexpr int ID_HAMBURGER = wxID_HIGHEST + 15;
 
+std::string MimeForImageFile(const std::string& path) {
+    std::string ext = wxFileName(path).GetExt().Lower().ToStdString(wxConvUTF8);
+    if (ext == "png") return "image/png";
+    if (ext == "jpg" || ext == "jpeg") return "image/jpeg";
+    if (ext == "gif") return "image/gif";
+    if (ext == "webp") return "image/webp";
+    return {};
+}
+
+class FrameFileDropTarget : public wxFileDropTarget {
+public:
+    explicit FrameFileDropTarget(ChatFrame* frame) : frame_(frame) {}
+    bool OnDropFiles(wxCoord, wxCoord, const wxArrayString& filenames) override {
+        frame_->AddDroppedFiles(filenames);
+        return true;
+    }
+private:
+    ChatFrame* frame_;
+};
+
 // Per-model routing config. Resolved fresh at each StartCompletion so a model
 // change during a tool-call loop applies on the next request.
 struct ModelRoute {
@@ -287,6 +307,12 @@ ChatFrame::ChatFrame()
     chipRow_->SetSizer(chipSizer_);
     chipRow_->Hide();
 
+    // Pending attached images: deletable thumbnails shown above the input.
+    imageRow_ = new wxPanel(panel);
+    imageSizer_ = new wxWrapSizer(wxHORIZONTAL);
+    imageRow_->SetSizer(imageSizer_);
+    imageRow_->Hide();
+
     auto* inputRow = new wxBoxSizer(wxHORIZONTAL);
     input_ = new wxTextCtrl(panel, ID_INPUT, "",
                             wxDefaultPosition, wxSize(-1, 60),
@@ -303,6 +329,7 @@ ChatFrame::ChatFrame()
     inputRow->Add(clearQueueBtn_, 0, wxALIGN_CENTER_VERTICAL | wxTOP, 6);
     inputRow->Add(sendBtn_, 0, wxALIGN_CENTER_VERTICAL | wxLEFT | wxTOP, 6);
     outer->Add(chipRow_, 0, wxEXPAND | wxTOP, 4);
+    outer->Add(imageRow_, 0, wxEXPAND | wxTOP, 4);
     outer->Add(inputRow, 0, wxEXPAND);
     outer->Add(toolbarRow, 0, wxEXPAND | wxTOP, 4);
 
@@ -741,6 +768,8 @@ ChatFrame::ChatFrame()
     };
     mcp_.Start(std::move(cb));
 
+    SetDropTarget(new FrameFileDropTarget(this));
+
     input_->SetFocus();
     SetMinSize(wxSize(620, 400));
 }
@@ -755,6 +784,70 @@ void ChatFrame::RestoreSession() {
     RestoreCanvasFromHistory();
     canvas_->SetLoading(false);
     canvas_->Refresh();
+}
+
+void ChatFrame::AddDroppedFiles(const wxArrayString& files) {
+    for (const auto& f : files) {
+        std::string path = f.ToStdString(wxConvUTF8);
+        std::string mime = MimeForImageFile(path);
+        if (mime.empty()) continue;
+
+        std::ifstream in(path, std::ios::binary);
+        if (!in) continue;
+        std::ostringstream ss;
+        ss << in.rdbuf();
+        std::string bytes = ss.str();
+        if (bytes.empty() || bytes.size() > 32u * 1024u * 1024u) continue;
+
+        std::string hash = ImageStore::Save(bytes, mime);
+        if (hash.empty()) continue;
+
+        PendingImage pi;
+        pi.hash = hash;
+        pi.mime = mime;
+        pi.name = wxFileName(path).GetFullName().ToStdString(wxConvUTF8);
+        pi.path = wxString::FromUTF8(ImageStore::PathFor(hash, mime));
+        pendingImages_.push_back(std::move(pi));
+    }
+    RebuildImageRow();
+}
+
+void ChatFrame::RebuildImageRow() {
+    imageSizer_->Clear(true);  // destroy old thumbnails and clear sizer items
+
+    for (size_t i = 0; i < pendingImages_.size(); ++i) {
+        auto* item = new wxPanel(imageRow_);
+        auto* row = new wxBoxSizer(wxHORIZONTAL);
+
+        wxImage img;
+        if (img.LoadFile(pendingImages_[i].path)) {
+            wxImage thumb = img.Scale(56, 56, wxIMAGE_QUALITY_HIGH);
+            auto* bmp = new wxStaticBitmap(item, wxID_ANY, wxBitmap(thumb));
+            row->Add(bmp, 0, wxALIGN_CENTER_VERTICAL | wxALL, 2);
+        }
+
+        auto* rm = new wxButton(item, wxID_ANY, "x",
+                                wxDefaultPosition, wxSize(20, 20));
+        rm->SetToolTip("Remove image");
+        rm->Bind(wxEVT_BUTTON, [this, i](wxCommandEvent&) {
+            RemovePendingImage((int)i);
+        });
+        row->Add(rm, 0, wxALIGN_CENTER_VERTICAL | wxLEFT, 2);
+
+        item->SetSizer(row);
+        imageSizer_->Add(item, 0, wxALL, 2);
+    }
+
+    bool any = !pendingImages_.empty();
+    imageRow_->Show(any);
+    imageRow_->GetContainingSizer()->Layout();
+    if (auto* fs = GetSizer()) fs->Layout();
+}
+
+void ChatFrame::RemovePendingImage(int index) {
+    if (index < 0 || index >= (int)pendingImages_.size()) return;
+    pendingImages_.erase(pendingImages_.begin() + index);
+    RebuildImageRow();
 }
 
 bool ChatFrame::HistoryIsLarge() const {
@@ -1557,8 +1650,22 @@ void ChatFrame::StartTurn(const wxString& userText) {
     ub.visibleText = userText;
     canvas_->AddBlock(std::move(ub));
 
-    history_.push_back({{"role", "user"},
-                        {"content", userText.ToStdString(wxConvUTF8)}});
+    nlohmann::json userMsg = {
+        {"role", "user"},
+        {"content", userText.ToStdString(wxConvUTF8)},
+    };
+    if (!pendingImages_.empty()) {
+        nlohmann::json arr = nlohmann::json::array();
+        for (const auto& pi : pendingImages_) {
+            arr.push_back({{"sha256", pi.hash},
+                           {"mime", pi.mime},
+                           {"name", pi.name}});
+        }
+        userMsg["images"] = std::move(arr);
+        pendingImages_.clear();
+        RebuildImageRow();
+    }
+    history_.push_back(std::move(userMsg));
 
     streaming_ = true;
     canvas_->SetThinking(true);

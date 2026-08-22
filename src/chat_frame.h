@@ -4,6 +4,9 @@
 #include <wx/textctrl.h>
 #include <wx/bmpbuttn.h>
 #include <wx/splitter.h>
+#include <wx/dnd.h>
+#include <wx/statbmp.h>
+#include <wx/wrapsizer.h>
 #include <wx/thread.h>
 #include <nlohmann/json.hpp>
 #include "chat_canvas.h"
@@ -39,6 +42,9 @@ public:
     // sessions (they are restored synchronously in the constructor).
     void StartSessionRestore();
 
+    // Handle files dropped onto the window (adds supported images).
+    void AddDroppedFiles(const wxArrayString& files);
+
 private:
     ChatCanvas* canvas_ = nullptr;
     wxTextCtrl* input_ = nullptr;
@@ -55,6 +61,18 @@ private:
     // queue is empty; rebuilt from pendingQueue_ on every queue change.
     wxPanel* chipRow_ = nullptr;
     wxSizer* chipSizer_ = nullptr;
+
+    // Pending attached images (drag-and-dropped / pasted), shown as
+    // deletable thumbnails above the input until the next send.
+    struct PendingImage {
+        std::string hash;
+        std::string mime;
+        std::string name;
+        wxString path;  // sidecar blob path used to build the thumbnail
+    };
+    std::vector<PendingImage> pendingImages_;
+    wxPanel* imageRow_ = nullptr;
+    wxSizer* imageSizer_ = nullptr;
 
     // Pending user messages typed/queued while a turn was in flight. On
     // natural turn end the front auto-dispatches; on error/cancel we land
@@ -146,6 +164,9 @@ private:
     // Graceful close — see OnClose.
     bool deferRestore_ = false;  // set when the constructor deferred the canvas restore
     void RestoreSession();       // renders history_ into the canvas + clears loading
+
+    void RebuildImageRow();
+    void RemovePendingImage(int index);
     bool HistoryIsLarge() const;           // >200 msgs or >250KB content
     void RestoreCanvasMaybeDeferred();     // loading placeholder + deferred restore when large
     bool quitRequested_ = false;
