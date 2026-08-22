@@ -319,6 +319,9 @@ ChatFrame::ChatFrame()
     input_ = new wxTextCtrl(panel, ID_INPUT, "",
                             wxDefaultPosition, wxSize(-1, 60),
                             wxTE_MULTILINE | wxTE_PROCESS_ENTER);
+    // wxTextCtrl has its own file-drop handler (inserts the path as text);
+    // override it so images dropped onto the input are attached.
+    input_->SetDropTarget(new FrameFileDropTarget(this));
     sendBtn_ = new wxButton(panel, ID_SEND, "Send");
     // Queue-mode buttons share the input row's slot; hidden until idle-queue.
     continueQueueBtn_ = new wxButton(panel, ID_QUEUE_CONTINUE, "Continue");
