@@ -5,6 +5,7 @@
 #include "preferences.h"
 #include "run_config_store.h"
 #include "settings_dialog.h"
+#include "image_store.h"
 #include "perf_log.h"
 #include <wx/sizer.h>
 #include <wx/wrapsizer.h>
@@ -1636,6 +1637,35 @@ void ChatFrame::DoSendActualRequest() {
                 m["reasoning_content"] = "";
             }
         }
+    }
+
+    // Convert stored image attachments into an ask_vision hint for the
+    // (text-only) chat model. The bytes live in the sidecar store; the model
+    // can't see them inline, so we point it at the blob path and ask it to
+    // use ask_vision. The `images` field is stripped from the wire message.
+    for (auto& m : messages) {
+        if (!m.is_object() || m.value("role", std::string{}) != "user"
+            || !m.contains("images") || !m["images"].is_array()) {
+            continue;
+        }
+        std::string note =
+            "\n\n[The user attached image(s). They are stored at these paths "
+            "and must be analyzed with the ask_vision tool:";
+        for (const auto& img : m["images"]) {
+            if (!img.is_object()) continue;
+            std::string hash = img.value("sha256", std::string{});
+            std::string mime = img.value("mime", "image/png");
+            std::string name = img.value("name", std::string{});
+            std::string path = ImageStore::PathFor(hash, mime);
+            if (path.empty()) continue;
+            note += "\n  - " + path;
+            if (!name.empty()) note += " (" + name + ")";
+        }
+        note += "\nUse ask_vision on each path to see them.]";
+
+        std::string content = m.value("content", std::string{});
+        m["content"] = content + note;
+        m.erase("images");
     }
 
     // For paid providers, refuse to send if no key is configured. The user
