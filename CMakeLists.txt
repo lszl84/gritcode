@@ -87,6 +87,7 @@ set(SRCS
     src/mcp_stdio.cpp
     src/memory.cpp
     src/session_store.cpp
+    src/image_store.cpp
     src/shell_env.cpp
     src/preferences.cpp
     src/settings_dialog.cpp
