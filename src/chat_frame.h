@@ -167,6 +167,7 @@ private:
 
     void RebuildImageRow();
     void RemovePendingImage(int index);
+    bool TryPasteImage();
     bool HistoryIsLarge() const;           // >200 msgs or >250KB content
     void RestoreCanvasMaybeDeferred();     // loading placeholder + deferred restore when large
     bool quitRequested_ = false;

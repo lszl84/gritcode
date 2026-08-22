@@ -6,6 +6,8 @@
 #include "run_config_store.h"
 #include "settings_dialog.h"
 #include "image_store.h"
+#include <wx/clipbrd.h>
+#include <wx/dataobj.h>
 #include "perf_log.h"
 #include <wx/sizer.h>
 #include <wx/wrapsizer.h>
@@ -850,6 +852,48 @@ void ChatFrame::RemovePendingImage(int index) {
     RebuildImageRow();
 }
 
+bool ChatFrame::TryPasteImage() {
+    if (!wxTheClipboard->Open()) return false;
+
+    wxBitmapDataObject bmpObj;
+    bool hasImage = wxTheClipboard->GetData(bmpObj);
+    wxTheClipboard->Close();
+
+    if (!hasImage || !bmpObj.GetBitmap().IsOk()) return false;
+
+    wxImage img = bmpObj.GetBitmap().ConvertToImage();
+    if (!img.IsOk()) return false;
+
+    wxString tmp = wxFileName::CreateTempFileName("gritimg");
+    if (tmp.empty()) return true;  // consumed the paste even if we can't save
+
+    if (!img.SaveFile(tmp, wxBITMAP_TYPE_PNG)) {
+        wxRemoveFile(tmp);
+        return true;
+    }
+
+    std::ifstream in(tmp.ToStdString(wxConvUTF8), std::ios::binary);
+    std::ostringstream ss;
+    ss << in.rdbuf();
+    in.close();
+    wxRemoveFile(tmp);
+
+    std::string bytes = ss.str();
+    if (bytes.empty()) return true;
+
+    std::string hash = ImageStore::Save(bytes, "image/png");
+    if (hash.empty()) return true;
+
+    PendingImage pi;
+    pi.hash = hash;
+    pi.mime = "image/png";
+    pi.name = "pasted.png";
+    pi.path = wxString::FromUTF8(ImageStore::PathFor(hash, "image/png"));
+    pendingImages_.push_back(std::move(pi));
+    RebuildImageRow();
+    return true;
+}
+
 bool ChatFrame::HistoryIsLarge() const {
     if (history_.size() > 200) return true;
     size_t chars = 0;
@@ -1017,6 +1061,13 @@ void ChatFrame::OnClose(wxCloseEvent& evt) {
 }
 
 void ChatFrame::OnInputKey(wxKeyEvent& e) {
+    // Ctrl+V with an image on the clipboard attaches it instead of pasting
+    // text; with text we fall through to the control's normal paste.
+    if (e.ControlDown() && e.GetKeyCode() == 'V') {
+        if (TryPasteImage()) return;
+        e.Skip();
+        return;
+    }
     if (e.GetKeyCode() == WXK_RETURN && !e.ShiftDown() && !e.ControlDown()) {
         wxCommandEvent ev(wxEVT_BUTTON, ID_SEND);
         OnSend(ev);
