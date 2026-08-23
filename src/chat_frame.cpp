@@ -3171,6 +3171,7 @@ void ChatFrame::OnSummaryStreamData(std::string_view chunk) {
 }
 
 void ChatFrame::OnSummaryStreamDone(WebResponse resp) {
+  try {
     if (quitRequested_) { Close(); return; }
     // User hit Escape during the summary call — abort the whole turn rather
     // than dropping the head with no summary and continuing.
@@ -3201,10 +3202,15 @@ void ChatFrame::OnSummaryStreamDone(WebResponse resp) {
         ++lead;
     summary = summary.substr(lead);
     ApplyCompaction(!summary.empty(), summary, std::string{});
+  } catch (const std::exception& e) {
+    std::fprintf(stderr, "[OnSummaryStreamDone] exception: %s\n", e.what());
+    throw;
+  }
 }
 
 void ChatFrame::ApplyCompaction(bool success, const std::string& summary,
                                 const std::string& error) {
+  try {
     int splitIdx = compactionSplitIdx_;
     int origHeadCount = compactionHeadCount_;
     compactionSplitIdx_ = -1;
@@ -3260,18 +3266,25 @@ void ChatFrame::ApplyCompaction(bool success, const std::string& summary,
         {"content", std::move(summaryBody)},
         {"isSummary", true},
     };
-    history_.push_back(std::move(summaryMsg));
 
 #ifndef NDEBUG
+    // Log before moving summaryMsg into history_ — a moved-from json is null
+    // and reading its content would throw type_error.
     LogDebug("=== COMPACTION split=" + std::to_string(splitIdx)
              + " hidden=" + std::to_string(origHeadCount)
              + " success=" + (success ? "true" : "false") + " ===");
     LogDebug(summaryMsg["content"].get<std::string>());
 #endif
 
+    history_.push_back(std::move(summaryMsg));
+
     historyCompactBaseCount_ = (int)history_.size();
     PersistActive();
 
     compacting_ = false;
     DoSendActualRequest();
+  } catch (const std::exception& e) {
+    std::fprintf(stderr, "[ApplyCompaction] exception: %s\n", e.what());
+    throw;
+  }
 }
