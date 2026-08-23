@@ -122,6 +122,11 @@ private:
     BlockPos selCaret_;
     bool selecting_ = false;
 
+    // Click-vs-drag gesture for Image blocks.
+    bool imageDragCandidate_ = false;
+    wxPoint imageDragStart_;
+    int imageDragBlock_ = -1;
+
     // Layout cache: total content height after most recent layout.
     int contentHeight_ = 0;
     int layoutWidth_ = -1;

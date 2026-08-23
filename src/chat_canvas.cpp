@@ -1,5 +1,6 @@
 #include "chat_canvas.h"
 #include "perf_log.h"
+#include <wx/dnd.h>
 #include <wx/dcbuffer.h>
 #include <wx/clipbrd.h>
 #include <wx/dataobj.h>
@@ -2084,13 +2085,17 @@ void ChatCanvas::OnLeftDown(wxMouseEvent& e) {
     BlockPos hp = HitTest(p);
     if (!hp.IsValid()) return;
 
-    // Image click: open the file with the system viewer, don't select.
+    // Image: begin a click-vs-drag gesture. A click opens the file; a drag
+    // past the threshold starts a file drag so the image can be attached to
+    // the message box.
     if (hp.block >= 0 && hp.block < (int)blocks_.size()
         && blocks_[hp.block].type == BlockType::Image) {
-        const Block& ib = blocks_[hp.block];
-        if (!ib.imagePath.IsEmpty()) {
-            wxLaunchDefaultApplication(ib.imagePath);
-        }
+        imageDragCandidate_ = true;
+        imageDragStart_ = e.GetPosition();
+        imageDragBlock_ = hp.block;
+        selAnchor_ = selCaret_ = {};
+        selecting_ = false;
+        CaptureMouse();
         return;
     }
 
@@ -2153,6 +2158,17 @@ void ChatCanvas::OnLeftDown(wxMouseEvent& e) {
 }
 
 void ChatCanvas::OnLeftUp(wxMouseEvent& /*e*/) {
+    if (imageDragCandidate_) {
+        imageDragCandidate_ = false;
+        if (HasCapture()) ReleaseMouse();
+        int blk = imageDragBlock_;
+        imageDragBlock_ = -1;
+        if (blk >= 0 && blk < (int)blocks_.size()
+            && !blocks_[blk].imagePath.IsEmpty()) {
+            wxLaunchDefaultApplication(blocks_[blk].imagePath);
+        }
+        return;
+    }
     if (selecting_ && HasCapture()) ReleaseMouse();
     selecting_ = false;
 }
@@ -2250,6 +2266,26 @@ void ChatCanvas::OnMotion(wxMouseEvent& e) {
         SetCursor(wxCURSOR_HAND);
     } else {
         SetCursor(wxNullCursor);
+    }
+
+    if (imageDragCandidate_) {
+        wxPoint cur = e.GetPosition();
+        int dx = cur.x - imageDragStart_.x;
+        int dy = cur.y - imageDragStart_.y;
+        if (dx * dx + dy * dy >= 25) {  // ~5px threshold
+            imageDragCandidate_ = false;
+            if (HasCapture()) ReleaseMouse();
+            int blk = imageDragBlock_;
+            imageDragBlock_ = -1;
+            if (blk >= 0 && blk < (int)blocks_.size()
+                && !blocks_[blk].imagePath.IsEmpty()) {
+                wxFileDataObject dobj;
+                dobj.AddFile(blocks_[blk].imagePath);
+                wxDropSource src(dobj, this);
+                src.DoDragDrop(wxDrag_CopyOnly);
+            }
+        }
+        return;
     }
 
     if (!selecting_) return;
