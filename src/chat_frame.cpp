@@ -9,6 +9,8 @@
 #include <wx/clipbrd.h>
 #include <wx/dataobj.h>
 #include <wx/dcbuffer.h>
+#include <wx/zipstrm.h>
+#include <wx/wfstream.h>
 #include "perf_log.h"
 #include <wx/sizer.h>
 #include <wx/wrapsizer.h>
@@ -23,6 +25,8 @@
 #include <wx/scrolwin.h>
 #include <wx/splitter.h>
 #include <algorithm>
+#include <map>
+#include <set>
 #include <chrono>
 #include <ctime>
 #include <fstream>
@@ -297,6 +301,155 @@ wxIconBundle LoadAppIcon() {
         }
     }
     return wxIconBundle();
+}
+
+struct ImageRef {
+    std::string hash;
+    std::string mime;
+    std::string name;
+};
+
+bool HistoryHasImages(const nlohmann::json& history) {
+    for (const auto& m : history) {
+        if (!m.is_object()) continue;
+        if (m.contains("images") && m["images"].is_array() && !m["images"].empty())
+            return true;
+    }
+    return false;
+}
+
+std::vector<ImageRef> CollectImageRefs(const nlohmann::json& history) {
+    std::vector<ImageRef> refs;
+    std::set<std::string> seen;
+    for (const auto& m : history) {
+        if (!m.is_object() || !m.contains("images") || !m["images"].is_array())
+            continue;
+        for (const auto& img : m["images"]) {
+            if (!img.is_object()) continue;
+            std::string hash = img.value("sha256", std::string{});
+            if (hash.empty() || seen.count(hash)) continue;
+            seen.insert(hash);
+            refs.push_back({hash, img.value("mime", "image/png"),
+                            img.value("name", std::string{})});
+        }
+    }
+    return refs;
+}
+
+std::string ReadAllStream(wxInputStream& in) {
+    std::string out;
+    char buf[8192];
+    for (;;) {
+        in.Read(buf, sizeof(buf));
+        size_t n = in.LastRead();
+        if (n == 0) break;
+        out.append(buf, n);
+    }
+    return out;
+}
+
+bool ExportToZip(const std::string& path, const nlohmann::json& j,
+                 const std::vector<ImageRef>& refs, std::string& err) {
+    wxFFileOutputStream out(wxString::FromUTF8(path));
+    if (!out.IsOk()) { err = "cannot write file"; return false; }
+    wxZipOutputStream zip(out);
+    if (!zip.IsOk()) { err = "cannot create archive"; return false; }
+
+    std::string body = j.dump(2, ' ', false,
+                              nlohmann::json::error_handler_t::replace);
+    if (!zip.PutNextEntry("session.json")) { err = "archive write failed"; return false; }
+    zip.Write(body.data(), body.size());
+
+    for (const auto& r : refs) {
+        std::string blobPath = ImageStore::PathFor(r.hash, r.mime);
+        if (blobPath.empty()) continue;  // robustness: skip missing blobs
+        std::ifstream in(blobPath, std::ios::binary);
+        if (!in) continue;
+        std::ostringstream ss;
+        ss << in.rdbuf();
+        std::string bytes = ss.str();
+        std::string fname = wxFileName(wxString::FromUTF8(blobPath))
+                                .GetFullName().ToStdString(wxConvUTF8);
+        if (!zip.PutNextEntry(wxString::FromUTF8("images/" + fname)))
+            continue;
+        zip.Write(bytes.data(), bytes.size());
+    }
+    zip.Close();
+    return true;
+}
+
+bool ImportFromZip(const std::string& path, nlohmann::json& outJ,
+                   std::string& err) {
+    wxFFileInputStream in(wxString::FromUTF8(path));
+    if (!in.IsOk()) { err = "cannot open file"; return false; }
+    wxZipInputStream zip(in);
+    if (!zip.IsOk()) { err = "cannot read archive"; return false; }
+
+    std::string sessionJson;
+    std::map<std::string, std::string> blobs;
+
+    wxZipEntry* entry = nullptr;
+    while ((entry = zip.GetNextEntry()) != nullptr) {
+        std::string name = entry->GetName().ToStdString(wxConvUTF8);
+        if (entry->IsDir()) { delete entry; continue; }
+        if (zip.OpenEntry(*entry)) {
+            std::string bytes = ReadAllStream(zip);
+            if (name == "session.json") sessionJson = std::move(bytes);
+            else if (name.rfind("images/", 0) == 0) blobs[name] = std::move(bytes);
+        }
+        delete entry;
+    }
+
+    if (sessionJson.empty()) { err = "session.json missing in archive"; return false; }
+    try { outJ = nlohmann::json::parse(sessionJson); }
+    catch (...) { err = "invalid session.json in archive"; return false; }
+
+    // Store extracted images and self-heal stale/mismatched hashes.
+    if (outJ.contains("messages") && outJ["messages"].is_array()) {
+        for (auto& m : outJ["messages"]) {
+            if (!m.is_object() || !m.contains("images") || !m["images"].is_array())
+                continue;
+            for (auto& img : m["images"]) {
+                if (!img.is_object()) continue;
+                std::string hash = img.value("sha256", std::string{});
+                std::string mime = img.value("mime", "image/png");
+                std::string prefix = "images/" + hash + ".";
+                std::string bytes;
+                for (const auto& [k, v] : blobs) {
+                    if (k.rfind(prefix, 0) == 0) { bytes = v; break; }
+                }
+                if (bytes.empty()) continue;  // robustness: blob missing
+                std::string savedHash = ImageStore::Save(bytes, mime);
+                if (!savedHash.empty() && savedHash != hash) {
+                    img["sha256"] = savedHash;
+                }
+            }
+        }
+    }
+    return true;
+}
+
+bool ImportSessionFile(const std::string& path, nlohmann::json& outJ,
+                       std::string& err) {
+    std::ifstream f(path, std::ios::binary);
+    if (!f) { err = "Failed to open file."; return false; }
+    char magic[4] = {0};
+    f.read(magic, 4);
+    f.close();
+    bool isZip = (magic[0] == 'P' && magic[1] == 'K'
+                  && magic[2] == 3 && magic[3] == 4);
+    if (isZip) return ImportFromZip(path, outJ, err);
+
+    std::ifstream fj(path);
+    try { fj >> outJ; }
+    catch (...) {
+        err = "Couldn't read this file as a gritcode session.\n\n"
+              "If you're sure it's a valid session file, it may have been "
+              "created by a newer gritcode version - try updating to the "
+              "latest version.";
+        return false;
+    }
+    return true;
 }
 
 }  // namespace
@@ -804,22 +957,30 @@ ChatFrame::ChatFrame()
         -> nlohmann::json {
         return guiSync([this, path]() -> nlohmann::json {
             nlohmann::json j;
-            j["version"] = 1;
+            j["version"] = HistoryHasImages(history_) ? 2 : 1;
             j["messages"] = history_;
-            std::ofstream f(path, std::ios::binary | std::ios::trunc);
-            if (!f) return {{"ok", false}, {"error", "cannot write file"}};
-            f << j.dump(2, ' ', false, nlohmann::json::error_handler_t::replace);
+            std::string err;
+            bool ok = false;
+            if (HistoryHasImages(history_)) {
+                ok = ExportToZip(path, j, CollectImageRefs(history_), err);
+            } else {
+                std::ofstream f(path, std::ios::binary | std::ios::trunc);
+                ok = (bool)f;
+                if (ok) f << j.dump(2, ' ', false,
+                                    nlohmann::json::error_handler_t::replace);
+                else err = "cannot write file";
+            }
+            if (!ok) return {{"ok", false}, {"error", err}};
             return {{"ok", true}, {"messageCount", (int)history_.size()}};
         });
     };
     cb.importSession = [this, guiSync](const std::string& path)
         -> nlohmann::json {
         return guiSync([this, path]() -> nlohmann::json {
-            std::ifstream f(path);
-            if (!f) return {{"ok", false}, {"error", "cannot open file"}};
             nlohmann::json j;
-            try { f >> j; }
-            catch (...) { return {{"ok", false}, {"error", "invalid JSON"}}; }
+            std::string err;
+            if (!ImportSessionFile(path, j, err))
+                return {{"ok", false}, {"error", err}};
             if (!j.contains("messages") || !j["messages"].is_array())
                 return {{"ok", false}, {"error", "no messages array"}};
 
@@ -1583,8 +1744,12 @@ void ChatFrame::OnExport(wxCommandEvent&) {
                      wxFD_SAVE | wxFD_OVERWRITE_PROMPT);
     if (dlg.ShowModal() != wxID_OK) return;
 
+    std::string path = dlg.GetPath().ToStdString(wxConvUTF8);
+    if (path.find(".gritsession") == std::string::npos)
+        path += ".gritsession";
+
     nlohmann::json j;
-    j["version"] = 1;
+    j["version"] = HistoryHasImages(history_) ? 2 : 1;
     j["exportedAt"] = []() {
         auto now = std::chrono::system_clock::now();
         auto t = std::chrono::system_clock::to_time_t(now);
@@ -1594,19 +1759,28 @@ void ChatFrame::OnExport(wxCommandEvent&) {
     }();
     j["messages"] = history_;
 
-    std::string path = dlg.GetPath().ToStdString(wxConvUTF8);
-    if (path.find(".gritsession") == std::string::npos)
-        path += ".gritsession";
+    std::string err;
+    bool ok = false;
+    if (HistoryHasImages(history_)) {
+        ok = ExportToZip(path, j, CollectImageRefs(history_), err);
+    } else {
+        std::ofstream f(path, std::ios::binary | std::ios::trunc);
+        ok = (bool)f;
+        if (ok) {
+            f << j.dump(2, ' ', false,
+                        nlohmann::json::error_handler_t::replace);
+        } else {
+            err = "Failed to write file.";
+        }
+    }
 
-    std::ofstream f(path, std::ios::binary | std::ios::trunc);
-    if (!f) {
-        wxMessageBox("Failed to write file.", "Export", wxOK | wxICON_ERROR);
+    if (!ok) {
+        wxMessageBox(wxString::FromUTF8(err), "Export",
+                     wxOK | wxICON_ERROR, this);
         return;
     }
-    f << j.dump(2, ' ', false, nlohmann::json::error_handler_t::replace);
-    wxMessageBox(wxString::Format("Session exported (%zu messages).",
-                                  history_.size()),
-                 "Export", wxOK | wxICON_INFORMATION);
+    wxMessageBox(FormatU8("Session exported ({} messages).", history_.size()),
+                 "Export", wxOK | wxICON_INFORMATION, this);
 }
 
 void ChatFrame::OnImport(wxCommandEvent&) {
@@ -1615,24 +1789,18 @@ void ChatFrame::OnImport(wxCommandEvent&) {
                      wxFD_OPEN | wxFD_FILE_MUST_EXIST);
     if (dlg.ShowModal() != wxID_OK) return;
 
-    std::ifstream f(dlg.GetPath().ToStdString(wxConvUTF8));
-    if (!f) {
-        wxMessageBox("Failed to open file.", "Import", wxOK | wxICON_ERROR);
-        return;
-    }
+    std::string path = dlg.GetPath().ToStdString(wxConvUTF8);
+
     nlohmann::json j;
-    try { f >> j; }
-    catch (...) {
-        wxMessageBox(
-            "Couldn't read this file as a gritcode session.\n\n"
-            "If you're sure it's a valid session file, it may have been "
-            "created by a newer gritcode version - try updating to the "
-            "latest version.",
-            "Import", wxOK | wxICON_ERROR);
+    std::string err;
+    if (!ImportSessionFile(path, j, err)) {
+        wxMessageBox(wxString::FromUTF8(err), "Import",
+                     wxOK | wxICON_ERROR, this);
         return;
     }
     if (!j.contains("messages") || !j["messages"].is_array()) {
-        wxMessageBox("No messages found in file.", "Import", wxOK | wxICON_ERROR);
+        wxMessageBox("No messages found in file.", "Import",
+                     wxOK | wxICON_ERROR, this);
         return;
     }
 
@@ -1642,7 +1810,7 @@ void ChatFrame::OnImport(wxCommandEvent&) {
     }
 
     // Store filename for display.
-    wxString fullPath = dlg.GetPath();
+    wxString fullPath = wxString::FromUTF8(path);
     importedFileName_ = fullPath.AfterLast('/');
     if (importedFileName_.empty()) importedFileName_ = fullPath;
 
@@ -1679,6 +1847,16 @@ void ChatFrame::ShowImportDialog() {
             ub.runs.push_back(r);
             ub.visibleText = ub.rawText;
             importCanvas_->AddBlock(std::move(ub));
+
+            if (m.contains("images") && m["images"].is_array()) {
+                for (const auto& img : m["images"]) {
+                    if (!img.is_object()) continue;
+                    importCanvas_->AddBlock(MakeImageBlock(
+                        img.value("sha256", std::string{}),
+                        img.value("mime", "image/png"),
+                        img.value("name", std::string{})));
+                }
+            }
         } else if (role == "assistant") {
             if (m.contains("content") && m["content"].is_string() && !m["content"].get<std::string>().empty()) {
                 std::string content = m["content"].get<std::string>();
@@ -1815,13 +1993,18 @@ void ChatFrame::EnqueueMessage(const wxString& text) {
     UpdateQueueUI();
 }
 
-void ChatFrame::EmitImageBlock(const std::string& hash, const std::string& mime,
+Block ChatFrame::MakeImageBlock(const std::string& hash, const std::string& mime,
                                const std::string& name) {
     Block b;
     b.type = BlockType::Image;
     b.imagePath = wxString::FromUTF8(ImageStore::PathFor(hash, mime));
     b.imageName = wxString::FromUTF8(name);
-    canvas_->AddBlock(std::move(b));
+    return b;
+}
+
+void ChatFrame::EmitImageBlock(const std::string& hash, const std::string& mime,
+                               const std::string& name) {
+    canvas_->AddBlock(MakeImageBlock(hash, mime, name));
 }
 
 void ChatFrame::StartCompletion() {
