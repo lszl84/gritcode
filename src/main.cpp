@@ -8,6 +8,12 @@
 
 #include <nlohmann/json.hpp>
 #include <cstdio>
+#ifndef NDEBUG
+#include <typeinfo>
+#ifndef _WIN32
+#include <execinfo.h>
+#endif
+#endif
 #include <cstring>
 #include <filesystem>
 #include <fstream>
@@ -95,6 +101,29 @@ public:
         frame->StartSessionRestore();
         return true;
     }
+
+#ifndef NDEBUG
+    bool OnExceptionInMainLoop() override {
+        try {
+            throw;
+        } catch (const std::exception& e) {
+            std::fprintf(stderr, "EXCEPTION std [%s]: %s\n",
+                         typeid(e).name(), e.what());
+        } catch (...) {
+            std::fprintf(stderr, "EXCEPTION unknown type\n");
+        }
+#ifndef _WIN32
+        void* frames[32];
+        int n = backtrace(frames, 32);
+        char** syms = backtrace_symbols(frames, n);
+        if (syms) {
+            for (int i = 0; i < n; ++i) std::fprintf(stderr, "  %s\n", syms[i]);
+            free(syms);
+        }
+#endif
+        return false;  // stop the loop; we've logged the type
+    }
+#endif
 };
 
 wxIMPLEMENT_APP_NO_MAIN(App);
