@@ -30,6 +30,8 @@ enum class ModelChoice {
     DeepseekPro = 2,
 };
 
+class DebugWindow;
+
 class ChatFrame : public wxFrame {
 public:
     ChatFrame();
@@ -286,6 +288,8 @@ private:
 
     void StartTurn(const wxString& userText, std::vector<PendingImage> images = {});
     void EnqueueMessage(const wxString& text);
+    void LogDebug(const std::string& line);
+    void OpenDebugWindow();
     nlohmann::json BuildModelView() const;
     void PruneToolOutputs(nlohmann::json& tail) const;
     void EmitImageBlock(const std::string& hash, const std::string& mime, const std::string& name);
@@ -318,6 +322,10 @@ private:
     // Set once per turn after an overflow-forced compaction, so a second
     // provider overflow surfaces an error instead of looping.
     bool overflowRetried_ = false;
+
+    // Debug log (debug builds only).
+    DebugWindow* debugWindow_ = nullptr;
+    std::string debugBuffer_;
 
     // Returns true if a summary request was kicked off (caller should
     // return immediately); false if history fits and the caller should

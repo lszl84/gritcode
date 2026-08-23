@@ -88,6 +88,7 @@ set(SRCS
     src/memory.cpp
     src/session_store.cpp
     src/image_store.cpp
+    src/debug_window.cpp
     src/shell_env.cpp
     src/preferences.cpp
     src/settings_dialog.cpp
