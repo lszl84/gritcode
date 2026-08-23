@@ -62,6 +62,38 @@ constexpr int ID_PLAY     = wxID_HIGHEST + 13;
 constexpr int ID_EXPORT   = wxID_HIGHEST + 14;
 constexpr int ID_HAMBURGER = wxID_HIGHEST + 15;
 
+// ---- Context management (compaction.md) ----
+constexpr int kContextWindowTokens   = 1'048'576;  // real DeepSeek limit
+constexpr int kHistoryBudgetTokens   = 150'000;    // Layer 2 cost-control trigger
+constexpr int kKeepRecentTokens      = 8'000;
+constexpr int kKeepRecentTurns       = 2;
+constexpr int kSummaryMaxTokens      = 8'000;
+constexpr int kBufferTokens          = 20'000;
+constexpr int kToolOutputMaxChars    = 2'000;
+constexpr int kPruneProtectTokens    = 40'000;
+constexpr int kPruneMinFreedTokens   = 20'000;
+
+int EstimateMessageTokens(const nlohmann::json& m) {
+    if (!m.is_object()) return 0;
+    int chars = 0;
+    if (m.contains("content") && m["content"].is_string())
+        chars += (int)m["content"].get_ref<const std::string&>().size();
+    if (m.contains("reasoning_content") && m["reasoning_content"].is_string())
+        chars += (int)m["reasoning_content"].get_ref<const std::string&>().size();
+    if (m.contains("tool_calls") && m["tool_calls"].is_array()) {
+        for (const auto& tc : m["tool_calls"]) {
+            if (tc.is_object() && tc.contains("function")
+                && tc["function"].is_object()
+                && tc["function"].contains("arguments")
+                && tc["function"]["arguments"].is_string())
+                chars += (int)tc["function"]["arguments"]
+                             .get_ref<const std::string&>().size();
+        }
+    }
+    return (chars + 3) / 4;
+}
+
+
 std::string MimeForImageFile(const std::string& path) {
     std::string ext = wxFileName(path).GetExt().Lower().ToStdString(wxConvUTF8);
     if (ext == "png") return "image/png";
@@ -1519,6 +1551,7 @@ void ChatFrame::RestoreCanvasFromHistory() {
     // against the immediately-following "tool" messages by tool_call_id.
     for (size_t i = 0; i < history_.size(); ++i) {
         const auto& m = history_[i];
+        if (m.value("compacted", false)) continue;  // hidden from the view
         std::string role = m.value("role", std::string{});
 
         if (role == "user") {
@@ -1993,6 +2026,88 @@ void ChatFrame::EnqueueMessage(const wxString& text) {
     UpdateQueueUI();
 }
 
+nlohmann::json ChatFrame::BuildModelView() const {
+    nlohmann::json view = nlohmann::json::array();
+
+    // System prompt is always the head.
+    if (!history_.empty() && history_[0].is_object()
+        && history_[0].value("role", std::string{}) == "system") {
+        view.push_back(history_[0]);
+    }
+
+    // Summary checkpoints become the new head after compaction.
+    for (const auto& m : history_) {
+        if (!m.is_object() || m.value("compacted", false)) continue;
+        if (m.value("isSummary", false)) view.push_back(m);
+    }
+
+    // Non-hidden, non-summary, non-system tail.
+    nlohmann::json tail = nlohmann::json::array();
+    for (const auto& m : history_) {
+        if (!m.is_object() || m.value("compacted", false)) continue;
+        if (m.value("isSummary", false)) continue;
+        if (m.value("role", std::string{}) == "system") continue;
+        tail.push_back(m);
+    }
+
+    PruneToolOutputs(tail);
+
+    for (auto& m : tail) view.push_back(std::move(m));
+    return view;
+}
+
+void ChatFrame::PruneToolOutputs(nlohmann::json& tail) const {
+    if (!tail.is_array() || tail.empty()) return;
+    int n = (int)tail.size();
+
+    // Walk newest->oldest: assign each message a turn index (0 = newest)
+    // and the cumulative tool-output token count below it.
+    std::vector<int> turnOf(n, 0);
+    std::vector<int> toolTokensBelow(n, 0);
+    int curTurn = 0;
+    int toolTokens = 0;
+    for (int i = n - 1; i >= 0; --i) {
+        turnOf[i] = curTurn;
+        const auto& m = tail[i];
+        if (m.value("role", std::string{}) == "user") ++curTurn;
+        toolTokensBelow[i] = toolTokens;
+        if (m.value("role", std::string{}) == "tool")
+            toolTokens += EstimateMessageTokens(m);
+    }
+
+    // First pass: how much would be freed by truncating stale outputs.
+    int freedChars = 0;
+    for (int i = 0; i < n; ++i) {
+        const auto& m = tail[i];
+        if (!m.is_object() || m.value("role", std::string{}) != "tool")
+            continue;
+        if (!m.contains("content") || !m["content"].is_string()) continue;
+        bool fresh = turnOf[i] < kKeepRecentTurns
+                     || toolTokensBelow[i] < kPruneProtectTokens;
+        if (fresh) continue;
+        const auto& c = m["content"].get_ref<const std::string&>();
+        if ((int)c.size() > kToolOutputMaxChars)
+            freedChars += (int)c.size() - kToolOutputMaxChars;
+    }
+
+    // Only prune when it actually matters.
+    if (freedChars / 4 < kPruneMinFreedTokens) return;
+
+    for (int i = 0; i < n; ++i) {
+        auto& m = tail[i];
+        if (!m.is_object() || m.value("role", std::string{}) != "tool")
+            continue;
+        if (!m.contains("content") || !m["content"].is_string()) continue;
+        bool fresh = turnOf[i] < kKeepRecentTurns
+                     || toolTokensBelow[i] < kPruneProtectTokens;
+        if (fresh) continue;
+        std::string c = m["content"].get<std::string>();
+        if ((int)c.size() <= kToolOutputMaxChars) continue;
+        m["content"] = c.substr(0, kToolOutputMaxChars)
+                       + "\n[output truncated by compaction]";
+    }
+}
+
 Block ChatFrame::MakeImageBlock(const std::string& hash, const std::string& mime,
                                const std::string& name) {
     Block b;
@@ -2035,7 +2150,7 @@ void ChatFrame::DoSendActualRequest() {
     // system prompt. Done per-request rather than baked into stored history
     // so the cwd stays current if the user switches sessions mid-conversation
     // and doesn't accumulate across turns.
-    nlohmann::json messages = history_;
+    nlohmann::json messages = BuildModelView();
     if (!activeCwd_.empty() && !messages.empty() && messages[0].is_object()
         && messages[0].value("role", std::string{}) == "system") {
         std::string base = messages[0].value("content", std::string{});
@@ -2771,64 +2886,34 @@ bool ChatFrame::MaybeCompactThenSend() {
     int histSize = (int)history_.size();
 
     // Hysteresis: require some growth since last compaction before retrying.
-    // Without this, every subsequent over-budget request would fire its own
-    // summary call even though history hasn't meaningfully grown.
     int growth = histSize - historyCompactBaseCount_;
     if (growth < 5 && historyCompactBaseCount_ > 0) return false;
 
-    // ~4 chars per token. Walk history summing content + reasoning + tool
-    // call argument strings; this is the same heuristic the request builder
-    // ends up implicitly using when serializing.
-    size_t totalChars = 0;
-    for (const auto& m : history_) {
-        if (!m.is_object()) continue;
-        if (m.contains("content") && m["content"].is_string())
-            totalChars += m["content"].get_ref<const std::string&>().size();
-        if (m.contains("reasoning_content") && m["reasoning_content"].is_string())
-            totalChars += m["reasoning_content"].get_ref<const std::string&>().size();
-        if (m.contains("tool_calls") && m["tool_calls"].is_array()) {
-            for (const auto& tc : m["tool_calls"]) {
-                if (tc.is_object() && tc.contains("function")
-                    && tc["function"].is_object()
-                    && tc["function"].contains("arguments")
-                    && tc["function"]["arguments"].is_string()) {
-                    totalChars += tc["function"]["arguments"]
-                                    .get_ref<const std::string&>().size();
-                }
-            }
-        }
-    }
-    // Fixed overhead for the system prompt + tool definitions (~8K tokens
-    // worth: enough to cover both the seeded prompt and the JSON tool defs).
-    totalChars += 32000;
-    int estTokens = (int)(totalChars / 4);
-
-    ModelRoute route = RouteFor(currentModel_);
-    // Reserve room for the response. route.maxTokens is the *upper-bound*
-    // per-request cap (e.g. 384K for DeepSeek) — larger than the entire
-    // context window for some models — so it can't be used as a reservation.
-    // 32K is a realistic ceiling for what any single turn actually produces;
-    // anything bigger gets server-clipped anyway.
-    constexpr int kResponseReserve = 32000;
-    int threshold = route.contextWindow - kResponseReserve - 8000;
-    if (threshold < 8000) threshold = 8000;
-
-    if (estTokens <= threshold) return false;
-
-    // Find the most recent non-summary user message — that's where the
-    // current turn starts, and everything before it is fair game to summarize.
-    // Splitting at a user message never leaves an orphan tool_call in the
-    // head or an orphan tool_result in the tail.
+    // Keep the last kKeepRecentTurns user turns verbatim; the durable history
+    // before them is what we compact. Split at the (kKeepRecentTurns)-th
+    // non-summary, non-compacted user message from the end.
     int splitIdx = -1;
+    int userCount = 0;
     for (int i = histSize - 1; i >= 0; --i) {
         if (!history_[i].is_object()) continue;
+        if (history_[i].value("compacted", false)) continue;
         if (history_[i].value("role", std::string{}) != "user") continue;
         if (history_[i].value("isSummary", false)) continue;
-        splitIdx = i;
-        break;
+        ++userCount;
+        if (userCount == kKeepRecentTurns) { splitIdx = i; break; }
     }
-    // Nothing older than the current turn to summarize — give up gracefully.
-    if (splitIdx <= 0) return false;
+    // Nothing older than the protected turns to summarize.
+    if (splitIdx <= 1) return false;
+
+    // History budget: only the visible (non-hidden) head counts. Hidden
+    // messages are already summarized and are never sent to the model.
+    int historyTokens = 0;
+    for (int i = 0; i < splitIdx; ++i) {
+        if (history_[i].is_object() && !history_[i].value("compacted", false))
+            historyTokens += EstimateMessageTokens(history_[i]);
+    }
+
+    if (historyTokens <= kHistoryBudgetTokens) return false;
 
     RunSummaryThenSend(splitIdx);
     return true;
@@ -2855,6 +2940,7 @@ void ChatFrame::RunSummaryThenSend(int splitIdx) {
     for (int i = 0; i < splitIdx; ++i) {
         const auto& m = history_[i];
         if (!m.is_object()) continue;
+        if (m.value("compacted", false)) continue;  // already summarized
         std::string role = m.value("role", std::string{});
         if (role == "system") continue;  // omit our own seed prompt
         headText += "--- ";
@@ -2913,7 +2999,7 @@ void ChatFrame::RunSummaryThenSend(int splitIdx) {
     nlohmann::json req;
     req["model"] = route.model;
     req["stream"] = true;
-    req["max_tokens"] = 2500;
+    req["max_tokens"] = kSummaryMaxTokens;
     req["messages"] = nlohmann::json::array({
         {{"role", "system"}, {"content", summarySystem}},
         {{"role", "user"},   {"content", summaryUser}},
@@ -3054,18 +3140,23 @@ void ChatFrame::ApplyCompaction(bool success, const std::string& summary,
             origHeadCount));
     }
 
+    // Mark the head as compacted (hidden from the model view, NEVER deleted
+    // from the durable session). Append the summary checkpoint as the new
+    // head of the model view. The session file keeps every message.
+    std::string ts = SessionStore::NowIso();
+    for (int i = 0; i < splitIdx; ++i) {
+        if (!history_[i].is_object()) continue;
+        history_[i]["compacted"] = true;
+        history_[i]["compactedAt"] = ts;
+    }
+
     nlohmann::json summaryMsg = {
-        {"role", "user"},
+        {"role", "assistant"},
         {"content", std::move(summaryBody)},
         {"isSummary", true},
     };
+    history_.push_back(std::move(summaryMsg));
 
-    nlohmann::json newHist = nlohmann::json::array();
-    newHist.push_back(std::move(summaryMsg));
-    for (int i = splitIdx; i < (int)history_.size(); ++i) {
-        newHist.push_back(std::move(history_[i]));
-    }
-    history_ = std::move(newHist);
     historyCompactBaseCount_ = (int)history_.size();
     PersistActive();
 
