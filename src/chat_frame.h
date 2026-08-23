@@ -315,6 +315,9 @@ private:
     std::string summaryText_;
     int compactionSplitIdx_ = -1;
     int compactionHeadCount_ = 0;
+    // Set once per turn after an overflow-forced compaction, so a second
+    // provider overflow surfaces an error instead of looping.
+    bool overflowRetried_ = false;
 
     // Returns true if a summary request was kicked off (caller should
     // return immediately); false if history fits and the caller should
@@ -334,6 +337,10 @@ private:
     // the next request still fits.
     void ApplyCompaction(bool success, const std::string& summary,
                          const std::string& error);
+    // Layer 3: aggressive compaction after a provider context-overflow 400.
+    // Keeps only the most recent user turn verbatim. Returns false if there
+    // is nothing to compact.
+    bool ForceCompactForOverflow();
 
     // After State_Completed: if any tool_calls were accumulated, dispatch them
     // and continue; otherwise finalize the turn.
