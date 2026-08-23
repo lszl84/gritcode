@@ -1978,6 +1978,7 @@ void ChatFrame::OnSend(wxCommandEvent&) {
 
 void ChatFrame::StartTurn(const wxString& userText,
                         std::vector<PendingImage> images) {
+    overflowRetried_ = false;
     // Render the user prompt block (skipped for image-only messages).
     if (!userText.IsEmpty()) {
         Block ub;
@@ -2420,6 +2421,21 @@ void ChatFrame::OnStreamDone(WebResponse resp) {
     }
 
     if (!resp.ok) {
+        // Layer 3: context-overflow recovery. Force one compaction and
+        // retry; if it overflows again, fall through to the error path.
+        if (resp.status == 400 && !overflowRetried_) {
+            std::string errBody =
+                ExtractErrorBody().ToStdString(wxConvUTF8);
+            bool isOverflow =
+                errBody.find("context") != std::string::npos
+                && (errBody.find("token") != std::string::npos
+                    || errBody.find("maximum") != std::string::npos);
+            if (isOverflow && ForceCompactForOverflow()) {
+                overflowRetried_ = true;
+                return;
+            }
+        }
+
         wxString detail;
         if (resp.status > 0) {
             detail = FormatU8("Error: HTTP {}", resp.status);
@@ -2915,6 +2931,23 @@ bool ChatFrame::MaybeCompactThenSend() {
 
     if (historyTokens <= kHistoryBudgetTokens) return false;
 
+    RunSummaryThenSend(splitIdx);
+    return true;
+}
+
+bool ChatFrame::ForceCompactForOverflow() {
+    // Keep only the most recent user turn verbatim; summarize everything
+    // before it. This is more aggressive than the normal 2-turn keep.
+    int splitIdx = -1;
+    for (int i = (int)history_.size() - 1; i >= 0; --i) {
+        if (!history_[i].is_object()) continue;
+        if (history_[i].value("compacted", false)) continue;
+        if (history_[i].value("role", std::string{}) != "user") continue;
+        if (history_[i].value("isSummary", false)) continue;
+        splitIdx = i;
+        break;
+    }
+    if (splitIdx <= 1) return false;
     RunSummaryThenSend(splitIdx);
     return true;
 }
