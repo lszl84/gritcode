@@ -2580,18 +2580,12 @@ void ChatFrame::HandleCompletion(const wxString& errorIfFailed) {
     auto token = std::make_shared<ToolCancelToken>();
     currentToolToken_ = token;
 
-    // Snapshot the session id so the worker can ask Memory to exclude this
-    // session from grit_history_search results — there's no point recalling
-    // the conversation the agent is already in.
-    std::string excludeSid = activeCwd_.empty() ? std::string{}
-                              : SessionStore::IdForCwd(activeCwd_);
-
     // OnToolBatchDone only runs after the previous worker exits, so by the
     // time we dispatch a new batch the prior thread is finished — join() is
     // a non-blocking handoff that lets us reuse the std::thread slot without
     // detaching (detach makes destructor cleanup impossible).
     if (toolWorker_.joinable()) toolWorker_.join();
-    toolWorker_ = std::thread([this, jobs, token, excludeSid, cwd = activeCwd_]() {
+    toolWorker_ = std::thread([this, jobs, token, cwd = activeCwd_]() {
         auto results = std::make_shared<std::vector<ToolBatchEntry>>();
         results->reserve(jobs->size());
         for (auto& job : *jobs) {
@@ -2602,7 +2596,7 @@ void ChatFrame::HandleCompletion(const wxString& errorIfFailed) {
                 r = std::move(job.parseError);
             } else {
                 r = DispatchTool(job.name, job.argsParsed, token.get(),
-                                 &memory_, excludeSid, cwd);
+                                 &memory_, cwd);
             }
             results->push_back({std::move(job.id), std::move(job.name),
                                 std::move(job.argsJson), std::move(r)});
