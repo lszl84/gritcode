@@ -286,6 +286,8 @@ private:
 
     void StartTurn(const wxString& userText, std::vector<PendingImage> images = {});
     void EnqueueMessage(const wxString& text);
+    nlohmann::json BuildModelView() const;
+    void PruneToolOutputs(nlohmann::json& tail) const;
     void EmitImageBlock(const std::string& hash, const std::string& mime, const std::string& name);
     Block MakeImageBlock(const std::string& hash, const std::string& mime, const std::string& name);
     // Builds and sends the next chat completion request from the current
