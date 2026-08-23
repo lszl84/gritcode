@@ -997,7 +997,9 @@ nlohmann::json GetToolDefinitions() {
     tools.push_back(ToolDef(
         "grit_history_search",
         "Search the transcripts of past gritcode conversations across "
-        "every project the user has worked on (excludes the current session). "
+        "every project the user has worked on, including the current "
+        "session (the current session is NOT excluded - use it to "
+        "recover details that context compaction hid from view). "
         "This is the AUTHORITATIVE source of prior-conversation recall - use "
         "it first whenever the user references any past work (\"last time\", "
         "\"once again\", \"we had\", \"how did we\", \"in <project>\"). "
@@ -1200,8 +1202,7 @@ std::string ToolRunProject(const nlohmann::json& args, const std::string& curren
     return "Error: unknown action '" + action + "'. Use get, set, forget, or detect.";
 }
 
-std::string ToolGritHistorySearch(const nlohmann::json& args, MemoryDB* memory,
-                                  const std::string& currentSessionId) {
+std::string ToolGritHistorySearch(const nlohmann::json& args, MemoryDB* memory) {
     if (!memory || !memory->IsOpen()) return "Memory index is not available.";
     std::string query = GetStringArg(args, "query");
     if (query.empty()) return "Error: 'query' is required.";
@@ -1210,7 +1211,7 @@ std::string ToolGritHistorySearch(const nlohmann::json& args, MemoryDB* memory,
         limit = args["limit"].get<int>();
     if (limit < 1) limit = 1;
     if (limit > 20) limit = 20;
-    auto hits = memory->Search(query, limit, currentSessionId);
+    auto hits = memory->Search(query, limit, std::string{});
     return MemoryDB::FormatSearchHits(hits);
 }
 
@@ -1237,7 +1238,6 @@ std::string ToolGritHistoryFetch(const nlohmann::json& args, MemoryDB* memory) {
 std::string DispatchTool(const std::string& name, const nlohmann::json& args,
                          ToolCancelToken* token,
                          MemoryDB* memory,
-                         const std::string& currentSessionId,
                          const std::string& currentCwd) {
     if (token && token->cancelled.load()) return "[cancelled]";
     try {
@@ -1250,7 +1250,7 @@ std::string DispatchTool(const std::string& name, const nlohmann::json& args,
         if (name == "ask_vision")    return CapOutput(ToolAskVision(args));
         if (name == "web_search")    return ToolWebSearch(args);  // already capped
         if (name == "grit_history_search")
-            return ToolGritHistorySearch(args, memory, currentSessionId);
+            return ToolGritHistorySearch(args, memory);
         if (name == "grit_history_fetch")
             return ToolGritHistoryFetch(args, memory);
         if (name == "run_project")

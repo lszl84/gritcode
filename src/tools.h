@@ -33,7 +33,6 @@ std::string DispatchTool(const std::string& name,
                          const nlohmann::json& args,
                          ToolCancelToken* token,
                          MemoryDB* memory,
-                         const std::string& currentSessionId,
                          const std::string& currentCwd);
 
 // Run a shell command without the 30s timeout. Used by the Play button for
