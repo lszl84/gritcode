@@ -3076,6 +3076,11 @@ void ChatFrame::RunSummaryThenSend(int splitIdx) {
     req["model"] = route.model;
     req["stream"] = true;
     req["max_tokens"] = kSummaryMaxTokens;
+    if (route.needsApiKey && route.provider == Preferences::Provider::DeepSeek) {
+        // Summarization is a mechanical task; keep the budget for the output
+        // rather than letting the reasoning model think the tokens away.
+        req["thinking"] = {{"type", "disabled"}};
+    }
     req["messages"] = nlohmann::json::array({
         {{"role", "system"}, {"content", summarySystem}},
         {{"role", "user"},   {"content", summaryUser}},
@@ -3184,7 +3189,18 @@ void ChatFrame::OnSummaryStreamDone(WebResponse resp) {
         ApplyCompaction(false, std::string{}, err);
         return;
     }
-    ApplyCompaction(!summaryText_.empty(), summaryText_, std::string{});
+    // Trim so whitespace-only/empty summaries count as failures and fall
+    // back to the "context dropped" path instead of an empty checkpoint.
+    std::string summary = summaryText_;
+    while (!summary.empty() && (summary.back() == '\n' || summary.back() == '\r'
+                                || summary.back() == ' ' || summary.back() == '\t'))
+        summary.pop_back();
+    size_t lead = 0;
+    while (lead < summary.size() && (summary[lead] == '\n' || summary[lead] == '\r'
+                                     || summary[lead] == ' ' || summary[lead] == '\t'))
+        ++lead;
+    summary = summary.substr(lead);
+    ApplyCompaction(!summary.empty(), summary, std::string{});
 }
 
 void ChatFrame::ApplyCompaction(bool success, const std::string& summary,
