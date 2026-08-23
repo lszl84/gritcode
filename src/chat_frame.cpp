@@ -6,6 +6,7 @@
 #include "run_config_store.h"
 #include "settings_dialog.h"
 #include "image_store.h"
+#include "debug_window.h"
 #include <wx/clipbrd.h>
 #include <wx/dataobj.h>
 #include <wx/dcbuffer.h>
@@ -559,6 +560,14 @@ ChatFrame::ChatFrame()
     toolbarRow->AddStretchSpacer(8);
     toolbarRow->Add(settingsBtn_, 0, wxALIGN_CENTER_VERTICAL);
     toolbarRow->Add(exportBtn_, 0, wxALIGN_CENTER_VERTICAL | wxLEFT, 4);
+#ifndef NDEBUG
+    auto* debugBtn = new wxButton(panel, wxID_ANY, "Log",
+                                  wxDefaultPosition, FromDIP(wxSize(48, -1)),
+                                  wxBORDER_NONE);
+    debugBtn->SetToolTip("Open debug log (request bodies + compaction)");
+    debugBtn->Bind(wxEVT_BUTTON, [this](wxCommandEvent&) { OpenDebugWindow(); });
+    toolbarRow->Add(debugBtn, 0, wxALIGN_CENTER_VERTICAL | wxLEFT, 4);
+#endif
 
     // Chip row — wraps to multiple lines if the queue gets long. Hidden
     // (via sizer Show) until the queue has at least one entry.
@@ -2027,6 +2036,31 @@ void ChatFrame::EnqueueMessage(const wxString& text) {
     UpdateQueueUI();
 }
 
+void ChatFrame::LogDebug(const std::string& line) {
+#ifndef NDEBUG
+    debugBuffer_ += line;
+    debugBuffer_ += '\n';
+    constexpr size_t kMaxBuffer = 1'500'000;
+    if (debugBuffer_.size() > kMaxBuffer) {
+        debugBuffer_.erase(0, debugBuffer_.size() - kMaxBuffer / 2);
+    }
+    if (debugWindow_) debugWindow_->Append(wxString::FromUTF8(line));
+#else
+    (void)line;
+#endif
+}
+
+void ChatFrame::OpenDebugWindow() {
+#ifndef NDEBUG
+    if (!debugWindow_) {
+        debugWindow_ = new DebugWindow(this);
+        debugWindow_->SetText(wxString::FromUTF8(debugBuffer_));
+    }
+    debugWindow_->Show();
+    debugWindow_->Raise();
+#endif
+}
+
 nlohmann::json ChatFrame::BuildModelView() const {
     nlohmann::json view = nlohmann::json::array();
 
@@ -2279,6 +2313,21 @@ void ChatFrame::DoSendActualRequest() {
     // for U+FFFD instead of throwing type_error.316.
     std::string body = req.dump(-1, ' ', false,
                                 nlohmann::json::error_handler_t::replace);
+
+#ifndef NDEBUG
+    {
+        std::string preview = body;
+        constexpr size_t kMaxLogBody = 400'000;
+        if (preview.size() > kMaxLogBody) {
+            preview.resize(kMaxLogBody);
+            preview += "\n...[truncated]";
+        }
+        LogDebug("=== REQUEST model=" + std::string(route.model)
+                 + " max_tokens=" + std::to_string(maxTokens)
+                 + " body_bytes=" + std::to_string(body.size()) + " ===");
+        LogDebug(preview);
+    }
+#endif
 
     WebRequestSpec spec;
     spec.url = route.url;
@@ -3048,6 +3097,19 @@ void ChatFrame::RunSummaryThenSend(int splitIdx) {
     std::string body = req.dump(-1, ' ', false,
                                 nlohmann::json::error_handler_t::replace);
 
+#ifndef NDEBUG
+    {
+        std::string preview = body;
+        constexpr size_t kMaxLogBody = 200'000;
+        if (preview.size() > kMaxLogBody) {
+            preview.resize(kMaxLogBody);
+            preview += "\n...[truncated]";
+        }
+        LogDebug("=== SUMMARY REQUEST body_bytes=" + std::to_string(body.size()) + " ===");
+        LogDebug(preview);
+    }
+#endif
+
     WebRequestSpec spec;
     spec.url = route.url;
     spec.method = "POST";
@@ -3183,6 +3245,13 @@ void ChatFrame::ApplyCompaction(bool success, const std::string& summary,
         {"isSummary", true},
     };
     history_.push_back(std::move(summaryMsg));
+
+#ifndef NDEBUG
+    LogDebug("=== COMPACTION split=" + std::to_string(splitIdx)
+             + " hidden=" + std::to_string(origHeadCount)
+             + " success=" + (success ? "true" : "false") + " ===");
+    LogDebug(summaryMsg["content"].get<std::string>());
+#endif
 
     historyCompactBaseCount_ = (int)history_.size();
     PersistActive();
