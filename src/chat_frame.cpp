@@ -1560,7 +1560,10 @@ void ChatFrame::RestoreCanvasFromHistory() {
     // against the immediately-following "tool" messages by tool_call_id.
     for (size_t i = 0; i < history_.size(); ++i) {
         const auto& m = history_[i];
-        if (m.value("compacted", false)) continue;  // hidden from the view
+        // Compacted messages are still part of the durable transcript.
+        // They are hidden from the MODEL view (BuildModelView), but MUST be
+        // rendered here so the user sees the full session, not just the
+        // post-compaction working set.
         std::string role = m.value("role", std::string{});
 
         if (role == "user") {
