@@ -914,7 +914,7 @@ std::string ToolBashDirect(const std::string& cmd, ToolCancelToken* token) {
 }
 #endif
 
-nlohmann::json GetToolDefinitions() {
+nlohmann::json GetToolDefinitions(bool includeGritHistory) {
     using J = nlohmann::json;
     J tools = J::array();
 
@@ -994,44 +994,47 @@ nlohmann::json GetToolDefinitions() {
          {"properties", {{"query", StrParam("Search query (natural language).")}}},
          {"required", {"query"}}}));
 
-    tools.push_back(ToolDef(
-        "grit_history_search",
-        "Search the transcripts of past gritcode conversations across "
-        "every project the user has worked on, including the current "
-        "session (the current session is NOT excluded - use it to "
-        "recover details that context compaction hid from view). "
-        "This is the AUTHORITATIVE source of prior-conversation recall - use "
-        "it first whenever the user references any past work (\"last time\", "
-        "\"once again\", \"we had\", \"how did we\", \"in <project>\"). "
-        "Query budget: typically 1-3 searches per user question. Start with "
-        "ONE broad keyword query; only run more if the first returned strong "
-        "hits. Returns short snippets (~20-token window) with session_id, "
-        "turn_index, and full_chars - follow up with grit_history_fetch.",
-        {{"type", "object"},
-         {"properties", {
-             {"query", StrParam("2-5 keywords. FTS5 MATCH expression (phrases in quotes, AND/OR/NOT, prefix*).")},
-             {"limit", {{"type", "integer"},
-                        {"description", "Max results (default 5, max 20)."}}},
-         }},
-         {"required", {"query"}}}));
+    if (includeGritHistory) {
+        tools.push_back(ToolDef(
+            "grit_history_search",
+            "Search the transcripts of past gritcode conversations across "
+            "every project the user has worked on, including the current "
+            "session (the current session is NOT excluded - use it to "
+            "recover details that context compaction hid from view). "
+            "This is the AUTHORITATIVE source of prior-conversation recall - use "
+            "it first whenever the user references any past work (\"last time\", "
+            "\"once again\", \"we had\", \"how did we\", \"in <project>\"). "
+            "Query budget: typically 1-3 searches per user question. Start with "
+            "ONE broad keyword query; only run more if the first returned strong "
+            "hits. Returns short snippets (~20-token window) with session_id, "
+            "turn_index, and full_chars - follow up with grit_history_fetch.",
+            {{"type", "object"},
+             {"properties", {
+                 {"query", StrParam("2-5 keywords. FTS5 MATCH expression (phrases in quotes, AND/OR/NOT, prefix*).")},
+                 {"limit", {{"type", "integer"},
+                            {"description", "Max results (default 5, max 20)."}}},
+             }},
+             {"required", {"query"}}}));
 
-    tools.push_back(ToolDef(
-        "grit_history_fetch",
-        "Read the full text of a specific past turn plus a window of "
-        "surrounding turns. Use after grit_history_search when a snippet "
-        "looks relevant. session_id + turn_index come directly from a "
-        "grit_history_search hit. Default window is 2 turns before + 2 after.",
-        {{"type", "object"},
-         {"properties", {
-             {"session_id", StrParam("Opaque session id from grit_history_search.")},
-             {"turn_index", {{"type", "integer"},
-                             {"description", "Turn index from grit_history_search."}}},
-             {"before", {{"type", "integer"},
-                         {"description", "How many prior turns to include (default 2, max 10)."}}},
-             {"after",  {{"type", "integer"},
-                         {"description", "How many following turns to include (default 2, max 10)."}}},
-         }},
-         {"required", {"session_id", "turn_index"}}}));
+        tools.push_back(ToolDef(
+            "grit_history_fetch",
+            "Read the full text of a specific past turn plus a window of "
+            "surrounding turns. Use after grit_history_search when a snippet "
+            "looks relevant. session_id + turn_index come directly from a "
+            "grit_history_search hit. Default window is 2 turns before + 2 after.",
+            {{"type", "object"},
+             {"properties", {
+                 {"session_id", StrParam("Opaque session id from grit_history_search.")},
+                 {"turn_index", {{"type", "integer"},
+                                 {"description", "Turn index from grit_history_search."}}},
+                 {"before", {{"type", "integer"},
+                             {"description", "How many prior turns to include (default 2, max 10)."}}},
+                 {"after",  {{"type", "integer"},
+                             {"description", "How many following turns to include (default 2, max 10)."}}},
+             }},
+             {"required", {"session_id", "turn_index"}}}));
+    }
+
 
     tools.push_back(ToolDef(
         "run_project",
@@ -1238,7 +1241,8 @@ std::string ToolGritHistoryFetch(const nlohmann::json& args, MemoryDB* memory) {
 std::string DispatchTool(const std::string& name, const nlohmann::json& args,
                          ToolCancelToken* token,
                          MemoryDB* memory,
-                         const std::string& currentCwd) {
+                         const std::string& currentCwd,
+                         bool enableGritHistory) {
     if (token && token->cancelled.load()) return "[cancelled]";
     try {
         if (name == "read_file")     return CapOutput(ToolReadFile(args));
@@ -1249,10 +1253,15 @@ std::string DispatchTool(const std::string& name, const nlohmann::json& args,
         if (name == "web_fetch")     return ToolWebFetch(args);   // already capped
         if (name == "ask_vision")    return CapOutput(ToolAskVision(args));
         if (name == "web_search")    return ToolWebSearch(args);  // already capped
-        if (name == "grit_history_search")
-            return ToolGritHistorySearch(args, memory);
-        if (name == "grit_history_fetch")
+        if (name == "grit_history_search" || name == "grit_history_fetch") {
+            if (!enableGritHistory)
+                return std::string("Error: ") + name +
+                       " is disabled by the user (Settings -> "
+                       "Enable Grit History tools).";
+            if (name == "grit_history_search")
+                return ToolGritHistorySearch(args, memory);
             return ToolGritHistoryFetch(args, memory);
+        }
         if (name == "run_project")
             return CapOutput(ToolRunProject(args, currentCwd));
         return "Error: unknown tool '" + name + "'";

@@ -879,6 +879,7 @@ ChatFrame::ChatFrame()
                 {"modelIndex", Preferences::GetLastModelIndex()},
                 {"hasDeepseekKey",
                  Preferences::HasApiKey(Preferences::Provider::DeepSeek)},
+                {"enableGritHistory", Preferences::GetEnableGritHistory()},
             };
         });
     };
@@ -2197,11 +2198,28 @@ void ChatFrame::DoSendActualRequest() {
     // so the cwd stays current if the user switches sessions mid-conversation
     // and doesn't accumulate across turns.
     nlohmann::json messages = BuildModelView();
-    if (!activeCwd_.empty() && !messages.empty() && messages[0].is_object()
+    if (!messages.empty() && messages[0].is_object()
         && messages[0].value("role", std::string{}) == "system") {
         std::string base = messages[0].value("content", std::string{});
-        messages[0]["content"] =
-            base + "\n\nWorking directory: " + activeCwd_;
+        std::string extra;
+        if (!activeCwd_.empty())
+            extra += "\n\nWorking directory: " + activeCwd_;
+        // When the user disabled Grit History tools, explicitly countermand
+        // the baked "use grit_history_search" system-prompt guidance so the
+        // agent neither attempts the (now-absent) tools nor leans on local
+        // cross-project history. Re-enabling makes the tools reappear in the
+        // next request's tools array, which is the agent's source of truth
+        // for what it may call.
+        if (!Preferences::GetEnableGritHistory()) {
+            extra +=
+                "\n\nGrit History tools (grit_history_search, "
+                "grit_history_fetch) are DISABLED for this session by the "
+                "user. Do not call them - they will return an error. Do not "
+                "reference or rely on prior conversation history from other "
+                "projects or sessions.";
+        }
+        if (!extra.empty())
+            messages[0]["content"] = base + extra;
     }
 
     // Defensive: drop consecutive same-role user/assistant messages. Both
@@ -2317,7 +2335,7 @@ void ChatFrame::DoSendActualRequest() {
     req["stream"] = true;
     req["max_tokens"] = maxTokens;
     req["messages"] = std::move(messages);
-    req["tools"] = GetToolDefinitions();
+    req["tools"] = GetToolDefinitions(Preferences::GetEnableGritHistory());
 
     // error_handler_t::replace silently swaps invalid UTF-8 bytes in any
     // history string (bash output, file contents, model glitches, user paste)
@@ -2645,7 +2663,9 @@ void ChatFrame::HandleCompletion(const wxString& errorIfFailed) {
     // a non-blocking handoff that lets us reuse the std::thread slot without
     // detaching (detach makes destructor cleanup impossible).
     if (toolWorker_.joinable()) toolWorker_.join();
-    toolWorker_ = std::thread([this, jobs, token, cwd = activeCwd_]() {
+    bool enableGrit = Preferences::GetEnableGritHistory();
+    toolWorker_ = std::thread([this, jobs, token, cwd = activeCwd_,
+                               enableGrit]() {
         auto results = std::make_shared<std::vector<ToolBatchEntry>>();
         results->reserve(jobs->size());
         for (auto& job : *jobs) {
@@ -2656,7 +2676,7 @@ void ChatFrame::HandleCompletion(const wxString& errorIfFailed) {
                 r = std::move(job.parseError);
             } else {
                 r = DispatchTool(job.name, job.argsParsed, token.get(),
-                                 &memory_, cwd);
+                                 &memory_, cwd, enableGrit);
             }
             results->push_back({std::move(job.id), std::move(job.name),
                                 std::move(job.argsJson), std::move(r)});

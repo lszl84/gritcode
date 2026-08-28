@@ -23,6 +23,7 @@ public:
 private:
     wxTextCtrl*   keyCtrl_ = nullptr;
     wxCheckBox*   showCb_  = nullptr;
+    wxCheckBox*   gritHistoryCb_ = nullptr;
     wxStaticText* hint_    = nullptr;
 
     bool keyringWasBroken_ = false;  // snapshot at dialog-open time
