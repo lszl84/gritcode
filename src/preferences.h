@@ -31,6 +31,14 @@ public:
     static int  GetLastModelIndex();
     static void SetLastModelIndex(int idx);
 
+    // Whether the agent may see and call grit_history_search/fetch.
+    // Defaults to true. When false, those tools are omitted from every
+    // request's "tools" array and DispatchTool rejects them with an error,
+    // so an exported/shared session never surfaces the local user's
+    // cross-project history. Persisted in wxConfig across sessions.
+    static bool GetEnableGritHistory();
+    static void SetEnableGritHistory(bool enabled);
+
     // ---- API keys (wxSecretStore) ----
 
     enum class Provider {

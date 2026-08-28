@@ -18,6 +18,7 @@ const wxString kUsername      = "api_key";
 
 const char* kModelIndexKey    = "/UI/LastModelIndex";
 const char* kModelExplicitKey = "/UI/ModelExplicit";
+const char* kEnableGritKey    = "/UI/EnableGritHistory";
 
 // wxFileConfig key for the plaintext API-key fallback.
 const char* kApiKeyPlaintext  = "/ApiKey/DeepSeek";
@@ -76,6 +77,21 @@ void Preferences::SetLastModelIndex(int idx) {
     auto* cfg = wxConfigBase::Get();
     cfg->Write(kModelIndexKey, (long)idx);
     cfg->Write(kModelExplicitKey, 1L);
+    cfg->Flush();
+}
+
+bool Preferences::GetEnableGritHistory() {
+    auto* cfg = wxConfigBase::Get();
+    if (!cfg) return true;  // default on
+    bool v = true;
+    cfg->Read(kEnableGritKey, &v, true);
+    return v;
+}
+
+void Preferences::SetEnableGritHistory(bool enabled) {
+    auto* cfg = wxConfigBase::Get();
+    if (!cfg) return;
+    cfg->Write(kEnableGritKey, enabled);
     cfg->Flush();
 }
 

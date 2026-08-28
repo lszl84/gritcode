@@ -7,7 +7,9 @@ class MemoryDB;
 
 // Returns the OpenAI-compatible "tools" array describing all tools the agent
 // can call. Pass this as the "tools" field of the chat completions request.
-nlohmann::json GetToolDefinitions();
+// When includeGritHistory is false, grit_history_search/fetch are omitted so
+// the model cannot see or call them.
+nlohmann::json GetToolDefinitions(bool includeGritHistory);
 
 // Cancellation handle threaded into the worker that runs a tool batch.
 // The GUI flips `cancelled` from the GUI thread (Escape key); the worker
@@ -28,12 +30,14 @@ struct ToolCancelToken {
 // long-running tools (bash) periodically check it and abort cleanly.
 // `memory` + `currentSessionId` back the grit_history_search/fetch tools.
 // Pass nullptr for `memory` if the index isn't open (those tools return a
-// "Memory index unavailable" string in that case).
+// "Memory index unavailable" string in that case). When enableGritHistory is
+// false, grit_history_search/fetch return a "disabled by the user" error.
 std::string DispatchTool(const std::string& name,
                          const nlohmann::json& args,
                          ToolCancelToken* token,
                          MemoryDB* memory,
-                         const std::string& currentCwd);
+                         const std::string& currentCwd,
+                         bool enableGritHistory);
 
 // Run a shell command without the 30s timeout. Used by the Play button for
 // long-running builds. Same cancellation semantics as ToolBash (SIGTERM on

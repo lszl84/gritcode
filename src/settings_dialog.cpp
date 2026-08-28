@@ -64,6 +64,28 @@ SettingsDialog::SettingsDialog(wxWindow* parent)
     }
     outer->Add(hint_, 0, wxLEFT | wxRIGHT | wxTOP, 12);
 
+    // ---- Agent tools section ----
+    auto* toolsHeading = new wxStaticText(this, wxID_ANY, "Agent tools");
+    wxFont thf = toolsHeading->GetFont();
+    thf.MakeBold();
+    toolsHeading->SetFont(thf);
+    outer->Add(toolsHeading, 0, wxLEFT | wxRIGHT | wxTOP, 12);
+
+    gritHistoryCb_ = new wxCheckBox(this, wxID_ANY,
+        "Enable Grit History tools");
+    gritHistoryCb_->SetValue(Preferences::GetEnableGritHistory());
+    outer->Add(gritHistoryCb_, 0, wxLEFT | wxRIGHT | wxTOP, 12);
+
+    auto* toolsHint = new wxStaticText(this, wxID_ANY,
+        "When enabled, the agent can search your past gritcode sessions "
+        "across projects (grit_history_search/fetch).\n"
+        "Turn this off to create self-contained sessions that can be "
+        "exported and shared without referencing your other work.");
+    wxFont th = toolsHint->GetFont();
+    th.SetPointSize(th.GetPointSize() - 1);
+    toolsHint->SetFont(th);
+    outer->Add(toolsHint, 0, wxLEFT | wxRIGHT | wxTOP, 4);
+
     outer->AddStretchSpacer(1);
 
     // ---- Buttons ----
@@ -149,6 +171,9 @@ void SettingsDialog::OnSave(wxCommandEvent& evt) {
         // single source of truth.
         Preferences::SetApiKeyPlaintext(provider, wxString());
     }
+
+    // Persist the Grit History tools toggle.
+    Preferences::SetEnableGritHistory(gritHistoryCb_->IsChecked());
 
     evt.Skip();  // let default handler close with wxID_OK
 }
