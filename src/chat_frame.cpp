@@ -1460,6 +1460,7 @@ void ChatFrame::CreateNewSession() {
     }
     historyCompactBaseCount_ = 0;  // fresh compaction gate for the new session
     store_.SetLastActiveCwd(activeCwd_);
+    ChdirToCwd(activeCwd_);  // keep the process cwd in sync with activeCwd_
     RestoreCanvasMaybeDeferred();
     RefreshSessionChoice();
 }
@@ -2172,6 +2173,13 @@ void ChatFrame::StartCompletion() {
 }
 
 void ChatFrame::DoSendActualRequest() {
+    // Re-sync the process cwd to the active session right before every model
+    // turn. The bash/list_directory/read_file/etc. tools fork in the process
+    // cwd, so this must match activeCwd_ or the agent ends up operating in the
+    // previous session's folder. Cheap (one syscall) and covers any call site
+    // that forgets to chdir after changing activeCwd_.
+    ChdirToCwd(activeCwd_);
+
     // Reset per-completion stream state.
     activeAssistantText_.clear();
     activeReasoning_.clear();
