@@ -172,6 +172,8 @@ private:
     // Graceful close — see OnClose.
     bool deferRestore_ = false;  // set when the constructor deferred the canvas restore
     void RestoreSession();       // renders history_ into the canvas + clears loading
+    wxTimer* restoreTimer_ = nullptr;
+    void OnRestoreTimer(wxTimerEvent&);
 
     void RebuildImageRow();
     void RemovePendingImageByHash(const std::string& hash);

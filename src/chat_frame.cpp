@@ -1056,14 +1056,21 @@ ChatFrame::ChatFrame()
 
 void ChatFrame::StartSessionRestore() {
     if (!deferRestore_) return;
-    // The constructor called SetLoading(true) before the window was realized,
-    // so its Refresh() never reached the screen. Force a synchronous paint of
-    // the "Loading Session..." placeholder now — otherwise the heavy restore
-    // below blocks the main thread before the first paint and startup shows
-    // an empty frame instead of the placeholder.
-    canvas_->Refresh();
-    Update();
-    CallAfter([this] { RestoreSession(); });
+    // The constructor set the loading flag before the window was realized, so
+    // a synchronous Update() here runs before the first layout/paint and the
+    // placeholder never reaches the screen (startup shows an empty frame).
+    // Defer the heavy restore to a short one-shot timer instead: the event
+    // loop processes the initial show/size/paint events first — painting
+    // "Loading Session..." — and only then fires the timer to run the restore.
+    if (!restoreTimer_) {
+        restoreTimer_ = new wxTimer(this);
+        Bind(wxEVT_TIMER, &ChatFrame::OnRestoreTimer, this);
+    }
+    restoreTimer_->StartOnce(40);
+}
+
+void ChatFrame::OnRestoreTimer(wxTimerEvent&) {
+    RestoreSession();
 }
 
 void ChatFrame::RestoreSession() {
