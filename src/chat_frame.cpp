@@ -1056,6 +1056,13 @@ ChatFrame::ChatFrame()
 
 void ChatFrame::StartSessionRestore() {
     if (!deferRestore_) return;
+    // The constructor called SetLoading(true) before the window was realized,
+    // so its Refresh() never reached the screen. Force a synchronous paint of
+    // the "Loading Session..." placeholder now — otherwise the heavy restore
+    // below blocks the main thread before the first paint and startup shows
+    // an empty frame instead of the placeholder.
+    canvas_->Refresh();
+    Update();
     CallAfter([this] { RestoreSession(); });
 }
 
