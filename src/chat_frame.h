@@ -37,13 +37,6 @@ public:
     ChatFrame();
     ~ChatFrame() override;
 
-    // Deferred startup restore. For large sessions the constructor shows
-    // a "Loading Session..." placeholder and returns without rendering the
-    // canvas; main() calls this after Show() so the placeholder paints
-    // before the heavy restore runs on the main thread. No-op for small
-    // sessions (they are restored synchronously in the constructor).
-    void StartSessionRestore();
-
     // Handle files dropped onto the window (adds supported images).
     void AddDroppedFiles(const wxArrayString& files);
 
@@ -170,10 +163,7 @@ private:
     std::thread persistWorker_;
 
     // Graceful close — see OnClose.
-    bool deferRestore_ = false;  // set when the constructor deferred the canvas restore
     void RestoreSession();       // renders history_ into the canvas + clears loading
-    wxTimer* restoreTimer_ = nullptr;
-    void OnRestoreTimer(wxTimerEvent&);
 
     void RebuildImageRow();
     void RemovePendingImageByHash(const std::string& hash);

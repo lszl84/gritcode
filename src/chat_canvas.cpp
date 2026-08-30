@@ -1140,6 +1140,15 @@ void ChatCanvas::OnPaint(wxPaintEvent&) {
         wxCoord tw = 0, th = 0;
         paintDC->GetTextExtent(msg, &tw, &th);
         paintDC->DrawText(msg, (sz.x - tw) / 2, (sz.y - th) / 2);
+
+        // Trigger the deferred restore from the first real paint (with a
+        // non-zero client size). CallAfter lets this OnPaint return — and the
+        // buffered DC commit to the window — before the restore blocks the
+        // main thread, so the placeholder stays visible during the restore.
+        if (!loadingPaintFired_ && sz.x > 0 && sz.y > 0) {
+            loadingPaintFired_ = true;
+            if (onLoadingPainted_) CallAfter(onLoadingPainted_);
+        }
         return;
     }
 

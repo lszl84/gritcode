@@ -3,6 +3,7 @@
 #include <wx/scrolwin.h>
 #include "block.h"
 #include <array>
+#include <functional>
 #include <unordered_map>
 #include <vector>
 
@@ -61,7 +62,13 @@ public:
 
     // Show a centered "Loading Session..." placeholder instead of blocks.
     // Used while a large session is being restored on the main thread.
-    void SetLoading(bool on) { loading_ = on; Refresh(); }
+    void SetLoading(bool on) { loading_ = on; loadingPaintFired_ = false; Refresh(); }
+
+    // Called from the first paint of the loading placeholder (deferred via
+    // CallAfter so the paint has been committed to the window first). The
+    // frame uses it to run the heavy session restore after the placeholder
+    // is actually on screen — a timer would race GTK's async first expose.
+    void SetLoadingPaintCallback(std::function<void()> cb) { onLoadingPainted_ = std::move(cb); }
 
     // Returns concatenated visible text of the current selection, or empty
     // string if no selection. Used for clipboard copy.
@@ -135,6 +142,8 @@ private:
     bool layoutDirty_ = true;
     bool batchAdd_ = false;   // set between BeginBatch() and EndBatch()
     bool loading_ = false;    // draw loading placeholder instead of blocks
+    bool loadingPaintFired_ = false;  // first paint of the placeholder has happened
+    std::function<void()> onLoadingPainted_;  // invokes the deferred restore
     // Cumulative top Y of each block in canvas (unscrolled) coords.
     // Size = blocks_.size() + 1. blockTops_[i] = top of blocks_[i],
     // blockTops_[N] = bottom of last block (before thinking dots/margin).

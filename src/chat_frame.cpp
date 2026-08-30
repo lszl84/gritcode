@@ -737,11 +737,12 @@ ChatFrame::ChatFrame()
     RefreshSessionChoice();
 
     // Large sessions show a centered placeholder first and render the canvas
-    // after the window is on screen (StartSessionRestore). Small sessions are
-    // restored synchronously, as before.
+    // after that placeholder has actually painted (the canvas invokes the
+    // callback from its first OnPaint). Small sessions are restored
+    // synchronously, as before.
     if (HistoryIsLarge()) {
-        deferRestore_ = true;
         canvas_->SetLoading(true);
+        canvas_->SetLoadingPaintCallback([this] { RestoreSession(); });
     } else {
         RestoreCanvasFromHistory();
     }
@@ -1052,25 +1053,6 @@ ChatFrame::ChatFrame()
 
     input_->SetFocus();
     SetMinSize(wxSize(620, 400));
-}
-
-void ChatFrame::StartSessionRestore() {
-    if (!deferRestore_) return;
-    // The constructor set the loading flag before the window was realized, so
-    // a synchronous Update() here runs before the first layout/paint and the
-    // placeholder never reaches the screen (startup shows an empty frame).
-    // Defer the heavy restore to a short one-shot timer instead: the event
-    // loop processes the initial show/size/paint events first — painting
-    // "Loading Session..." — and only then fires the timer to run the restore.
-    if (!restoreTimer_) {
-        restoreTimer_ = new wxTimer(this);
-        Bind(wxEVT_TIMER, &ChatFrame::OnRestoreTimer, this);
-    }
-    restoreTimer_->StartOnce(40);
-}
-
-void ChatFrame::OnRestoreTimer(wxTimerEvent&) {
-    RestoreSession();
 }
 
 void ChatFrame::RestoreSession() {
