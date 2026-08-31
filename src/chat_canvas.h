@@ -185,6 +185,8 @@ private:
     // viewport alone; re-engage when they scroll back near the bottom.
     bool stickToBottom_ = true;
     void UpdateStickToBottom();
+    // If pinned to the bottom, scroll to the current contentHeight_ bottom.
+    void ScrollToBottomIfPinned();
 
     // Measurement accounting for profiling (WX_GRITCODE_PROF=1). Filled by
     // MeasExtent/MeasPartial/MeasSetFont wrappers and dumped at the end of

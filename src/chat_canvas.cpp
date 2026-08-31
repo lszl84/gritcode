@@ -301,11 +301,7 @@ void ChatCanvas::AddBlock(Block b) {
     layoutDirty_ = true;
     if (batchAdd_) return;  // EndBatch() does the single reflow + redraw
     Relayout(GetClientSize().x);
-    if (stickToBottom_) {
-        int xu, yu;
-        GetScrollPixelsPerUnit(&xu, &yu);
-        if (yu > 0) Scroll(0, contentHeight_ / yu);
-    }
+    ScrollToBottomIfPinned();
     Refresh();
 }
 
@@ -317,11 +313,7 @@ void ChatCanvas::EndBatch() {
     batchAdd_ = false;
     layoutDirty_ = true;
     Relayout(GetClientSize().x);
-    if (stickToBottom_) {
-        int xu, yu;
-        GetScrollPixelsPerUnit(&xu, &yu);
-        if (yu > 0) Scroll(0, contentHeight_ / yu);
-    }
+    ScrollToBottomIfPinned();
     Refresh();
 }
 
@@ -337,6 +329,13 @@ void ChatCanvas::UpdateStickToBottom() {
     // ~2 lines of slack so the user doesn't have to land pixel-perfect.
     const int kThreshold = 40;
     stickToBottom_ = (viewY + clientH >= virtualH - kThreshold);
+}
+
+void ChatCanvas::ScrollToBottomIfPinned() {
+    if (!stickToBottom_) return;
+    int xu, yu;
+    GetScrollPixelsPerUnit(&xu, &yu);
+    if (yu > 0) Scroll(0, contentHeight_ / yu);
 }
 
 void ChatCanvas::OnScrollWin(wxScrollWinEvent& e) {
@@ -363,6 +362,7 @@ void ChatCanvas::SetThinking(bool on) {
     int extra = on ? (kBlockSpacing + 24) : -(kBlockSpacing + 24);
     contentHeight_ += extra;
     if (layoutWidth_ > 0) SetVirtualSize(layoutWidth_, contentHeight_);
+    ScrollToBottomIfPinned();
     Refresh();
 }
 
@@ -1086,11 +1086,7 @@ void ChatCanvas::EnsureVisibleLaidOut(int viewY, int viewH, int contentW) {
         // the previous bottom is now approximate. If we're pinned to the
         // bottom (session load / streaming), re-anchor to the *true* bottom —
         // otherwise the view drifts above the last line.
-        if (stickToBottom_) {
-            int xu, yu;
-            GetScrollPixelsPerUnit(&xu, &yu);
-            if (yu > 0) Scroll(0, contentHeight_ / yu);
-        }
+        ScrollToBottomIfPinned();
     }
 
     PERF_LOG("EnsureVisible measured=%d", measured);
