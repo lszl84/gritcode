@@ -1080,7 +1080,18 @@ void ChatCanvas::EnsureVisibleLaidOut(int viewY, int viewH, int contentW) {
         }
     }
     delete dc;
-    if (changed) RecomputeTops();
+    if (changed) {
+        RecomputeTops();
+        // Measuring the visible blocks changed the total content height, so
+        // the previous bottom is now approximate. If we're pinned to the
+        // bottom (session load / streaming), re-anchor to the *true* bottom —
+        // otherwise the view drifts above the last line.
+        if (stickToBottom_) {
+            int xu, yu;
+            GetScrollPixelsPerUnit(&xu, &yu);
+            if (yu > 0) Scroll(0, contentHeight_ / yu);
+        }
+    }
 
     PERF_LOG("EnsureVisible measured=%d", measured);
     PERF_LOG("meas extent=%lldus/%lldc partial=%lldus/%lldc setfont=%lldus/%lldc",
