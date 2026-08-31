@@ -971,6 +971,125 @@ void ChatCanvas::WrapMonospace(wxDC& dc, const wxString& text, int maxW,
     }
 }
 
+int ChatCanvas::ContentWidthFor(int clientW) const {
+    int cw = std::min(clientW - 2 * kSideMargin, kMaxContentW);
+    if (cw < 100) cw = 100;
+    return cw;
+}
+
+int ChatCanvas::EstimateBlockHeight(const Block& b, int contentW) const {
+    // Cheap O(text) height estimate for an unmeasured block — no DC
+    // measurement, so restoring a huge session never pays GetTextExtent for
+    // every block up front. Rough is fine: off-screen blocks only contribute
+    // to scrollbar size until they scroll into view and are measured for real.
+    auto wrappedLines = [](const wxString& text, int avgCharW, int maxW) {
+        if (text.IsEmpty()) return 1;
+        int cpl = std::max(12, maxW / std::max(4, avgCharW));
+        // Fast estimate: explicit newlines + a wrap contribution from the
+        // remaining chars. Avoids a per-char operator[] scan (which is slow
+        // on UTF-8 wxString builds); Freq()/length() are O(n) native scans.
+        int newlines = (int)text.Freq('\n');
+        int nonNl = (int)text.length() - newlines;
+        return std::max(1, newlines + 1 + std::max(0, nonNl) / cpl);
+    };
+
+    switch (b.type) {
+        case BlockType::Image:
+            return 120 + 2 * kImagePad;  // measured precisely on first paint
+        case BlockType::CodeBlock: {
+            int innerW = std::max(50, contentW - 2 * kCodePadding);
+            return wrappedLines(b.rawText, 8, innerW) * 15 + 2 * kCodePadding;
+        }
+        case BlockType::Table: {
+            int rows = std::max(1, (int)b.tableRows.size());
+            return rows * 22 + 2;
+        }
+        case BlockType::ToolCall: {
+            int h = 24;
+            if (b.toolExpanded) {
+                int innerW = std::max(50, contentW - 2 * kToolPadX);
+                h += kToolGap + wrappedLines(b.toolResult, 8, innerW) * 15 + kToolPadY;
+            }
+            return h;
+        }
+        case BlockType::Thinking: {
+            if (b.thinkingSingleLine) return 2 * kToolPadY + 15;
+            if (!b.toolExpanded) return 24;
+            int innerW = std::max(50, contentW - 2 * kToolPadX);
+            return 24 + kToolGap + wrappedLines(b.rawText, 8, innerW) * 15 + kToolPadY;
+        }
+        default: {
+            int avgCharW = (b.type == BlockType::Heading) ? 11 : 7;
+            int lineH = (b.type == BlockType::Heading) ? 20 : 17;
+            int maxW = contentW;
+            if (b.type == BlockType::UserPrompt)
+                maxW = std::max(50, contentW - 2 * kUserBubblePad);
+            int h = wrappedLines(b.visibleText, avgCharW, maxW) * lineH;
+            if (b.type == BlockType::UserPrompt) h += 2 * kUserBubblePad;
+            return h;
+        }
+    }
+}
+
+void ChatCanvas::RecomputeTops() {
+    int y = kTopMargin;
+    blockTops_.assign(blocks_.size() + 1, 0);
+    for (size_t i = 0; i < blocks_.size(); ++i) {
+        const Block& b = blocks_[i];
+        y += (b.type == BlockType::Heading) ? kHeadingSpacing : kBlockSpacing;
+        blockTops_[i] = y;
+        y += b.cachedHeight;
+    }
+    if (!blockTops_.empty()) blockTops_.back() = y;
+    if (thinking_) y += kBlockSpacing + 24;
+    y += kBottomMargin;
+    contentHeight_ = y;
+    if (layoutWidth_ > 0) SetVirtualSize(layoutWidth_, contentHeight_);
+}
+
+void ChatCanvas::EnsureBlockLaidOut(size_t idx, int contentW) {
+    if (idx >= blocks_.size()) return;
+    Block& b = blocks_[idx];
+    if (b.cachedWidth == contentW) return;
+    wxClientDC dc(this);
+    LayoutBlock(dc, b, contentW, 0);
+    RecomputeTops();
+}
+
+void ChatCanvas::EnsureVisibleLaidOut(int viewY, int viewH, int contentW) {
+    if (blocks_.empty() || blockTops_.size() != blocks_.size() + 1) return;
+    const int margin = std::max(viewH, 600);
+    const int lo = viewY - margin;
+    const int hi = viewY + viewH + margin;
+
+    size_t first = 0;
+    auto it = std::lower_bound(blockTops_.begin() + 1, blockTops_.end(), lo);
+    if (it != blockTops_.end()) first = (size_t)(it - blockTops_.begin()) - 1;
+
+    bool changed = false;
+    int measured = 0;
+    wxClientDC* dc = nullptr;
+    for (size_t i = first; i < blocks_.size(); ++i) {
+        if (blockTops_[i] > hi) break;
+        Block& b = blocks_[i];
+        if (b.cachedWidth != contentW) {
+            if (!dc) dc = new wxClientDC(this);
+            LayoutBlock(*dc, b, contentW, 0);
+            ++measured;
+            changed = true;
+        }
+    }
+    delete dc;
+    if (changed) RecomputeTops();
+
+    PERF_LOG("EnsureVisible measured=%d", measured);
+    PERF_LOG("meas extent=%lldus/%lldc partial=%lldus/%lldc setfont=%lldus/%lldc",
+             extentUs_, extentCalls_, partialUs_, partialCalls_,
+             setfontUs_, setfontCalls_);
+    extentUs_ = partialUs_ = setfontUs_ = 0;
+    extentCalls_ = partialCalls_ = setfontCalls_ = 0;
+}
+
 void ChatCanvas::Relayout(int width) {
     PERF_SCOPE_T("Relayout", 1000);
     // Defer the expensive reflow until the canvas is actually on screen.
@@ -985,45 +1104,25 @@ void ChatCanvas::Relayout(int width) {
     EnsureFonts();
 
     // O(1) fast path. Mutators flip layoutDirty_; nothing dirty + same width =
-    // nothing to do. Avoids the per-block cache scan on every paint/scroll.
+    // nothing to do. Avoids the per-block estimate scan on every paint/scroll.
     if (!layoutDirty_ && width == layoutWidth_) return;
 
-    int contentW = std::min(width - 2 * kSideMargin, kMaxContentW);
-    if (contentW < 100) contentW = 100;
-
-    wxClientDC dc(this);
-    int y = kTopMargin;
-    int relaidCount = 0;
-    blockTops_.assign(blocks_.size() + 1, 0);
-    for (size_t i = 0; i < blocks_.size(); ++i) {
-        auto& b = blocks_[i];
-        int spacing = (b.type == BlockType::Heading) ? kHeadingSpacing : kBlockSpacing;
-        y += spacing;
-        // Per-block guard: skip blocks already laid out at this width.
-        // AddBlock and ToggleToolCall set b.cachedWidth = -1 on just the
-        // affected block; everyone else keeps its cached lines/heights.
+    int contentW = ContentWidthFor(width);
+    // Assign a cheap estimated height to every block not already measured at
+    // this width. Measurement happens lazily in EnsureVisibleLaidOut for the
+    // blocks near the viewport; off-screen blocks keep their estimate until
+    // they scroll into view.
+    for (auto& b : blocks_) {
         if (b.cachedWidth != contentW) {
-            LayoutBlock(dc, b, contentW, spacing);
-            ++relaidCount;
+            b.cachedHeight = EstimateBlockHeight(b, contentW);
+            // cachedWidth stays != contentW so the block is measured lazily.
         }
-        blockTops_[i] = y;
-        y += b.cachedHeight;
     }
-    if (!blockTops_.empty()) blockTops_.back() = y;
-    if (thinking_) y += kBlockSpacing + 24;
-    y += kBottomMargin;
-
-    contentHeight_ = y;
     layoutWidth_ = width;
     layoutDirty_ = false;
+    RecomputeTops();
 
-    PERF_LOG("Relayout n=%d w=%d h=%d", relaidCount, width, contentHeight_);
-    PERF_LOG("meas extent=%lldus/%lldc partial=%lldus/%lldc setfont=%lldus/%lldc",
-             extentUs_, extentCalls_, partialUs_, partialCalls_,
-             setfontUs_, setfontCalls_);
-    extentUs_ = partialUs_ = setfontUs_ = 0;
-    extentCalls_ = partialCalls_ = setfontCalls_ = 0;
-    SetVirtualSize(width, contentHeight_);
+    PERF_LOG("Relayout n=%d w=%d h=%d", (int)blocks_.size(), width, contentHeight_);
 }
 
 // ---------- Paint ----------
@@ -1102,6 +1201,10 @@ void ChatCanvas::OnPaint(wxPaintEvent&) {
     int vx, vy;
     GetViewStart(&vx, &vy);
     const int viewY = (yu > 0) ? vy * yu : 0;
+
+    // Measure any unmeasured blocks in/around the viewport before rendering,
+    // so PaintBlock has real line geometry. Off-screen blocks stay estimated.
+    EnsureVisibleLaidOut(viewY, sz.y, ContentWidthFor(layoutW));
 
     BlockPos selStart = selAnchor_, selEnd = selCaret_;
     if (selEnd < selStart) std::swap(selStart, selEnd);
@@ -1757,6 +1860,15 @@ BlockPos ChatCanvas::HitTest(const wxPoint& canvasPt) const {
         int blockTop = y;
         int blockBottom = y + b.cachedHeight;
         if (canvasPt.y >= blockTop - spacing / 2 && canvasPt.y < blockBottom) {
+
+            // Safety net: visible blocks are measured by EnsureVisibleLaidOut
+            // before paint, so this normally no-ops. If a click lands on a
+            // block that's still estimated (fast scroll), measure it now so
+            // the per-line hit-test below has real geometry.
+            if (b.cachedWidth != contentW) {
+                const_cast<ChatCanvas*>(this)->EnsureBlockLaidOut(i, contentW);
+                blockBottom = blockTop + blocks_[i].cachedHeight;
+            }
 
             // Images are opaque click targets; no text to hit-test.
             if (b.type == BlockType::Image) {

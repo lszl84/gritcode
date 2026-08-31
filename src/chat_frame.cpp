@@ -740,9 +740,9 @@ ChatFrame::ChatFrame()
     // after that placeholder has actually painted (the canvas invokes the
     // callback from its first OnPaint). Small sessions are restored
     // synchronously, as before.
+    canvas_->SetLoadingPaintCallback([this] { RestoreSession(); });
     if (HistoryIsLarge()) {
         canvas_->SetLoading(true);
-        canvas_->SetLoadingPaintCallback([this] { RestoreSession(); });
     } else {
         RestoreCanvasFromHistory();
     }
@@ -1179,8 +1179,10 @@ bool ChatFrame::HistoryIsLarge() const {
 void ChatFrame::RestoreCanvasMaybeDeferred() {
     canvas_->Clear();
     if (HistoryIsLarge()) {
+        // The canvas fires onLoadingPainted_ (set once in the constructor)
+        // from its first paint of the placeholder, which runs RestoreSession.
+        // No direct CallAfter here — that would run RestoreSession twice.
         canvas_->SetLoading(true);
-        CallAfter([this] { RestoreSession(); });
     } else {
         RestoreCanvasFromHistory();
     }

@@ -213,6 +213,19 @@ private:
 
     // Layout (or re-layout) all blocks to the given content width.
     void Relayout(int width);
+    // Client width -> content column width (clamped to [100, kMaxContentW]).
+    int ContentWidthFor(int clientW) const;
+    // Cheap O(text) height estimate for an unmeasured block — no DC calls, so
+    // restoring a huge session doesn't measure every block up front.
+    int EstimateBlockHeight(const Block& b, int contentW) const;
+    // Recompute blockTops_ + contentHeight_ from current cachedHeight values
+    // (measured or estimated) and update the virtual size.
+    void RecomputeTops();
+    // Measure (LayoutBlock) any unmeasured blocks near the viewport so paint
+    // has real line geometry; off-screen blocks stay estimated until scrolled
+    // into view.
+    void EnsureVisibleLaidOut(int viewY, int viewH, int contentW);
+    void EnsureBlockLaidOut(size_t idx, int contentW);
     void LayoutBlock(wxDC& dc, Block& b, int contentWidth, int topSpacing) const;
     // Wrap a styled run sequence to maxW and produce visual lines. Used for
     // paragraphs, headings, user prompts, and individual table cells.
