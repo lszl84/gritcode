@@ -1866,31 +1866,44 @@ void ChatFrame::OnHamburger(wxCommandEvent&) {
     if (splitter_->IsSplit()) {
         splitter_->Unsplit(importPanel_);
         importPanel_->Hide();
-        SetClientSize(wxSize(GetClientSize().x - kImportPaneDelta, GetClientSize().y));
+        SyncPanelSizing(-kImportPaneDelta);
     } else {
         importPanel_->Show();
         splitter_->SplitVertically(importPanel_, innerSplitter_, kImportPaneWidth);
-        SetClientSize(wxSize(GetClientSize().x + kImportPaneDelta, GetClientSize().y));
+        SyncPanelSizing(+kImportPaneDelta);
     }
-    SyncPanelMinSize();
 }
 
 void ChatFrame::OnEditorToggle(wxCommandEvent&) {
     if (innerSplitter_->IsSplit()) {
         innerSplitter_->Unsplit(editorPanel_);
         editorPanel_->Hide();
-        SetClientSize(wxSize(GetClientSize().x - kEditorPaneDelta, GetClientSize().y));
+        SyncPanelSizing(-kEditorPaneDelta);
     } else {
         editorPanel_->Show();
         // Initial sash position: editor on the right at kEditorPaneWidth.
-        // SyncPanelMinSize re-asserts it after the frame grows so the editor
+        // FixEditorSash re-asserts it after the frame grows so the editor
         // keeps its width.
         int innerW = innerSplitter_->GetClientSize().x;
         int sash = innerW > kEditorPaneDelta ? innerW - kEditorPaneWidth : innerW / 2;
         innerSplitter_->SplitVertically(mainPanel_, editorPanel_, sash);
-        SetClientSize(wxSize(GetClientSize().x + kEditorPaneDelta, GetClientSize().y));
+        SyncPanelSizing(+kEditorPaneDelta);
     }
+}
+
+void ChatFrame::SyncPanelSizing(int delta) {
+    // Capture the width before touching the min size: raising the min size can
+    // auto-grow the frame, which would throw off the +delta arithmetic.
+    int w = GetClientSize().x;
     SyncPanelMinSize();
+    SetClientSize(wxSize(w + delta, GetClientSize().y));
+    // Force the nested splitters to settle synchronously — wxSP_LIVE_UPDATE
+    // defers pane resizing to idle, so back-to-back toggles otherwise read
+    // stale sizes and skip relayouts.
+    Layout();
+    splitter_->UpdateSize();
+    innerSplitter_->UpdateSize();
+    FixEditorSash();
 }
 
 void ChatFrame::SyncPanelMinSize() {
@@ -1898,18 +1911,17 @@ void ChatFrame::SyncPanelMinSize() {
              + (splitter_->IsSplit() ? kImportPaneDelta : 0)
              + (innerSplitter_->IsSplit() ? kEditorPaneDelta : 0);
     SetMinSize(wxSize(minW, 400));
+}
 
+void ChatFrame::FixEditorSash() {
     // Splitting/unsplitting the outer splitter resizes the inner one, which
     // moves its sash under the editor's gravity-1.0 resize rule and can
     // squash the editor to its minimum. Re-assert the editor's width once the
     // pending sizing has been applied.
-    if (innerSplitter_->IsSplit()) {
-        splitter_->UpdateSize();
-        innerSplitter_->UpdateSize();
-        int w = innerSplitter_->GetClientSize().x;
-        int sash = w > kEditorPaneDelta ? w - kEditorPaneWidth : w / 2;
-        innerSplitter_->SetSashPosition(sash, false);
-    }
+    if (!innerSplitter_->IsSplit()) return;
+    int w = innerSplitter_->GetClientSize().x;
+    int sash = w > kEditorPaneDelta ? w - kEditorPaneWidth : w / 2;
+    innerSplitter_->SetSashPosition(sash, false);
 }
 
 void ChatFrame::PopulateEditorTree() {
@@ -2197,8 +2209,7 @@ void ChatFrame::ShowImportDialog() {
     if (!splitter_->IsSplit()) {
         importPanel_->Show();
         splitter_->SplitVertically(importPanel_, innerSplitter_, kImportPaneWidth);
-        SetClientSize(wxSize(GetClientSize().x + kImportPaneDelta, GetClientSize().y));
-        SyncPanelMinSize();
+        SyncPanelSizing(+kImportPaneDelta);
     }
 }
 
