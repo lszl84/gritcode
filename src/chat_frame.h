@@ -89,6 +89,7 @@ private:
     wxBitmapButton* settingsBtn_ = nullptr;
     wxBitmapButton* exportBtn_ = nullptr;
     wxBitmapButton* hamburgerBtn_ = nullptr;
+    wxBitmapButton* editorBtn_ = nullptr;
 
     // On-disk session persistence. Sessions are keyed by working directory
     // (one session per folder, gritcode model). The dropdown is rebuilt from
@@ -216,8 +217,12 @@ private:
     void OnPlay(wxCommandEvent&);
     void OnExport(wxCommandEvent&);
     void OnHamburger(wxCommandEvent&);
+    void OnEditorToggle(wxCommandEvent&);
     void OnImport(wxCommandEvent&);
     void ShowImportDialog();
+    // Grow/shrink the frame so the chat pane keeps its width as side panels
+    // open/close, and keep the minimum width in sync with how many are open.
+    void SyncPanelMinSize();
 
     // Repopulate the session choice from store_.List() with the leading
     // "New Session…" entry, then restore the active selection.
@@ -255,7 +260,11 @@ private:
     wxStaticText* refLabel_ = nullptr;                 // "Referenced Session: ..." at bottom
     wxButton* changeBtn_ = nullptr;                      // "Load another…" button
     wxString importedFileName_;                          // display name of imported file
-    int mainWidth_ = 600;                                // window width without import pane
+
+    // ---- Editor panel (right) ----
+    wxSplitterWindow* innerSplitter_ = nullptr;          // main | editor splitter
+    wxPanel* editorPanel_ = nullptr;                     // right pane of inner splitter
+    wxTextCtrl* editorText_ = nullptr;                   // placeholder editor content
 
     // Streaming HTTP callbacks (delivered on the GUI thread via CallAfter).
     // OnStreamData appends to sseBuf_ and parses any complete SSE events.

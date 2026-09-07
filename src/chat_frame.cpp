@@ -62,6 +62,7 @@ constexpr int ID_SETTINGS = wxID_HIGHEST + 12;
 constexpr int ID_PLAY     = wxID_HIGHEST + 13;
 constexpr int ID_EXPORT   = wxID_HIGHEST + 14;
 constexpr int ID_HAMBURGER = wxID_HIGHEST + 15;
+constexpr int ID_EDITOR   = wxID_HIGHEST + 16;
 
 // ---- Context management (compaction.md) ----
 constexpr int kContextWindowTokens   = 1'048'576;  // real DeepSeek limit
@@ -498,8 +499,16 @@ ChatFrame::ChatFrame()
         wxDefaultPosition, wxDefaultSize, wxSP_LIVE_UPDATE);
     splitter_->SetMinimumPaneSize(200);
 
-    // Main panel: right pane of splitter.
-    auto* panel = new wxPanel(splitter_);
+    // Inner splitter holds the main chat (left) and the editor (right).
+    // Gravity 1.0 keeps the editor at a fixed width while the chat pane
+    // absorbs window resizes — the mirror image of the import pane on the left.
+    innerSplitter_ = new wxSplitterWindow(splitter_, wxID_ANY,
+        wxDefaultPosition, wxDefaultSize, wxSP_LIVE_UPDATE);
+    innerSplitter_->SetMinimumPaneSize(200);
+    innerSplitter_->SetSashGravity(1.0);
+
+    // Main panel: left pane of the inner splitter.
+    auto* panel = new wxPanel(innerSplitter_);
     mainPanel_ = panel;
     auto* outer = new wxBoxSizer(wxVERTICAL);
 
@@ -542,6 +551,12 @@ ChatFrame::ChatFrame()
                                      wxBORDER_NONE);
     exportBtn_->SetToolTip(wxString::FromUTF8("Export session to file"));
 
+    wxBitmapBundle bbEditor = LoadThemedSvgIcon("editor.svg", kIconSize, accent);
+    editorBtn_ = new wxBitmapButton(panel, ID_EDITOR, bbEditor,
+                                    wxDefaultPosition, kBtnSize,
+                                    wxBORDER_NONE);
+    editorBtn_->SetToolTip(wxString::FromUTF8("Toggle editor"));
+
     wxBitmapBundle bbPlay = LoadThemedSvgIcon("play.svg", kIconSize, accent);
     playBtn_ = new wxBitmapButton(panel, ID_PLAY, bbPlay,
                                   wxDefaultPosition, kBtnSize,
@@ -558,6 +573,7 @@ ChatFrame::ChatFrame()
     toolbarRow->Add(modelLabel, 0, wxALIGN_CENTER_VERTICAL | wxRIGHT, 6);
     toolbarRow->Add(modelChoice_, 1, wxALIGN_CENTER_VERTICAL);
     toolbarRow->AddStretchSpacer(8);
+    toolbarRow->Add(editorBtn_, 0, wxALIGN_CENTER_VERTICAL | wxRIGHT, 4);
     toolbarRow->Add(settingsBtn_, 0, wxALIGN_CENTER_VERTICAL);
     toolbarRow->Add(exportBtn_, 0, wxALIGN_CENTER_VERTICAL | wxLEFT, 4);
 #ifndef NDEBUG
@@ -608,6 +624,25 @@ ChatFrame::ChatFrame()
     auto* root = new wxBoxSizer(wxVERTICAL);
     root->Add(outer, 1, wxEXPAND | wxALL, FromDIP(2));
     panel->SetSizer(root);
+
+    // Editor — right pane of the inner splitter, hidden until the editor
+    // toggle. Placeholder content for now: a title bar and a multiline text
+    // area; real editing hooks land in a later step.
+    editorPanel_ = new wxPanel(innerSplitter_);
+    auto* editorSizer = new wxBoxSizer(wxVERTICAL);
+    auto* editorTitle = new wxStaticText(editorPanel_, wxID_ANY,
+        wxString::FromUTF8("Editor"));
+    auto etf = editorTitle->GetFont();
+    etf.SetPointSize(etf.GetPointSize() - 1);
+    editorTitle->SetFont(etf);
+    editorTitle->SetForegroundColour(wxColour(140, 140, 140));
+    editorSizer->Add(editorTitle, 0, wxLEFT | wxRIGHT | wxTOP, 6);
+    editorText_ = new wxTextCtrl(editorPanel_, wxID_ANY, "",
+                                 wxDefaultPosition, wxDefaultSize,
+                                 wxTE_MULTILINE);
+    editorSizer->Add(editorText_, 1, wxEXPAND | wxALL, 6);
+    editorPanel_->SetSizer(editorSizer);
+    editorPanel_->Hide();
 
     // Import viewer — left pane of splitter, hidden until hamburger toggle.
     importPanel_ = new wxPanel(splitter_);
@@ -695,7 +730,8 @@ ChatFrame::ChatFrame()
         e.Skip();
     });
 
-    splitter_->Initialize(mainPanel_);  // Right pane only at start
+    splitter_->Initialize(innerSplitter_);  // Right pane only at start
+    innerSplitter_->Initialize(mainPanel_);  // Editor hidden at start
 
     auto* frameSizer = new wxBoxSizer(wxHORIZONTAL);
     frameSizer->Add(splitter_, 1, wxEXPAND);
@@ -758,6 +794,7 @@ ChatFrame::ChatFrame()
     Bind(wxEVT_BUTTON, &ChatFrame::OnSettings, this, ID_SETTINGS);
     Bind(wxEVT_BUTTON, &ChatFrame::OnExport, this, ID_EXPORT);
     Bind(wxEVT_BUTTON, &ChatFrame::OnHamburger, this, ID_HAMBURGER);
+    Bind(wxEVT_BUTTON, &ChatFrame::OnEditorToggle, this, ID_EDITOR);
     Bind(wxEVT_BUTTON, &ChatFrame::OnPlay, this, ID_PLAY);
     Bind(wxEVT_TOOL_BATCH_DONE, &ChatFrame::OnToolBatchDone, this);
     sessionChoice_->Bind(wxEVT_CHOICE, &ChatFrame::OnSessionChoice, this);
@@ -1376,6 +1413,7 @@ void ChatFrame::ReloadToolbarIcons() {
     playBtn_->SetBitmap(LoadThemedSvgIcon("play.svg", kIconSize, accent));
     exportBtn_->SetBitmap(LoadThemedSvgIcon("export.svg", kIconSize, accent));
     hamburgerBtn_->SetBitmap(LoadThemedSvgIcon("hamburger.svg", kIconSize, accent));
+    editorBtn_->SetBitmap(LoadThemedSvgIcon("editor.svg", kIconSize, accent));
 }
 
 void ChatFrame::RefreshSessionChoice() {
@@ -1772,14 +1810,47 @@ void ChatFrame::OnHamburger(wxCommandEvent&) {
     if (splitter_->IsSplit()) {
         splitter_->Unsplit(importPanel_);
         importPanel_->Hide();
-        SetMinSize(wxSize(620, 400));
-        SetClientSize(wxSize(mainWidth_, GetClientSize().y));
+        SetClientSize(wxSize(GetClientSize().x - 420, GetClientSize().y));
     } else {
-        mainWidth_ = GetClientSize().x;
         importPanel_->Show();
-        splitter_->SplitVertically(importPanel_, mainPanel_, 400);
-        SetMinSize(wxSize(620 + 420, 400));
-        SetClientSize(wxSize(mainWidth_ + 420, GetClientSize().y));
+        splitter_->SplitVertically(importPanel_, innerSplitter_, 400);
+        SetClientSize(wxSize(GetClientSize().x + 420, GetClientSize().y));
+    }
+    SyncPanelMinSize();
+}
+
+void ChatFrame::OnEditorToggle(wxCommandEvent&) {
+    if (innerSplitter_->IsSplit()) {
+        innerSplitter_->Unsplit(editorPanel_);
+        editorPanel_->Hide();
+        SetClientSize(wxSize(GetClientSize().x - 420, GetClientSize().y));
+    } else {
+        editorPanel_->Show();
+        // Initial sash position: editor on the right at ~400px. SyncPanelMinSize
+        // re-asserts it after the frame grows so the editor keeps its width.
+        int innerW = innerSplitter_->GetClientSize().x;
+        int sash = innerW > 420 ? innerW - 400 : innerW / 2;
+        innerSplitter_->SplitVertically(mainPanel_, editorPanel_, sash);
+        SetClientSize(wxSize(GetClientSize().x + 420, GetClientSize().y));
+    }
+    SyncPanelMinSize();
+}
+
+void ChatFrame::SyncPanelMinSize() {
+    int open = (splitter_->IsSplit() ? 1 : 0)
+             + (innerSplitter_->IsSplit() ? 1 : 0);
+    SetMinSize(wxSize(620 + 420 * open, 400));
+
+    // Splitting/unsplitting the outer splitter resizes the inner one, which
+    // moves its sash under the editor's gravity-1.0 resize rule and can
+    // squash the editor to its minimum. Re-assert the editor's ~400px width
+    // once the pending sizing has been applied.
+    if (innerSplitter_->IsSplit()) {
+        splitter_->UpdateSize();
+        innerSplitter_->UpdateSize();
+        int w = innerSplitter_->GetClientSize().x;
+        int sash = w > 420 ? w - 400 : w / 2;
+        innerSplitter_->SetSashPosition(sash, false);
     }
 }
 
@@ -1962,7 +2033,10 @@ void ChatFrame::ShowImportDialog() {
 
     // Split to show the import panel on the left.
     if (!splitter_->IsSplit()) {
-        splitter_->SplitVertically(importPanel_, mainPanel_, 400);
+        importPanel_->Show();
+        splitter_->SplitVertically(importPanel_, innerSplitter_, 400);
+        SetClientSize(wxSize(GetClientSize().x + 420, GetClientSize().y));
+        SyncPanelMinSize();
     }
 }
 
