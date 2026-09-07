@@ -2,6 +2,7 @@
 #include <wx/wx.h>
 #include <wx/choice.h>
 #include <wx/textctrl.h>
+#include <wx/treectrl.h>
 #include <wx/bmpbuttn.h>
 #include <wx/splitter.h>
 #include <wx/dnd.h>
@@ -223,6 +224,13 @@ private:
     // Grow/shrink the frame so the chat pane keeps its width as side panels
     // open/close, and keep the minimum width in sync with how many are open.
     void SyncPanelMinSize();
+    // Project file tree in the right editor panel.
+    void PopulateEditorTree();
+    void PopulateTreeDir(wxTreeItemId parent, const wxString& path);
+    void OnEditorTreeExpanding(wxTreeEvent& e);
+    void OnEditorTreeSelect(wxTreeEvent& e);
+    void LoadFileIntoEditor(const wxString& path);
+    void SaveEditorFile();
 
     // Repopulate the session choice from store_.List() with the leading
     // "New Session…" entry, then restore the active selection.
@@ -264,7 +272,12 @@ private:
     // ---- Editor panel (right) ----
     wxSplitterWindow* innerSplitter_ = nullptr;          // main | editor splitter
     wxPanel* editorPanel_ = nullptr;                     // right pane of inner splitter
-    wxTextCtrl* editorText_ = nullptr;                   // placeholder editor content
+    wxSplitterWindow* editorSplitter_ = nullptr;         // file tree | editor
+    wxTreeCtrl* fileTree_ = nullptr;                     // project file tree
+    wxTextCtrl* codeEdit_ = nullptr;                     // editable file content
+    wxString editorFilePath_;                            // file open in codeEdit_
+    int imgFolder_ = -1;                                 // tree icon indices
+    int imgFile_ = -1;
 
     // Streaming HTTP callbacks (delivered on the GUI thread via CallAfter).
     // OnStreamData appends to sseBuf_ and parses any complete SSE events.

@@ -25,6 +25,11 @@
 #include <wx/filedlg.h>
 #include <wx/scrolwin.h>
 #include <wx/splitter.h>
+#include <wx/treectrl.h>
+#include <wx/imaglist.h>
+#include <wx/artprov.h>
+#include <wx/dir.h>
+#include <wx/filefn.h>
 #include <algorithm>
 #include <map>
 #include <set>
@@ -63,6 +68,22 @@ constexpr int ID_PLAY     = wxID_HIGHEST + 13;
 constexpr int ID_EXPORT   = wxID_HIGHEST + 14;
 constexpr int ID_HAMBURGER = wxID_HIGHEST + 15;
 constexpr int ID_EDITOR   = wxID_HIGHEST + 16;
+
+// Side-panel widths (pixels) and the window delta used when toggling them.
+// The delta is the pane width plus a bit for the splitter sash so the chat
+// pane keeps (roughly) its current width when a panel opens.
+constexpr int kImportPaneWidth  = 400;
+constexpr int kImportPaneDelta  = kImportPaneWidth + 20;
+constexpr int kEditorPaneWidth  = 560;
+constexpr int kEditorPaneDelta  = kEditorPaneWidth + 20;
+
+// Payload attached to each file-tree node.
+class FileTreeItemData : public wxTreeItemData {
+public:
+    FileTreeItemData(const wxString& p, bool d) : path(p), isDir(d) {}
+    wxString path;
+    bool isDir;
+};
 
 // ---- Context management (compaction.md) ----
 constexpr int kContextWindowTokens   = 1'048'576;  // real DeepSeek limit
@@ -573,7 +594,6 @@ ChatFrame::ChatFrame()
     toolbarRow->Add(modelLabel, 0, wxALIGN_CENTER_VERTICAL | wxRIGHT, 6);
     toolbarRow->Add(modelChoice_, 1, wxALIGN_CENTER_VERTICAL);
     toolbarRow->AddStretchSpacer(8);
-    toolbarRow->Add(editorBtn_, 0, wxALIGN_CENTER_VERTICAL | wxRIGHT, 4);
     toolbarRow->Add(settingsBtn_, 0, wxALIGN_CENTER_VERTICAL);
     toolbarRow->Add(exportBtn_, 0, wxALIGN_CENTER_VERTICAL | wxLEFT, 4);
 #ifndef NDEBUG
@@ -584,6 +604,7 @@ ChatFrame::ChatFrame()
     debugBtn->Bind(wxEVT_BUTTON, [this](wxCommandEvent&) { OpenDebugWindow(); });
     toolbarRow->Add(debugBtn, 0, wxALIGN_CENTER_VERTICAL | wxLEFT, 4);
 #endif
+    toolbarRow->Add(editorBtn_, 0, wxALIGN_CENTER_VERTICAL | wxLEFT, 4);
 
     // Chip row — wraps to multiple lines if the queue gets long. Hidden
     // (via sizer Show) until the queue has at least one entry.
@@ -626,21 +647,46 @@ ChatFrame::ChatFrame()
     panel->SetSizer(root);
 
     // Editor — right pane of the inner splitter, hidden until the editor
-    // toggle. Placeholder content for now: a title bar and a multiline text
-    // area; real editing hooks land in a later step.
+    // toggle. Mirrors pyview: a project file tree on the left and an editable
+    // text area on the right.
     editorPanel_ = new wxPanel(innerSplitter_);
     auto* editorSizer = new wxBoxSizer(wxVERTICAL);
-    auto* editorTitle = new wxStaticText(editorPanel_, wxID_ANY,
-        wxString::FromUTF8("Editor"));
-    auto etf = editorTitle->GetFont();
-    etf.SetPointSize(etf.GetPointSize() - 1);
-    editorTitle->SetFont(etf);
-    editorTitle->SetForegroundColour(wxColour(140, 140, 140));
-    editorSizer->Add(editorTitle, 0, wxLEFT | wxRIGHT | wxTOP, 6);
-    editorText_ = new wxTextCtrl(editorPanel_, wxID_ANY, "",
-                                 wxDefaultPosition, wxDefaultSize,
-                                 wxTE_MULTILINE);
-    editorSizer->Add(editorText_, 1, wxEXPAND | wxALL, 6);
+
+    editorSplitter_ = new wxSplitterWindow(editorPanel_, wxID_ANY,
+        wxDefaultPosition, wxDefaultSize, wxSP_LIVE_UPDATE);
+    editorSplitter_->SetMinimumPaneSize(150);
+
+    auto* treePane = new wxPanel(editorSplitter_);
+    auto* treeSizer = new wxBoxSizer(wxVERTICAL);
+    fileTree_ = new wxTreeCtrl(treePane, wxID_ANY,
+        wxDefaultPosition, wxDefaultSize,
+        wxTR_DEFAULT_STYLE | wxTR_HIDE_ROOT | wxTR_NO_LINES);
+    {
+        wxImageList* il = new wxImageList(16, 16, true);
+        imgFolder_ = il->Add(wxArtProvider::GetBitmap(wxART_FOLDER, wxART_OTHER,
+                                                      wxSize(16, 16)));
+        imgFile_ = il->Add(wxArtProvider::GetBitmap(wxART_NORMAL_FILE,
+                                                    wxART_OTHER, wxSize(16, 16)));
+        fileTree_->AssignImageList(il);
+    }
+    treeSizer->Add(fileTree_, 1, wxEXPAND);
+    treePane->SetSizer(treeSizer);
+
+    auto* editPane = new wxPanel(editorSplitter_);
+    auto* editSizer = new wxBoxSizer(wxVERTICAL);
+    codeEdit_ = new wxTextCtrl(editPane, wxID_ANY, "",
+                               wxDefaultPosition, wxDefaultSize,
+                               wxTE_MULTILINE | wxTE_RICH2);
+    {
+        wxFont mono = wxSystemSettings::GetFont(wxSYS_DEFAULT_GUI_FONT);
+        mono.SetFamily(wxFONTFAMILY_TELETYPE);
+        codeEdit_->SetFont(mono);
+    }
+    editSizer->Add(codeEdit_, 1, wxEXPAND);
+    editPane->SetSizer(editSizer);
+
+    editorSplitter_->SplitVertically(treePane, editPane, 220);
+    editorSizer->Add(editorSplitter_, 1, wxEXPAND);
     editorPanel_->SetSizer(editorSizer);
     editorPanel_->Hide();
 
@@ -771,6 +817,7 @@ ChatFrame::ChatFrame()
     } // RestoreLastSession
     ChdirToCwd(activeCwd_);
     RefreshSessionChoice();
+    PopulateEditorTree();
 
     // Large sessions show a centered placeholder first and render the canvas
     // after that placeholder has actually painted (the canvas invokes the
@@ -795,6 +842,8 @@ ChatFrame::ChatFrame()
     Bind(wxEVT_BUTTON, &ChatFrame::OnExport, this, ID_EXPORT);
     Bind(wxEVT_BUTTON, &ChatFrame::OnHamburger, this, ID_HAMBURGER);
     Bind(wxEVT_BUTTON, &ChatFrame::OnEditorToggle, this, ID_EDITOR);
+    fileTree_->Bind(wxEVT_TREE_ITEM_EXPANDING, &ChatFrame::OnEditorTreeExpanding, this);
+    fileTree_->Bind(wxEVT_TREE_SEL_CHANGED, &ChatFrame::OnEditorTreeSelect, this);
     Bind(wxEVT_BUTTON, &ChatFrame::OnPlay, this, ID_PLAY);
     Bind(wxEVT_TOOL_BATCH_DONE, &ChatFrame::OnToolBatchDone, this);
     sessionChoice_->Bind(wxEVT_CHOICE, &ChatFrame::OnSessionChoice, this);
@@ -1383,6 +1432,11 @@ void ChatFrame::OnCharHook(wxKeyEvent& e) {
         RequestCancel();
         return;
     }
+    int key = e.GetKeyCode();
+    if (e.GetModifiers() == wxMOD_CONTROL && (key == 'S' || key == 's')) {
+        SaveEditorFile();
+        return;
+    }
     e.Skip();
 }
 
@@ -1500,6 +1554,7 @@ void ChatFrame::CreateNewSession() {
     ChdirToCwd(activeCwd_);  // keep the process cwd in sync with activeCwd_
     RestoreCanvasMaybeDeferred();
     RefreshSessionChoice();
+    PopulateEditorTree();
 }
 
 void ChatFrame::SwitchToCwd(const std::string& cwd) {
@@ -1521,6 +1576,7 @@ void ChatFrame::SwitchToCwd(const std::string& cwd) {
     ChdirToCwd(activeCwd_);
     RestoreCanvasMaybeDeferred();
     RefreshSessionChoice();
+    PopulateEditorTree();
 }
 
 void ChatFrame::PersistActive() {
@@ -1810,11 +1866,11 @@ void ChatFrame::OnHamburger(wxCommandEvent&) {
     if (splitter_->IsSplit()) {
         splitter_->Unsplit(importPanel_);
         importPanel_->Hide();
-        SetClientSize(wxSize(GetClientSize().x - 420, GetClientSize().y));
+        SetClientSize(wxSize(GetClientSize().x - kImportPaneDelta, GetClientSize().y));
     } else {
         importPanel_->Show();
-        splitter_->SplitVertically(importPanel_, innerSplitter_, 400);
-        SetClientSize(wxSize(GetClientSize().x + 420, GetClientSize().y));
+        splitter_->SplitVertically(importPanel_, innerSplitter_, kImportPaneWidth);
+        SetClientSize(wxSize(GetClientSize().x + kImportPaneDelta, GetClientSize().y));
     }
     SyncPanelMinSize();
 }
@@ -1823,35 +1879,141 @@ void ChatFrame::OnEditorToggle(wxCommandEvent&) {
     if (innerSplitter_->IsSplit()) {
         innerSplitter_->Unsplit(editorPanel_);
         editorPanel_->Hide();
-        SetClientSize(wxSize(GetClientSize().x - 420, GetClientSize().y));
+        SetClientSize(wxSize(GetClientSize().x - kEditorPaneDelta, GetClientSize().y));
     } else {
         editorPanel_->Show();
-        // Initial sash position: editor on the right at ~400px. SyncPanelMinSize
-        // re-asserts it after the frame grows so the editor keeps its width.
+        // Initial sash position: editor on the right at kEditorPaneWidth.
+        // SyncPanelMinSize re-asserts it after the frame grows so the editor
+        // keeps its width.
         int innerW = innerSplitter_->GetClientSize().x;
-        int sash = innerW > 420 ? innerW - 400 : innerW / 2;
+        int sash = innerW > kEditorPaneDelta ? innerW - kEditorPaneWidth : innerW / 2;
         innerSplitter_->SplitVertically(mainPanel_, editorPanel_, sash);
-        SetClientSize(wxSize(GetClientSize().x + 420, GetClientSize().y));
+        SetClientSize(wxSize(GetClientSize().x + kEditorPaneDelta, GetClientSize().y));
     }
     SyncPanelMinSize();
 }
 
 void ChatFrame::SyncPanelMinSize() {
-    int open = (splitter_->IsSplit() ? 1 : 0)
-             + (innerSplitter_->IsSplit() ? 1 : 0);
-    SetMinSize(wxSize(620 + 420 * open, 400));
+    int minW = 620
+             + (splitter_->IsSplit() ? kImportPaneDelta : 0)
+             + (innerSplitter_->IsSplit() ? kEditorPaneDelta : 0);
+    SetMinSize(wxSize(minW, 400));
 
     // Splitting/unsplitting the outer splitter resizes the inner one, which
     // moves its sash under the editor's gravity-1.0 resize rule and can
-    // squash the editor to its minimum. Re-assert the editor's ~400px width
-    // once the pending sizing has been applied.
+    // squash the editor to its minimum. Re-assert the editor's width once the
+    // pending sizing has been applied.
     if (innerSplitter_->IsSplit()) {
         splitter_->UpdateSize();
         innerSplitter_->UpdateSize();
         int w = innerSplitter_->GetClientSize().x;
-        int sash = w > 420 ? w - 400 : w / 2;
+        int sash = w > kEditorPaneDelta ? w - kEditorPaneWidth : w / 2;
         innerSplitter_->SetSashPosition(sash, false);
     }
+}
+
+void ChatFrame::PopulateEditorTree() {
+    if (!fileTree_) return;
+    fileTree_->DeleteAllItems();
+    editorFilePath_.clear();
+    if (activeCwd_.empty()) return;
+    wxString root = wxString::FromUTF8(activeCwd_);
+    auto* rootData = new FileTreeItemData(root, true);
+    wxTreeItemId rootItem = fileTree_->AddRoot(
+        wxFileName(root).GetFullName(), imgFolder_, -1, rootData);
+    PopulateTreeDir(rootItem, root);
+    // Root is hidden (TR_HIDE_ROOT); its children are the top-level entries.
+}
+
+void ChatFrame::PopulateTreeDir(wxTreeItemId parent, const wxString& path) {
+    if (!fileTree_) return;
+    fileTree_->DeleteChildren(parent);
+
+    wxDir dir;
+    if (!dir.Open(path)) return;
+
+    struct Entry {
+        wxString name;
+        bool isDir;
+    };
+    std::vector<Entry> entries;
+    wxString name;
+    bool cont = dir.GetFirst(&name, wxEmptyString, wxDIR_DIRS | wxDIR_FILES);
+    while (cont && entries.size() < 500) {
+        if (!name.empty() && name[0] != wxT('.')) {
+            wxString full = path + wxFILE_SEP_PATH + name;
+            entries.push_back({name, wxDirExists(full)});
+        }
+        cont = dir.GetNext(&name);
+    }
+    std::sort(entries.begin(), entries.end(), [](const Entry& a, const Entry& b) {
+        if (a.isDir != b.isDir) return a.isDir;  // dirs first
+        return a.name.Lower() < b.name.Lower();
+    });
+
+    for (const auto& e : entries) {
+        wxString full = path + wxFILE_SEP_PATH + e.name;
+        auto* data = new FileTreeItemData(full, e.isDir);
+        int img = e.isDir ? imgFolder_ : imgFile_;
+        wxTreeItemId item = fileTree_->AppendItem(parent, e.name, img, -1, data);
+        if (e.isDir) fileTree_->SetItemHasChildren(item, true);
+    }
+}
+
+void ChatFrame::OnEditorTreeExpanding(wxTreeEvent& e) {
+    auto* data = dynamic_cast<FileTreeItemData*>(fileTree_->GetItemData(e.GetItem()));
+    if (data && data->isDir) {
+        PopulateTreeDir(e.GetItem(), data->path);
+    }
+    e.Skip();
+}
+
+void ChatFrame::OnEditorTreeSelect(wxTreeEvent& e) {
+    auto* data = dynamic_cast<FileTreeItemData*>(fileTree_->GetItemData(e.GetItem()));
+    if (data && !data->isDir) {
+        LoadFileIntoEditor(data->path);
+    }
+    e.Skip();
+}
+
+void ChatFrame::LoadFileIntoEditor(const wxString& path) {
+    wxFile f(path, wxFile::read);
+    if (!f.IsOpened()) return;
+
+    wxFileOffset len = f.Length();
+    const wxFileOffset kMaxBytes = 2 * 1024 * 1024;
+    if (len > kMaxBytes) {
+        codeEdit_->SetValue(
+            wxString::Format("File is %lld bytes — too large to open here.",
+                             (long long)len));
+        editorFilePath_.clear();
+        return;
+    }
+
+    std::vector<char> buf((size_t)len + 1);
+    size_t n = f.Read(buf.data(), (size_t)len);
+    buf[n] = 0;
+    if (memchr(buf.data(), 0, n)) {
+        codeEdit_->SetValue("[ Binary file — not shown ]");
+        editorFilePath_.clear();
+        return;
+    }
+
+    codeEdit_->SetValue(wxString::FromUTF8(buf.data(), n));
+    editorFilePath_ = path;
+}
+
+void ChatFrame::SaveEditorFile() {
+    if (editorFilePath_.empty()) return;
+    wxFile f(editorFilePath_, wxFile::write);
+    if (!f.IsOpened()) {
+        wxMessageBox("Could not open file for writing:\n" + editorFilePath_,
+                     "gritcode", wxOK | wxICON_ERROR, this);
+        return;
+    }
+    const wxScopedCharBuffer utf8 = codeEdit_->GetValue().utf8_str();
+    f.Write(utf8.data(), utf8.length());
+    f.Close();
 }
 
 void ChatFrame::OnExport(wxCommandEvent&) {
@@ -2034,8 +2196,8 @@ void ChatFrame::ShowImportDialog() {
     // Split to show the import panel on the left.
     if (!splitter_->IsSplit()) {
         importPanel_->Show();
-        splitter_->SplitVertically(importPanel_, innerSplitter_, 400);
-        SetClientSize(wxSize(GetClientSize().x + 420, GetClientSize().y));
+        splitter_->SplitVertically(importPanel_, innerSplitter_, kImportPaneWidth);
+        SetClientSize(wxSize(GetClientSize().x + kImportPaneDelta, GetClientSize().y));
         SyncPanelMinSize();
     }
 }
