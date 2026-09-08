@@ -225,7 +225,6 @@ private:
     // open/close, and keep the minimum width in sync with how many are open.
     void SyncPanelSizing(int delta);
     void SyncPanelMinSize();
-    void FixEditorSash();
     // Project file tree in the right editor panel.
     void PopulateEditorTree();
     void PopulateTreeDir(wxTreeItemId parent, const wxString& path);
@@ -272,8 +271,7 @@ private:
     wxString importedFileName_;                          // display name of imported file
 
     // ---- Editor panel (right) ----
-    wxSplitterWindow* innerSplitter_ = nullptr;          // main | editor splitter
-    wxPanel* editorPanel_ = nullptr;                     // right pane of inner splitter
+    wxPanel* editorPanel_ = nullptr;                     // right-side fixed-width panel
     wxSplitterWindow* editorSplitter_ = nullptr;         // file tree | editor
     wxTreeCtrl* fileTree_ = nullptr;                     // project file tree
     wxTextCtrl* codeEdit_ = nullptr;                     // editable file content

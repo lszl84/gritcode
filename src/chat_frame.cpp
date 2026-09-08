@@ -70,12 +70,13 @@ constexpr int ID_HAMBURGER = wxID_HIGHEST + 15;
 constexpr int ID_EDITOR   = wxID_HIGHEST + 16;
 
 // Side-panel widths (pixels) and the window delta used when toggling them.
-// The delta is the pane width plus a bit for the splitter sash so the chat
-// pane keeps (roughly) its current width when a panel opens.
+// The import pane lives in the main splitter, so its delta includes a bit for
+// the sash; the editor is a sizer sibling with no sash, so its delta is exact.
 constexpr int kImportPaneWidth  = 400;
 constexpr int kImportPaneDelta  = kImportPaneWidth + 20;
 constexpr int kEditorPaneWidth  = 560;
-constexpr int kEditorPaneDelta  = kEditorPaneWidth + 20;
+constexpr int kEditorPaneDelta  = kEditorPaneWidth;
+constexpr int kMainMinClientW   = 610;   // min client width with no panels
 
 // Payload attached to each file-tree node.
 class FileTreeItemData : public wxTreeItemData {
@@ -520,16 +521,10 @@ ChatFrame::ChatFrame()
         wxDefaultPosition, wxDefaultSize, wxSP_LIVE_UPDATE);
     splitter_->SetMinimumPaneSize(200);
 
-    // Inner splitter holds the main chat (left) and the editor (right).
-    // Gravity 1.0 keeps the editor at a fixed width while the chat pane
-    // absorbs window resizes — the mirror image of the import pane on the left.
-    innerSplitter_ = new wxSplitterWindow(splitter_, wxID_ANY,
-        wxDefaultPosition, wxDefaultSize, wxSP_LIVE_UPDATE);
-    innerSplitter_->SetMinimumPaneSize(200);
-    innerSplitter_->SetSashGravity(1.0);
-
-    // Main panel: left pane of the inner splitter.
-    auto* panel = new wxPanel(innerSplitter_);
+    // Main panel: right pane of the import/main splitter (back to the flat
+    // two-pane layout — the editor is a sibling of the splitter, not nested
+    // inside it, so the two panes never fight over each other's sash).
+    auto* panel = new wxPanel(splitter_);
     mainPanel_ = panel;
     auto* outer = new wxBoxSizer(wxVERTICAL);
 
@@ -646,10 +641,12 @@ ChatFrame::ChatFrame()
     root->Add(outer, 1, wxEXPAND | wxALL, FromDIP(2));
     panel->SetSizer(root);
 
-    // Editor — right pane of the inner splitter, hidden until the editor
+    // Editor — fixed-width panel on the right of the frame, a sibling of the
+    // import/main splitter (not nested inside it). Hidden until the editor
     // toggle. Mirrors pyview: a project file tree on the left and an editable
     // text area on the right.
-    editorPanel_ = new wxPanel(innerSplitter_);
+    editorPanel_ = new wxPanel(this);
+    editorPanel_->SetMinSize(wxSize(kEditorPaneWidth, -1));
     auto* editorSizer = new wxBoxSizer(wxVERTICAL);
 
     editorSplitter_ = new wxSplitterWindow(editorPanel_, wxID_ANY,
@@ -776,11 +773,11 @@ ChatFrame::ChatFrame()
         e.Skip();
     });
 
-    splitter_->Initialize(innerSplitter_);  // Right pane only at start
-    innerSplitter_->Initialize(mainPanel_);  // Editor hidden at start
+    splitter_->Initialize(mainPanel_);  // Right pane only at start
 
     auto* frameSizer = new wxBoxSizer(wxHORIZONTAL);
     frameSizer->Add(splitter_, 1, wxEXPAND);
+    frameSizer->Add(editorPanel_, 0, wxEXPAND);  // hidden until editor toggle
     SetSizer(frameSizer);
 
     // Open the most recent session if one exists; otherwise seed one for the
@@ -1869,24 +1866,19 @@ void ChatFrame::OnHamburger(wxCommandEvent&) {
         SyncPanelSizing(-kImportPaneDelta);
     } else {
         importPanel_->Show();
-        splitter_->SplitVertically(importPanel_, innerSplitter_, kImportPaneWidth);
+        splitter_->SplitVertically(importPanel_, mainPanel_, kImportPaneWidth);
         SyncPanelSizing(+kImportPaneDelta);
     }
 }
 
 void ChatFrame::OnEditorToggle(wxCommandEvent&) {
-    if (innerSplitter_->IsSplit()) {
-        innerSplitter_->Unsplit(editorPanel_);
+    if (editorPanel_->IsShown()) {
         editorPanel_->Hide();
+        GetSizer()->Show(editorPanel_, false);
         SyncPanelSizing(-kEditorPaneDelta);
     } else {
         editorPanel_->Show();
-        // Initial sash position: editor on the right at kEditorPaneWidth.
-        // FixEditorSash re-asserts it after the frame grows so the editor
-        // keeps its width.
-        int innerW = innerSplitter_->GetClientSize().x;
-        int sash = innerW > kEditorPaneDelta ? innerW - kEditorPaneWidth : innerW / 2;
-        innerSplitter_->SplitVertically(mainPanel_, editorPanel_, sash);
+        GetSizer()->Show(editorPanel_, true);
         SyncPanelSizing(+kEditorPaneDelta);
     }
 }
@@ -1897,31 +1889,16 @@ void ChatFrame::SyncPanelSizing(int delta) {
     int w = GetClientSize().x;
     SyncPanelMinSize();
     SetClientSize(wxSize(w + delta, GetClientSize().y));
-    // Force the nested splitters to settle synchronously — wxSP_LIVE_UPDATE
-    // defers pane resizing to idle, so back-to-back toggles otherwise read
-    // stale sizes and skip relayouts.
     Layout();
     splitter_->UpdateSize();
-    innerSplitter_->UpdateSize();
-    FixEditorSash();
+    editorPanel_->Layout();
 }
 
 void ChatFrame::SyncPanelMinSize() {
-    int minW = 620
+    int minW = kMainMinClientW
              + (splitter_->IsSplit() ? kImportPaneDelta : 0)
-             + (innerSplitter_->IsSplit() ? kEditorPaneDelta : 0);
-    SetMinSize(wxSize(minW, 400));
-}
-
-void ChatFrame::FixEditorSash() {
-    // Splitting/unsplitting the outer splitter resizes the inner one, which
-    // moves its sash under the editor's gravity-1.0 resize rule and can
-    // squash the editor to its minimum. Re-assert the editor's width once the
-    // pending sizing has been applied.
-    if (!innerSplitter_->IsSplit()) return;
-    int w = innerSplitter_->GetClientSize().x;
-    int sash = w > kEditorPaneDelta ? w - kEditorPaneWidth : w / 2;
-    innerSplitter_->SetSashPosition(sash, false);
+             + (editorPanel_->IsShown() ? kEditorPaneWidth : 0);
+    SetMinClientSize(wxSize(minW, 400));
 }
 
 void ChatFrame::PopulateEditorTree() {
@@ -2208,7 +2185,7 @@ void ChatFrame::ShowImportDialog() {
     // Split to show the import panel on the left.
     if (!splitter_->IsSplit()) {
         importPanel_->Show();
-        splitter_->SplitVertically(importPanel_, innerSplitter_, kImportPaneWidth);
+        splitter_->SplitVertically(importPanel_, mainPanel_, kImportPaneWidth);
         SyncPanelSizing(+kImportPaneDelta);
     }
 }
