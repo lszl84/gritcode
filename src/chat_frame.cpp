@@ -74,6 +74,11 @@ constexpr int ID_TREE_NEW_FILE      = wxID_HIGHEST + 17;
 constexpr int ID_TREE_RENAME        = wxID_HIGHEST + 18;
 constexpr int ID_TREE_SHOW_IN_FILES = wxID_HIGHEST + 19;
 constexpr int ID_TREE_NEW_FOLDER    = wxID_HIGHEST + 20;
+constexpr int ID_EDITOR_SAVE        = wxID_HIGHEST + 21;
+constexpr int ID_EDITOR_SAVE_AS     = wxID_HIGHEST + 22;
+constexpr int ID_EDITOR_RELOAD      = wxID_HIGHEST + 23;
+constexpr int ID_EDITOR_CLOSE       = wxID_HIGHEST + 24;
+constexpr int ID_EDITOR_SHOW_IN_FILES = wxID_HIGHEST + 25;
 
 // Side-panel widths (pixels). The import pane lives in the outer splitter and
 // the editor pane lives in the inner (chat | editor) splitter, so the window
@@ -694,6 +699,8 @@ ChatFrame::ChatFrame()
         mono.SetFamily(wxFONTFAMILY_TELETYPE);
         codeEdit_->SetFont(mono);
     }
+    codeEdit_->Bind(wxEVT_TEXT, &ChatFrame::OnEditorTextChanged, this);
+    codeEdit_->Bind(wxEVT_CONTEXT_MENU, &ChatFrame::OnEditorContextMenu, this);
     editSizer->Add(codeEdit_, 1, wxEXPAND);
     editPane->SetSizer(editSizer);
 
@@ -973,7 +980,8 @@ ChatFrame::ChatFrame()
         return guiSync([this, cwd]() -> nlohmann::json {
             if (streaming_) return {{"ok", false}, {"reason", "streaming"}};
             if (cwd == activeCwd_) return {{"ok", true}};
-            SwitchToCwd(cwd);
+            if (!SwitchToCwd(cwd))
+                return {{"ok", false}, {"reason", "cancelled"}};
             return {{"ok", true}};
         });
     };
@@ -1432,6 +1440,10 @@ void ChatFrame::OnClose(wxCloseEvent& evt) {
         // Close() once their phase finishes.
         evt.Veto();
     } else {
+        if (!MaybeSaveEditor()) {
+            evt.Veto();
+            return;
+        }
         PersistActive();
         evt.Skip();
     }
@@ -1548,7 +1560,15 @@ void ChatFrame::OnSessionChoice(wxCommandEvent& evt) {
                      "gritcode", wxOK | wxICON_INFORMATION, this);
         return;
     }
-    SwitchToCwd(target);
+    if (!SwitchToCwd(target)) {
+        // Cancelled (unsaved editor changes): snap back to the active session.
+        for (int i = 0; i < (int)sessionCwds_.size(); ++i) {
+            if (sessionCwds_[i] == activeCwd_) {
+                sessionChoice_->SetSelection(i + 1);
+                break;
+            }
+        }
+    }
 }
 
 void ChatFrame::CreateNewSession() {
@@ -1562,6 +1582,9 @@ void ChatFrame::CreateNewSession() {
     std::string chosen = dlg.GetPath().ToStdString(wxConvUTF8);
     if (chosen.empty()) return;
     if (chosen == activeCwd_) return;  // already on this session
+
+    if (!MaybeSaveEditor()) return;  // cancelled: keep current session + editor
+    ClearEditorState();
 
     PersistActive();
     activeCwd_ = chosen;
@@ -1583,8 +1606,12 @@ void ChatFrame::CreateNewSession() {
     PopulateEditorTree();
 }
 
-void ChatFrame::SwitchToCwd(const std::string& cwd) {
+bool ChatFrame::SwitchToCwd(const std::string& cwd) {
     PERF_SCOPE("SwitchToCwd");
+    if (cwd == activeCwd_) return true;
+    if (!MaybeSaveEditor()) return false;  // cancelled: keep current session
+    ClearEditorState();
+
     PersistActive();
     std::vector<nlohmann::json> hist;
     bool existed = store_.Load(cwd, hist);
@@ -1603,6 +1630,7 @@ void ChatFrame::SwitchToCwd(const std::string& cwd) {
     RestoreCanvasMaybeDeferred();
     RefreshSessionChoice();
     PopulateEditorTree();
+    return true;
 }
 
 void ChatFrame::PersistActive() {
@@ -1926,6 +1954,7 @@ void ChatFrame::OnEditorToggle(wxCommandEvent&) {
         innerSplitter_->SplitVertically(mainPanel_, editorPanel_, centerW);
         SyncPanelSizing(centerW);
     }
+    UpdateWindowTitle();
 }
 
 void ChatFrame::SyncPanelSizing(int centerW) {
@@ -1963,7 +1992,6 @@ void ChatFrame::OnInnerSashChanging(wxSplitterEvent& e) {
 void ChatFrame::PopulateEditorTree() {
     if (!fileTree_) return;
     fileTree_->DeleteAllItems();
-    editorFilePath_.clear();
     if (activeCwd_.empty()) return;
     wxString root = wxString::FromUTF8(activeCwd_);
     auto* rootData = new FileTreeItemData(root, true);
@@ -2019,9 +2047,37 @@ void ChatFrame::OnEditorTreeExpanding(wxTreeEvent& e) {
 void ChatFrame::OnEditorTreeSelect(wxTreeEvent& e) {
     auto* data = dynamic_cast<FileTreeItemData*>(fileTree_->GetItemData(e.GetItem()));
     if (data && !data->isDir) {
-        LoadFileIntoEditor(data->path);
+        if (data->path != editorFilePath_) {
+            // Switching to a different file: protect unsaved changes first.
+            if (!MaybeSaveEditor()) {
+                // Cancel: put the selection back on the open file (if it is
+                // still visible in the tree), otherwise clear it.
+                wxTreeItemId prev = FindTreeItemByPath(fileTree_->GetRootItem(),
+                                                       editorFilePath_);
+                if (prev.IsOk()) fileTree_->SelectItem(prev);
+                else fileTree_->UnselectAll();
+                return;
+            }
+            LoadFileIntoEditor(data->path);
+        }
     }
     e.Skip();
+}
+
+wxTreeItemId ChatFrame::FindTreeItemByPath(wxTreeItemId parent,
+                                           const wxString& path) {
+    if (!parent.IsOk()) return wxTreeItemId();
+    wxTreeItemIdValue cookie;
+    for (wxTreeItemId c = fileTree_->GetFirstChild(parent, cookie);
+         c.IsOk(); c = fileTree_->GetNextChild(parent, cookie)) {
+        auto* d = dynamic_cast<FileTreeItemData*>(fileTree_->GetItemData(c));
+        if (d && d->path == path) return c;
+        if (fileTree_->ItemHasChildren(c)) {
+            wxTreeItemId found = FindTreeItemByPath(c, path);
+            if (found.IsOk()) return found;
+        }
+    }
+    return wxTreeItemId();
 }
 
 void ChatFrame::OnEditorTreeContextMenu(wxContextMenuEvent& e) {
@@ -2110,13 +2166,13 @@ void ChatFrame::OnTreeNewFile(wxCommandEvent&) {
     if (parentItem.IsOk()) {
         PopulateTreeDir(parentItem, dir);
         fileTree_->Expand(parentItem);
-        // Select the new file and open it in the editor.
+        // Select the new file; OnEditorTreeSelect opens it in the editor
+        // (and guards any unsaved changes in the previously open file).
         wxTreeItemIdValue cookie;
         for (wxTreeItemId c = fileTree_->GetFirstChild(parentItem, cookie);
              c.IsOk(); c = fileTree_->GetNextChild(parentItem, cookie)) {
             if (fileTree_->GetItemText(c) == name) {
                 fileTree_->SelectItem(c);
-                LoadFileIntoEditor(path);
                 break;
             }
         }
@@ -2188,6 +2244,7 @@ void ChatFrame::OnTreeRename(wxCommandEvent&) {
     // Keep the open file's path in sync if it was just renamed.
     if (!treeCtxIsDir_ && editorFilePath_ == oldPath) {
         editorFilePath_ = newPath;
+        UpdateWindowTitle();
     }
 
     wxTreeItemId parent = fileTree_->GetItemParent(treeCtxItem_);
@@ -2236,10 +2293,12 @@ void ChatFrame::LoadFileIntoEditor(const wxString& path) {
     wxFileOffset len = f.Length();
     const wxFileOffset kMaxBytes = 2 * 1024 * 1024;
     if (len > kMaxBytes) {
-        codeEdit_->SetValue(
+        codeEdit_->ChangeValue(
             wxString::Format("File is %lld bytes — too large to open here.",
                              (long long)len));
         editorFilePath_.clear();
+        editorDirty_ = false;
+        UpdateWindowTitle();
         return;
     }
 
@@ -2247,26 +2306,143 @@ void ChatFrame::LoadFileIntoEditor(const wxString& path) {
     size_t n = f.Read(buf.data(), (size_t)len);
     buf[n] = 0;
     if (memchr(buf.data(), 0, n)) {
-        codeEdit_->SetValue("[ Binary file — not shown ]");
+        codeEdit_->ChangeValue("[ Binary file — not shown ]");
         editorFilePath_.clear();
+        editorDirty_ = false;
+        UpdateWindowTitle();
         return;
     }
 
-    codeEdit_->SetValue(wxString::FromUTF8(buf.data(), n));
+    codeEdit_->ChangeValue(wxString::FromUTF8(buf.data(), n));
     editorFilePath_ = path;
+    editorDirty_ = false;
+    UpdateWindowTitle();
 }
 
-void ChatFrame::SaveEditorFile() {
-    if (editorFilePath_.empty()) return;
-    wxFile f(editorFilePath_, wxFile::write);
-    if (!f.IsOpened()) {
-        wxMessageBox("Could not open file for writing:\n" + editorFilePath_,
-                     "gritcode", wxOK | wxICON_ERROR, this);
-        return;
-    }
+bool ChatFrame::WriteEditorFile(const wxString& path) {
+    wxFile f(path, wxFile::write);
+    if (!f.IsOpened()) return false;
     const wxScopedCharBuffer utf8 = codeEdit_->GetValue().utf8_str();
-    f.Write(utf8.data(), utf8.length());
+    bool ok = f.Write(utf8.data(), utf8.length()) == utf8.length();
     f.Close();
+    return ok;
+}
+
+bool ChatFrame::SaveEditorFile() {
+    if (editorFilePath_.empty()) return SaveEditorFileAs();
+    if (!WriteEditorFile(editorFilePath_)) {
+        wxMessageBox("Could not write file:\n" + editorFilePath_,
+                     "gritcode", wxOK | wxICON_ERROR, this);
+        return false;
+    }
+    editorDirty_ = false;
+    UpdateWindowTitle();
+    return true;
+}
+
+bool ChatFrame::SaveEditorFileAs() {
+    wxString dir, name;
+    if (!editorFilePath_.empty()) {
+        wxFileName fn(editorFilePath_);
+        dir = fn.GetPath();
+        name = fn.GetFullName();
+    } else {
+        dir = activeCwd_.empty() ? wxString() : wxString::FromUTF8(activeCwd_);
+        name = "untitled";
+    }
+    wxFileDialog dlg(this, "Save File As", dir, name,
+                     "All Files (*)|*", wxFD_SAVE | wxFD_OVERWRITE_PROMPT);
+    if (dlg.ShowModal() != wxID_OK) return false;
+
+    wxString path = dlg.GetPath();
+    if (!WriteEditorFile(path)) {
+        wxMessageBox("Could not write file:\n" + path,
+                     "gritcode", wxOK | wxICON_ERROR, this);
+        return false;
+    }
+    editorFilePath_ = path;
+    editorDirty_ = false;
+    UpdateWindowTitle();
+    return true;
+}
+
+void ChatFrame::ReloadEditorFile() {
+    if (editorFilePath_.empty()) return;
+    if (!MaybeSaveEditor()) return;
+    LoadFileIntoEditor(editorFilePath_);
+}
+
+void ChatFrame::CloseEditorFile() {
+    if (!MaybeSaveEditor()) return;
+    ClearEditorState();
+}
+
+void ChatFrame::ClearEditorState() {
+    codeEdit_->ChangeValue("");
+    editorFilePath_.clear();
+    editorDirty_ = false;
+    UpdateWindowTitle();
+}
+
+bool ChatFrame::MaybeSaveEditor() {
+    if (!editorDirty_) return true;
+
+    wxString name = editorFilePath_.empty()
+                  ? wxString("Untitled") : editorFilePath_;
+    wxMessageDialog dlg(this, "Save changes to \"" + name + "\"?",
+                        "Unsaved Changes", wxYES_NO | wxCANCEL | wxYES_DEFAULT);
+    dlg.SetYesNoLabels("Save", "Don't Save");
+    switch (dlg.ShowModal()) {
+        case wxID_YES: return SaveEditorFile();
+        case wxID_NO:  return true;
+        default:       return false;  // Cancel
+    }
+}
+
+void ChatFrame::OnEditorTextChanged(wxCommandEvent& e) {
+    if (!editorDirty_) {
+        editorDirty_ = true;
+        UpdateWindowTitle();
+    }
+    e.Skip();
+}
+
+void ChatFrame::OnEditorContextMenu(wxContextMenuEvent& e) {
+    bool hasFile = !editorFilePath_.empty();
+    wxMenu menu;
+    wxMenuItem* save = menu.Append(ID_EDITOR_SAVE, "Save\tCtrl+S");
+    menu.Append(ID_EDITOR_SAVE_AS, "Save As…");
+    menu.AppendSeparator();
+    wxMenuItem* reload = menu.Append(ID_EDITOR_RELOAD, "Reload from Disk");
+    wxMenuItem* close = menu.Append(ID_EDITOR_CLOSE, "Close File");
+    menu.AppendSeparator();
+    wxMenuItem* show = menu.Append(ID_EDITOR_SHOW_IN_FILES, "Show in Files");
+
+    save->Enable(hasFile);
+    reload->Enable(hasFile);
+    close->Enable(hasFile);
+    show->Enable(hasFile);
+
+    int id = codeEdit_->GetPopupMenuSelectionFromUser(menu, e.GetPosition());
+    switch (id) {
+        case ID_EDITOR_SAVE:         SaveEditorFile(); break;
+        case ID_EDITOR_SAVE_AS:      SaveEditorFileAs(); break;
+        case ID_EDITOR_RELOAD:       ReloadEditorFile(); break;
+        case ID_EDITOR_CLOSE:        CloseEditorFile(); break;
+        case ID_EDITOR_SHOW_IN_FILES:
+            if (!editorFilePath_.empty()) ShowFileInManager(editorFilePath_);
+            break;
+        default: break;
+    }
+}
+
+void ChatFrame::UpdateWindowTitle() {
+    wxString title = "gritcode";
+    if (innerSplitter_ && innerSplitter_->IsSplit() && !editorFilePath_.empty()) {
+        title = editorFilePath_ + wxString::FromUTF8(" — gritcode");
+        if (editorDirty_) title = "* " + title;
+    }
+    SetTitle(title);
 }
 
 void ChatFrame::OnExport(wxCommandEvent&) {

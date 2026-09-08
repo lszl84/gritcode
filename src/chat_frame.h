@@ -240,7 +240,17 @@ private:
     void OnTreeShowInFiles(wxCommandEvent& e);
     void ShowFileInManager(const wxString& path);
     void LoadFileIntoEditor(const wxString& path);
-    void SaveEditorFile();
+    bool SaveEditorFile();
+    bool SaveEditorFileAs();
+    bool WriteEditorFile(const wxString& path);
+    void ReloadEditorFile();
+    void CloseEditorFile();
+    void ClearEditorState();
+    bool MaybeSaveEditor();
+    void UpdateWindowTitle();
+    void OnEditorTextChanged(wxCommandEvent& e);
+    void OnEditorContextMenu(wxContextMenuEvent& e);
+    wxTreeItemId FindTreeItemByPath(wxTreeItemId parent, const wxString& path);
 
     // Repopulate the session choice from store_.List() with the leading
     // "New Session…" entry, then restore the active selection.
@@ -250,7 +260,7 @@ private:
     // pops a directory dialog, then either loads existing history for that
     // cwd or seeds a fresh one. Switch loads from disk and rebuilds canvas.
     void CreateNewSession();
-    void SwitchToCwd(const std::string& cwd);
+    bool SwitchToCwd(const std::string& cwd);
 
     // Persist current history to disk under activeCwd_.
     void PersistActive();
@@ -285,6 +295,7 @@ private:
     wxTreeCtrl* fileTree_ = nullptr;                     // project file tree
     wxTextCtrl* codeEdit_ = nullptr;                     // editable file content
     wxString editorFilePath_;                            // file open in codeEdit_
+    bool editorDirty_ = false;                           // unsaved changes in editor
     wxTreeItemId treeCtxItem_;                           // right-clicked tree item
     wxString treeCtxPath_;                               // right-clicked item path
     bool treeCtxIsDir_ = true;                           // right-clicked item is a dir
