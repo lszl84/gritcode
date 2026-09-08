@@ -50,9 +50,9 @@ const SecretSchema kSecretSchema = {
 
 void Preferences::Init() {
     if (wxConfigBase::Get(false) != nullptr) return;
-    // Move any legacy ~/.gritcode/gritcode.conf (and, on macOS, the
-    // ~/.local/share/gritcode data dir) into the current layout before the
-    // config file is opened so we read the migrated values, not an empty file.
+    // Migrate any files left behind by older releases (see app_paths.h for
+    // the full list) before the config opens, so we read migrated values
+    // rather than an empty file.
     app_paths::MigrateLegacyLayout();
 
     std::error_code ec;

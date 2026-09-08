@@ -1,6 +1,7 @@
 #pragma once
 #include <filesystem>
 #include <string>
+#include <vector>
 
 // Cross-platform application storage paths. Everything gritcode persists
 // lives under one of two directories, resolved here so the rest of the code
@@ -11,8 +12,9 @@
 //   macOS      data/config: ~/Library/Application Support/gritcode
 //   Windows    data/config: %APPDATA%\gritcode
 //
-// The legacy pre-XDG config dir (~/.gritcode on Unix) is referenced only so
-// MigrateLegacyLayout() can move an existing config file forward.
+// MigrateLegacyLayout() also moves any files left behind by older public
+// releases (v0.1.0 .. v0.5.0) into the current layout. See that function for
+// the exact list of legacy locations.
 
 namespace app_paths {
 
@@ -66,52 +68,111 @@ inline std::string AppConfigDir() {
 #endif
 }
 
-// Where the pre-XDG config file used to live. Empty on Windows, which never
-// used the ~/.gritcode convention.
-inline std::string LegacyConfigDir() {
-#ifdef _WIN32
-    return std::string();
-#else
-    return HomeDir() + "/.gritcode";
-#endif
+namespace detail {
+
+inline bool Exists(const std::string& p) {
+    std::error_code ec;
+    return std::filesystem::exists(p, ec) && !ec;
 }
 
-// One-time, idempotent migration of the legacy on-disk layout into the
-// current XDG / macOS layout. Runs before any config or data store opens.
-inline void MigrateLegacyLayout() {
+inline bool IsDir(const std::string& p) {
     std::error_code ec;
+    return std::filesystem::is_directory(p, ec) && !ec;
+}
 
-    // 1) Config: ~/.gritcode/gritcode.conf -> <config dir>/gritcode.conf.
-    // Move (not copy) so the legacy dotfile doesn't linger after upgrade.
-    std::string legacyDir = LegacyConfigDir();
-    if (!legacyDir.empty()) {
-        std::string src = legacyDir + "/gritcode.conf";
-        std::string dst = AppConfigDir() + "/gritcode.conf";
-        if (std::filesystem::exists(src, ec) &&
-            !std::filesystem::exists(dst, ec)) {
-            std::filesystem::create_directories(AppConfigDir(), ec);
-            std::filesystem::rename(src, dst, ec);
-            if (ec) {  // cross-device fallback: copy, leave source behind
-                ec.clear();
-                std::filesystem::copy_file(src, dst, ec);
-            }
+// Move a single file from src to dst, but only if src exists and dst does
+// not. Never overwrites existing data. Renames first (same volume); falls
+// back to copy when the destination is on another filesystem. Returns true
+// if dst exists afterwards.
+inline bool MoveFile(const std::string& src, const std::string& dst) {
+    std::error_code ec;
+    if (!Exists(src) || Exists(dst)) return false;
+    std::filesystem::create_directories(
+        std::filesystem::path(dst).parent_path(), ec);
+    ec.clear();
+    std::filesystem::rename(src, dst, ec);
+    if (ec) {
+        ec.clear();
+        std::filesystem::copy_file(src, dst, ec);
+    }
+    return Exists(dst);
+}
+
+// Move each child of srcDir into dstDir unless a child of the same name
+// already exists there. Child names are collected before any rename so the
+// move doesn't invalidate the directory iterator.
+inline void MergeDir(const std::string& srcDir, const std::string& dstDir) {
+    std::error_code ec;
+    if (!IsDir(srcDir)) return;
+    std::filesystem::create_directories(dstDir, ec);
+
+    std::vector<std::string> names;
+    for (auto& e : std::filesystem::directory_iterator(srcDir, ec)) {
+        if (ec) { ec.clear(); break; }
+        names.push_back(e.path().filename().string());
+    }
+    for (const auto& name : names) {
+        std::string src = srcDir + "/" + name;
+        std::string dst = dstDir + "/" + name;
+        if (Exists(dst)) continue;
+        ec.clear();
+        std::filesystem::rename(src, dst, ec);
+        if (ec) {
+            // Cross-device: copy the file; leave directories behind (moving a
+            // whole tree across filesystems is rare and not worth the risk).
+            ec.clear();
+            if (!IsDir(src)) std::filesystem::copy_file(src, dst, ec);
         }
     }
+}
 
-    // 2) macOS data: ~/.local/share/gritcode ->
-    //    ~/Library/Application Support/gritcode.
+}  // namespace detail
+
+// One-time, idempotent migration of the on-disk layout used by older public
+// releases into the current XDG / macOS layout. Runs before any config or
+// data store opens, and never overwrites a file that already exists in the
+// destination, so it is safe to call on every startup.
+//
+// Public release history (all "gritcode"; the pre-v0.1.0 "wx_gritcode" alphas
+// were never shipped, so their ~/.wx_gritcode / ~/.config/wx_gritcode.conf
+// paths are intentionally not migrated):
+//   v0.1.0..v0.5.0  config      ~/.gritcode/gritcode.conf        (Linux)
+//   v0.1.0..v0.5.0  config      ~/Library/Application Support/gritcode/gritcode.conf (macOS)
+//   v0.1.0..now     sessions    ~/.local/share/gritcode          (Linux AND macOS)
+//   v0.1.0..30a4aad run_configs ~/.gritcode/run_configs.json     (Linux)
+//   v0.1.0..30a4aad run_configs ~/Library/Application Support/gritcode/run_configs.json (macOS)
+inline void MigrateLegacyLayout() {
+    std::string home = HomeDir();
+    std::string configDir = AppConfigDir();
+    std::string dataDir = AppDataDir();
+
+    // 1) Config file: move the legacy Linux dotfile into the XDG config dir.
+    //    On macOS the legacy location is already AppConfigDir(), so this is a
+    //    no-op there.
+    detail::MoveFile(home + "/.gritcode/gritcode.conf",
+                     configDir + "/gritcode.conf");
+
+    // 2) run_configs.json: before commit 30a4aad it lived in
+    //    ~/.gritcode/run_configs.json on Linux (wxStandardPaths::GetUserDataDir).
+    //    Recover it if it was orphaned there.
+    detail::MoveFile(home + "/.gritcode/run_configs.json",
+                     dataDir + "/run_configs.json");
+
 #ifdef __APPLE__
-    {
-        std::string legacyData = HomeDir() + "/.local/share/gritcode";
-        std::string newData = AppDataDir();
-        if (std::filesystem::is_directory(legacyData, ec) &&
-            !std::filesystem::exists(newData, ec)) {
-            std::filesystem::create_directories(
-                std::filesystem::path(newData).parent_path(), ec);
-            std::filesystem::rename(legacyData, newData, ec);
-        }
-    }
+    // 3) macOS data: sessions/memory/images used to live in
+    //    ~/.local/share/gritcode (the Linux convention). Merge them into
+    //    ~/Library/Application Support/gritcode, which already holds the
+    //    config file. Merge, don't rename the whole dir, so we don't clobber
+    //    the existing gritcode.conf.
+    detail::MergeDir(home + "/.local/share/gritcode", dataDir);
 #endif
+
+    // Best-effort cleanup: remove ~/.gritcode if it's now empty. Fails
+    // silently (error_code) if anything is left in it.
+    {
+        std::error_code ec;
+        std::filesystem::remove(home + "/.gritcode", ec);
+    }
 }
 
 }  // namespace app_paths
