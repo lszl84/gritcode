@@ -73,13 +73,15 @@ constexpr int ID_EDITOR   = wxID_HIGHEST + 16;
 constexpr int ID_TREE_NEW_FILE      = wxID_HIGHEST + 17;
 constexpr int ID_TREE_RENAME        = wxID_HIGHEST + 18;
 constexpr int ID_TREE_SHOW_IN_FILES = wxID_HIGHEST + 19;
+constexpr int ID_TREE_NEW_FOLDER    = wxID_HIGHEST + 20;
 
-// Side-panel widths (pixels). The import pane lives in the main splitter, so
-// the window must grow by pane width + the splitter sash to keep the chat
-// pane at a fixed width; the editor is a sizer sibling with no sash.
+// Side-panel widths (pixels). The import pane lives in the outer splitter and
+// the editor pane lives in the inner (chat | editor) splitter, so the window
+// grows by each pane width plus its splitter sash to keep the chat pane fixed.
 constexpr int kImportPaneWidth  = 400;
 constexpr int kFileTreeWidth    = 280;   // fixed (non-resizable) file tree width
-constexpr int kEditorPaneWidth  = kFileTreeWidth * 5 / 2;  // default = 2.5x tree
+constexpr int kEditorTextWidth  = kFileTreeWidth * 5 / 2;  // editor text = 2.5x tree
+constexpr int kEditorPaneWidth  = kFileTreeWidth + kEditorTextWidth;  // whole right pane
 constexpr int kMainMinClientW   = 610;   // min chat-pane width with no panels
 
 // Payload attached to each file-tree node.
@@ -534,6 +536,7 @@ ChatFrame::ChatFrame()
         wxDefaultPosition, wxDefaultSize, wxSP_LIVE_UPDATE);
     innerSplitter_->SetMinimumPaneSize(150);
     editorPaneW_ = kEditorPaneWidth;
+    mainPaneW_ = kMainMinClientW;
 
     // Main panel: left pane of the inner splitter.
     auto* panel = new wxPanel(innerSplitter_);
@@ -866,7 +869,9 @@ ChatFrame::ChatFrame()
     fileTree_->Bind(wxEVT_TREE_ITEM_EXPANDING, &ChatFrame::OnEditorTreeExpanding, this);
     fileTree_->Bind(wxEVT_TREE_SEL_CHANGED, &ChatFrame::OnEditorTreeSelect, this);
     fileTree_->Bind(wxEVT_TREE_ITEM_MENU, &ChatFrame::OnEditorTreeItemMenu, this);
+    fileTree_->Bind(wxEVT_CONTEXT_MENU, &ChatFrame::OnEditorTreeContextMenu, this);
     Bind(wxEVT_MENU, &ChatFrame::OnTreeNewFile, this, ID_TREE_NEW_FILE);
+    Bind(wxEVT_MENU, &ChatFrame::OnTreeNewFolder, this, ID_TREE_NEW_FOLDER);
     Bind(wxEVT_MENU, &ChatFrame::OnTreeRename, this, ID_TREE_RENAME);
     Bind(wxEVT_MENU, &ChatFrame::OnTreeShowInFiles, this, ID_TREE_SHOW_IN_FILES);
     Bind(wxEVT_BUTTON, &ChatFrame::OnPlay, this, ID_PLAY);
@@ -1919,6 +1924,10 @@ void ChatFrame::OnEditorToggle(wxCommandEvent&) {
 }
 
 void ChatFrame::SyncPanelSizing(int centerW) {
+    // The chat pane width is the fixed quantity; store it so window resizes
+    // (OnInnerSashResize) keep it pinned and let the editor absorb the delta.
+    mainPaneW_ = centerW;
+
     // Import pane width includes the splitter sash, and the editor counts its
     // (possibly user-adjusted) width plus the inner sash. The target window
     // width is the fixed chat width plus whatever panes are visible, so
@@ -1927,36 +1936,47 @@ void ChatFrame::SyncPanelSizing(int centerW) {
                 ? kImportPaneWidth + splitter_->GetSashSize() : 0;
     int editorW = innerSplitter_->IsSplit()
                 ? editorPaneW_ + innerSplitter_->GetSashSize() : 0;
+    // Minimum editor width is the splitter's own minimum pane size, not the
+    // current editor width — otherwise the window couldn't shrink and the
+    // editor couldn't absorb a right-edge resize.
+    int editorMinW = innerSplitter_->IsSplit()
+                ? innerSplitter_->GetMinimumPaneSize() + innerSplitter_->GetSashSize() : 0;
 
-    SetMinClientSize(wxSize(kMainMinClientW + importW + editorW, 400));
+    SetMinClientSize(wxSize(kMainMinClientW + importW + editorMinW, 400));
     SetClientSize(wxSize(centerW + importW + editorW, GetClientSize().y));
     Layout();
     splitter_->UpdateSize();
     innerSplitter_->UpdateSize();
-    // The inner sash is pinned by OnInnerSashResize, which keeps the editor
-    // at editorPaneW_ during any resize; no explicit sash re-assert here.
+    // The inner sash is pinned by OnInnerSashResize, which keeps the chat at
+    // mainPaneW_ during any resize; no explicit sash re-assert here.
 }
 
 void ChatFrame::OnInnerSashChanging(wxSplitterEvent& e) {
     // This only fires while the user drags the sash (programmatic sash moves
-    // never send SASH_POS_CHANGING), so it is safe to record the editor's
-    // user-chosen width here.
+    // never send SASH_POS_CHANGING), so it is safe to record both the chat
+    // and editor widths chosen by the user here.
+    mainPaneW_ = e.GetSashPosition();
     editorPaneW_ = innerSplitter_->GetClientSize().x
                  - e.GetSashPosition() - innerSplitter_->GetSashSize();
     e.Skip();
 }
 
 void ChatFrame::OnInnerSashResize(wxSplitterEvent& e) {
-    // Keep the editor at editorPaneW_ whenever the inner splitter is resized
-    // (e.g. the outer splitter re-parenting it during an import toggle), so
-    // the chat pane absorbs the resize instead of the sash drifting. The user
-    // can still drag the sash freely — that fires SASH_POS_CHANGED, not this.
+    // Keep the chat pane at mainPaneW_ whenever the inner splitter is resized
+    // (window-edge drags, or the outer splitter re-parenting it during an
+    // import toggle). The editor pane absorbs the difference, and its new
+    // width is recorded so a later editor toggle reopens it at that width.
+    // Dragging the inner sash still works: SASH_POS_CHANGING updates
+    // mainPaneW_/editorPaneW_ first.
     if (!innerSplitter_->IsSplit()) { e.Skip(); return; }
     int w = e.GetNewSize();
-    int sash = w - editorPaneW_ - innerSplitter_->GetSashSize();
+    int sash = mainPaneW_;
     int min = innerSplitter_->GetMinimumPaneSize();
     if (sash < min) sash = min;
+    if (sash > w - min - innerSplitter_->GetSashSize())
+        sash = w - min - innerSplitter_->GetSashSize();
     e.SetSashPosition(sash);
+    editorPaneW_ = w - sash - innerSplitter_->GetSashSize();
 }
 
 void ChatFrame::PopulateEditorTree() {
@@ -2024,7 +2044,19 @@ void ChatFrame::OnEditorTreeSelect(wxTreeEvent& e) {
 }
 
 void ChatFrame::OnEditorTreeItemMenu(wxTreeEvent& e) {
-    wxTreeItemId item = e.GetItem();
+    ShowTreeContextMenu(e.GetItem());
+}
+
+void ChatFrame::OnEditorTreeContextMenu(wxContextMenuEvent& e) {
+    // Right-click on empty tree area: find the item under the cursor (if any)
+    // so the menu can grey out file-specific actions.
+    wxPoint pt = fileTree_->ScreenToClient(e.GetPosition());
+    int flags = 0;
+    wxTreeItemId item = fileTree_->HitTest(pt, flags);
+    ShowTreeContextMenu(item);
+}
+
+void ChatFrame::ShowTreeContextMenu(wxTreeItemId item) {
     auto* data = item.IsOk()
         ? dynamic_cast<FileTreeItemData*>(fileTree_->GetItemData(item)) : nullptr;
 
@@ -2040,17 +2072,18 @@ void ChatFrame::OnEditorTreeItemMenu(wxTreeEvent& e) {
 
     wxMenu menu;
     menu.Append(ID_TREE_NEW_FILE, "New File");
-    if (item.IsOk()) {
-        menu.AppendSeparator();
-        menu.Append(ID_TREE_RENAME, "Rename");
-        menu.Append(ID_TREE_SHOW_IN_FILES, "Show in Files");
+    menu.Append(ID_TREE_NEW_FOLDER, "New Folder");
+    menu.AppendSeparator();
+    wxMenuItem* renameItem = menu.Append(ID_TREE_RENAME, "Rename");
+    wxMenuItem* showItem = menu.Append(ID_TREE_SHOW_IN_FILES, "Show in Files");
+    if (!item.IsOk()) {
+        renameItem->Enable(false);
+        showItem->Enable(false);
     }
     fileTree_->PopupMenu(&menu);
 }
 
-void ChatFrame::OnTreeNewFile(wxCommandEvent&) {
-    wxString dir;
-    wxTreeItemId parentItem;
+void ChatFrame::TreeCtxTarget(wxString& dir, wxTreeItemId& parentItem) {
     if (treeCtxItem_.IsOk() && treeCtxIsDir_) {
         dir = treeCtxPath_;
         parentItem = treeCtxItem_;
@@ -2061,6 +2094,12 @@ void ChatFrame::OnTreeNewFile(wxCommandEvent&) {
         dir = wxString::FromUTF8(activeCwd_);
         parentItem = wxTreeItemId();
     }
+}
+
+void ChatFrame::OnTreeNewFile(wxCommandEvent&) {
+    wxString dir;
+    wxTreeItemId parentItem;
+    TreeCtxTarget(dir, parentItem);
 
     wxString name = wxGetTextFromUser("File name:", "New File", "", this);
     if (name.empty()) return;
@@ -2098,6 +2137,40 @@ void ChatFrame::OnTreeNewFile(wxCommandEvent&) {
                 break;
             }
         }
+    } else {
+        PopulateEditorTree();
+    }
+}
+
+void ChatFrame::OnTreeNewFolder(wxCommandEvent&) {
+    wxString dir;
+    wxTreeItemId parentItem;
+    TreeCtxTarget(dir, parentItem);
+
+    wxString name = wxGetTextFromUser("Folder name:", "New Folder", "", this);
+    if (name.empty()) return;
+    if (name.Find(wxFILE_SEP_PATH) != wxNOT_FOUND) {
+        wxMessageBox("The folder name cannot contain path separators.",
+                     "gritcode", wxOK | wxICON_ERROR, this);
+        return;
+    }
+
+    wxString path = dir + wxFILE_SEP_PATH + name;
+    if (wxFileExists(path) || wxDirExists(path)) {
+        wxMessageBox("A file or directory with that name already exists:\n" + path,
+                     "gritcode", wxOK | wxICON_ERROR, this);
+        return;
+    }
+
+    if (!wxMkdir(path)) {
+        wxMessageBox("Could not create folder:\n" + path,
+                     "gritcode", wxOK | wxICON_ERROR, this);
+        return;
+    }
+
+    if (parentItem.IsOk()) {
+        PopulateTreeDir(parentItem, dir);
+        fileTree_->Expand(parentItem);
     } else {
         PopulateEditorTree();
     }

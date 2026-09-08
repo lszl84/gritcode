@@ -233,7 +233,11 @@ private:
     void OnEditorTreeExpanding(wxTreeEvent& e);
     void OnEditorTreeSelect(wxTreeEvent& e);
     void OnEditorTreeItemMenu(wxTreeEvent& e);
+    void OnEditorTreeContextMenu(wxContextMenuEvent& e);
+    void ShowTreeContextMenu(wxTreeItemId item);
+    void TreeCtxTarget(wxString& dir, wxTreeItemId& parentItem);
     void OnTreeNewFile(wxCommandEvent& e);
+    void OnTreeNewFolder(wxCommandEvent& e);
     void OnTreeRename(wxCommandEvent& e);
     void OnTreeShowInFiles(wxCommandEvent& e);
     void ShowFileInManager(const wxString& path);
@@ -286,6 +290,7 @@ private:
     wxTreeItemId treeCtxItem_;                           // right-clicked tree item
     wxString treeCtxPath_;                               // right-clicked item path
     bool treeCtxIsDir_ = true;                           // right-clicked item is a dir
+    int mainPaneW_ = 0;                                  // chat pane width (pinned on resize)
     int editorPaneW_ = 0;                                // editor width (user-adjustable)
     int imgFolder_ = -1;                                 // tree icon indices
     int imgFile_ = -1;
