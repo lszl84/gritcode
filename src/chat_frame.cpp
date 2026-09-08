@@ -644,7 +644,10 @@ ChatFrame::ChatFrame()
     outer->Add(toolbarRow, 0, wxEXPAND | wxTOP, 4);
 
     auto* root = new wxBoxSizer(wxVERTICAL);
-    root->Add(outer, 1, wxEXPAND | wxALL, FromDIP(2));
+    // Left/right padding only: the top/bottom padding lives on the frame
+    // sizer around the whole splitter, so the sashes don't overhang the
+    // padded content.
+    root->Add(outer, 1, wxEXPAND | wxLEFT | wxRIGHT, FromDIP(2));
     panel->SetSizer(root);
 
     // Editor — right pane of the inner splitter, hidden until the editor
@@ -687,7 +690,7 @@ ChatFrame::ChatFrame()
     editPane->SetSizer(editSizer);
 
     editorSplitter_->SplitVertically(treePane, editPane, 220);
-    editorSizer->Add(editorSplitter_, 1, wxEXPAND);
+    editorSizer->Add(editorSplitter_, 1, wxEXPAND | wxLEFT | wxRIGHT, FromDIP(2));
     editorPanel_->SetSizer(editorSizer);
     editorPanel_->Hide();
 
@@ -760,7 +763,9 @@ ChatFrame::ChatFrame()
     importSizer->Add(importEmptyView_, 1, wxEXPAND);
     importSizer->Add(importCanvas_, 1, wxEXPAND);
     importSizer->Add(bottomBox, 0, wxEXPAND);
-    importPanel_->SetSizer(importSizer);
+    auto* importRoot = new wxBoxSizer(wxVERTICAL);
+    importRoot->Add(importSizer, 1, wxEXPAND | wxLEFT | wxRIGHT, FromDIP(2));
+    importPanel_->SetSizer(importRoot);
     importPanel_->Hide();  // hidden until split
 
     // Click on import canvas copies prompt to main input.
@@ -786,7 +791,9 @@ ChatFrame::ChatFrame()
                          &ChatFrame::OnInnerSashResize, this);
 
     auto* frameSizer = new wxBoxSizer(wxHORIZONTAL);
-    frameSizer->Add(splitter_, 1, wxEXPAND);
+    // Top/bottom padding wraps the whole splitter so its sashes are inset
+    // from the window edges instead of running edge-to-edge.
+    frameSizer->Add(splitter_, 1, wxEXPAND | wxTOP | wxBOTTOM, FromDIP(2));
     SetSizer(frameSizer);
 
     // Open the most recent session if one exists; otherwise seed one for the
@@ -1911,27 +1918,9 @@ void ChatFrame::SyncPanelSizing(int centerW) {
 
     SetMinClientSize(wxSize(kMainMinClientW + importW + editorW, 400));
     SetClientSize(wxSize(centerW + importW + editorW, GetClientSize().y));
-
-    // The chat pane pads only its window-facing edges: when a side panel is
-    // open, the chat content sits flush against that panel's sash so it
-    // doesn't get an extra light gap next to the panes.
-    if (wxSizer* chatRoot = mainPanel_->GetSizer()) {
-        if (chatRoot->GetItemCount() == 1) {
-            wxSizerItem* item = chatRoot->GetItem(size_t(0));
-            int flags = wxEXPAND | wxTOP | wxBOTTOM;
-            if (!splitter_->IsSplit())      flags |= wxLEFT;
-            if (!innerSplitter_->IsSplit()) flags |= wxRIGHT;
-            item->SetFlag(flags);
-            item->SetBorder(FromDIP(2));
-        }
-    }
-
     Layout();
     splitter_->UpdateSize();
     innerSplitter_->UpdateSize();
-    // Re-layout the chat panel explicitly: its size may not have changed, so
-    // its sizer would otherwise keep the border it had on the previous pass.
-    mainPanel_->Layout();
     // The inner sash is pinned by OnInnerSashResize, which keeps the editor
     // at editorPaneW_ during any resize; no explicit sash re-assert here.
 }
