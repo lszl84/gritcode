@@ -275,7 +275,6 @@ private:
     // ---- Editor panel (right) ----
     wxSplitterWindow* innerSplitter_ = nullptr;          // main | editor splitter
     wxPanel* editorPanel_ = nullptr;                     // right pane of inner splitter
-    wxSplitterWindow* editorSplitter_ = nullptr;         // file tree | editor
     wxTreeCtrl* fileTree_ = nullptr;                     // project file tree
     wxTextCtrl* codeEdit_ = nullptr;                     // editable file content
     wxString editorFilePath_;                            // file open in codeEdit_

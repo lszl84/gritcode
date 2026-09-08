@@ -74,6 +74,7 @@ constexpr int ID_EDITOR   = wxID_HIGHEST + 16;
 // pane at a fixed width; the editor is a sizer sibling with no sash.
 constexpr int kImportPaneWidth  = 400;
 constexpr int kEditorPaneWidth  = 560;
+constexpr int kFileTreeWidth    = 280;   // fixed (non-resizable) file tree width
 constexpr int kMainMinClientW   = 610;   // min chat-pane width with no panels
 
 // Payload attached to each file-tree node.
@@ -651,16 +652,13 @@ ChatFrame::ChatFrame()
     panel->SetSizer(root);
 
     // Editor — right pane of the inner splitter, hidden until the editor
-    // toggle. Mirrors pyview: a project file tree on the left and an editable
-    // text area on the right.
+    // toggle. A project file tree on the left and an editable text area on
+    // the right, laid out side by side in a box sizer (no nested splitter,
+    // so the tree stays a fixed width).
     editorPanel_ = new wxPanel(innerSplitter_);
-    auto* editorSizer = new wxBoxSizer(wxVERTICAL);
+    auto* editorSizer = new wxBoxSizer(wxHORIZONTAL);
 
-    editorSplitter_ = new wxSplitterWindow(editorPanel_, wxID_ANY,
-        wxDefaultPosition, wxDefaultSize, wxSP_LIVE_UPDATE);
-    editorSplitter_->SetMinimumPaneSize(150);
-
-    auto* treePane = new wxPanel(editorSplitter_);
+    auto* treePane = new wxPanel(editorPanel_);
     auto* treeSizer = new wxBoxSizer(wxVERTICAL);
     fileTree_ = new wxTreeCtrl(treePane, wxID_ANY,
         wxDefaultPosition, wxDefaultSize,
@@ -675,8 +673,11 @@ ChatFrame::ChatFrame()
     }
     treeSizer->Add(fileTree_, 1, wxEXPAND);
     treePane->SetSizer(treeSizer);
+    // Fixed, non-resizable tree width.
+    treePane->SetMinSize(wxSize(kFileTreeWidth, -1));
+    treePane->SetMaxSize(wxSize(kFileTreeWidth, -1));
 
-    auto* editPane = new wxPanel(editorSplitter_);
+    auto* editPane = new wxPanel(editorPanel_);
     auto* editSizer = new wxBoxSizer(wxVERTICAL);
     codeEdit_ = new wxTextCtrl(editPane, wxID_ANY, "",
                                wxDefaultPosition, wxDefaultSize,
@@ -689,8 +690,10 @@ ChatFrame::ChatFrame()
     editSizer->Add(codeEdit_, 1, wxEXPAND);
     editPane->SetSizer(editSizer);
 
-    editorSplitter_->SplitVertically(treePane, editPane, 220);
-    editorSizer->Add(editorSplitter_, 1, wxEXPAND | wxLEFT | wxRIGHT, FromDIP(2));
+    // Left/right padding matches the other panes; the tree and editor sit
+    // flush against each other with no sash between them.
+    editorSizer->Add(treePane, 0, wxEXPAND | wxLEFT, FromDIP(2));
+    editorSizer->Add(editPane, 1, wxEXPAND | wxRIGHT, FromDIP(2));
     editorPanel_->SetSizer(editorSizer);
     editorPanel_->Hide();
 
