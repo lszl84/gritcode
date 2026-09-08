@@ -73,8 +73,8 @@ constexpr int ID_EDITOR   = wxID_HIGHEST + 16;
 // the window must grow by pane width + the splitter sash to keep the chat
 // pane at a fixed width; the editor is a sizer sibling with no sash.
 constexpr int kImportPaneWidth  = 400;
-constexpr int kEditorPaneWidth  = 560;
 constexpr int kFileTreeWidth    = 280;   // fixed (non-resizable) file tree width
+constexpr int kEditorPaneWidth  = kFileTreeWidth * 5 / 2;  // default = 2.5x tree
 constexpr int kMainMinClientW   = 610;   // min chat-pane width with no panels
 
 // Payload attached to each file-tree node.
