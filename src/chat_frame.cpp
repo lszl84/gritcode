@@ -2293,10 +2293,13 @@ void ChatFrame::LoadFileIntoEditor(const wxString& path) {
     wxFileOffset len = f.Length();
     const wxFileOffset kMaxBytes = 2 * 1024 * 1024;
     if (len > kMaxBytes) {
+        // Keep the path so the title bar and close/reload still know the
+        // file, but make the placeholder read-only (there is nothing to save).
+        codeEdit_->SetEditable(false);
         codeEdit_->ChangeValue(
             wxString::Format("File is %lld bytes — too large to open here.",
                              (long long)len));
-        editorFilePath_.clear();
+        editorFilePath_ = path;
         editorDirty_ = false;
         UpdateWindowTitle();
         return;
@@ -2306,13 +2309,17 @@ void ChatFrame::LoadFileIntoEditor(const wxString& path) {
     size_t n = f.Read(buf.data(), (size_t)len);
     buf[n] = 0;
     if (memchr(buf.data(), 0, n)) {
+        // Binary file: keep the path but don't let the user edit the
+        // placeholder (saving it would corrupt the real file).
+        codeEdit_->SetEditable(false);
         codeEdit_->ChangeValue("[ Binary file — not shown ]");
-        editorFilePath_.clear();
+        editorFilePath_ = path;
         editorDirty_ = false;
         UpdateWindowTitle();
         return;
     }
 
+    codeEdit_->SetEditable(true);
     codeEdit_->ChangeValue(wxString::FromUTF8(buf.data(), n));
     editorFilePath_ = path;
     editorDirty_ = false;
@@ -2329,6 +2336,8 @@ bool ChatFrame::WriteEditorFile(const wxString& path) {
 }
 
 bool ChatFrame::SaveEditorFile() {
+    // Read-only placeholder (binary/too-large file): nothing to save.
+    if (!codeEdit_->IsEditable()) return false;
     if (editorFilePath_.empty()) return SaveEditorFileAs();
     if (!WriteEditorFile(editorFilePath_)) {
         wxMessageBox("Could not write file:\n" + editorFilePath_,
@@ -2341,6 +2350,7 @@ bool ChatFrame::SaveEditorFile() {
 }
 
 bool ChatFrame::SaveEditorFileAs() {
+    if (!codeEdit_->IsEditable()) return false;  // nothing meaningful to save
     wxString dir, name;
     if (!editorFilePath_.empty()) {
         wxFileName fn(editorFilePath_);
@@ -2378,6 +2388,7 @@ void ChatFrame::CloseEditorFile() {
 }
 
 void ChatFrame::ClearEditorState() {
+    codeEdit_->SetEditable(true);
     codeEdit_->ChangeValue("");
     editorFilePath_.clear();
     editorDirty_ = false;
@@ -2409,16 +2420,18 @@ void ChatFrame::OnEditorTextChanged(wxCommandEvent& e) {
 
 void ChatFrame::OnEditorContextMenu(wxContextMenuEvent& e) {
     bool hasFile = !editorFilePath_.empty();
+    bool editable = codeEdit_->IsEditable();
     wxMenu menu;
     wxMenuItem* save = menu.Append(ID_EDITOR_SAVE, "Save\tCtrl+S");
-    menu.Append(ID_EDITOR_SAVE_AS, "Save As…");
+    wxMenuItem* saveAs = menu.Append(ID_EDITOR_SAVE_AS, "Save As…");
     menu.AppendSeparator();
     wxMenuItem* reload = menu.Append(ID_EDITOR_RELOAD, "Reload from Disk");
     wxMenuItem* close = menu.Append(ID_EDITOR_CLOSE, "Close File");
     menu.AppendSeparator();
     wxMenuItem* show = menu.Append(ID_EDITOR_SHOW_IN_FILES, "Show in Files");
 
-    save->Enable(hasFile);
+    save->Enable(hasFile && editable);
+    saveAs->Enable(editable);
     reload->Enable(hasFile);
     close->Enable(hasFile);
     show->Enable(hasFile);
