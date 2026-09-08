@@ -84,18 +84,15 @@ SettingsDialog::SettingsDialog(wxWindow* parent)
                  wxALIGN_CENTER_VERTICAL | wxRIGHT, 8);
     hostCtrl_ = new wxTextCtrl(this, wxID_ANY, Preferences::GetLocalHost(),
                                wxDefaultPosition, FromDIP(wxSize(180, -1)));
-    hostRow->Add(hostCtrl_, 1, wxALIGN_CENTER_VERTICAL);
-    outer->Add(hostRow, 0, wxEXPAND | wxLEFT | wxRIGHT | wxTOP, 12);
-
-    auto* portRow = new wxBoxSizer(wxHORIZONTAL);
-    portRow->Add(new wxStaticText(this, wxID_ANY, "Port:"), 0,
+    hostRow->Add(hostCtrl_, 0, wxALIGN_CENTER_VERTICAL | wxRIGHT, 8);
+    hostRow->Add(new wxStaticText(this, wxID_ANY, "Port:"), 0,
                  wxALIGN_CENTER_VERTICAL | wxRIGHT, 8);
     portCtrl_ = new wxTextCtrl(this, wxID_ANY,
                                wxString::Format("%d", Preferences::GetLocalPort()),
-                               wxDefaultPosition, FromDIP(wxSize(80, -1)));
-    portRow->Add(portCtrl_, 0, wxALIGN_CENTER_VERTICAL);
-    portRow->AddStretchSpacer(1);
-    outer->Add(portRow, 0, wxEXPAND | wxLEFT | wxRIGHT | wxTOP, 4);
+                               wxDefaultPosition, FromDIP(wxSize(64, -1)));
+    hostRow->Add(portCtrl_, 0, wxALIGN_CENTER_VERTICAL);
+    hostRow->AddStretchSpacer(1);
+    outer->Add(hostRow, 0, wxEXPAND | wxLEFT | wxRIGHT | wxTOP, 12);
 
     preferLocalCb_ = new wxCheckBox(this, wxID_ANY, "Prefer local models");
     preferLocalCb_->SetValue(Preferences::GetPreferLocal());
