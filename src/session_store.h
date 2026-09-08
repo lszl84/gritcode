@@ -34,8 +34,11 @@ public:
 
     // Reads the full session file for the given cwd. Returns false if the
     // file is missing or malformed; outHistory is unchanged in that case.
+    // When modelOut is non-null it receives the session's hand-picked model
+    // key (the "model" field), or is cleared if the session has none.
     bool Load(const std::string& cwd,
-              std::vector<nlohmann::json>& outHistory) const;
+              std::vector<nlohmann::json>& outHistory,
+              std::string* modelOut = nullptr) const;
 
     // Writes the full session and updates the index (lastUsed timestamp).
     // Creates a new entry if this cwd hasn't been seen before. This is the
@@ -43,14 +46,16 @@ public:
     // new-session create); the hot persist path splits it into the two
     // methods below so the heavy parts can run on a worker thread.
     void Save(const std::string& cwd,
-              const std::vector<nlohmann::json>& history);
+              const std::vector<nlohmann::json>& history,
+              const std::string& model = "");
 
     // Thread-safe: writes only the per-session JSON file (no index mutation).
     // Uses `lastUsed` as the recorded timestamp so the caller can keep the
     // index entry consistent with the file. Safe to call from a worker.
     void WriteSessionFile(const std::string& cwd,
                           const std::vector<nlohmann::json>& history,
-                          const std::string& lastUsed) const;
+                          const std::string& lastUsed,
+                          const std::string& model = "") const;
 
     // UI-thread only: update the in-memory index (lastUsed) + write
     // sessions.json. Cheap relative to WriteSessionFile.
@@ -67,6 +72,12 @@ public:
     // Register a fresh session for cwd in the index even if no history yet.
     // Lets a brand-new session show up in the dropdown immediately.
     void RegisterCwd(const std::string& cwd);
+
+    // Persist just the hand-picked model for an existing session without
+    // touching its messages or lastUsed timestamp. Cheap: loads the session
+    // JSON, sets (or erases, when `model` is empty) the "model" field, and
+    // writes it back atomically. No-op when the session file doesn't exist.
+    void SetSessionModel(const std::string& cwd, const std::string& model) const;
 
 private:
     std::string root_;         // ~/.local/share/gritcode

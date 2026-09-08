@@ -24,12 +24,21 @@ public:
 
     // ---- non-secret prefs (wxConfig) ----
 
-    // Resolves the effective model index. If the user has never explicitly
-    // picked a model, defaults to DeepSeek Pro (2) when an API key is stored,
-    // otherwise OpenCode Free (0). Once the user changes the dropdown, that
-    // choice sticks permanently.
-    static int  GetLastModelIndex();
-    static void SetLastModelIndex(int idx);
+    // Local LLM endpoint (an OpenAI-compatible server such as MLX-VLM or
+    // llama.cpp on the LAN). Host is stored bare (no scheme); the base URL is
+    // built as http://host:port/v1. An empty host means the local endpoint is
+    // unconfigured and no local models are offered.
+    static wxString GetLocalHost();
+    static void SetLocalHost(const wxString& host);
+    static int  GetLocalPort();            // default 8080
+    static void SetLocalPort(int port);
+    static wxString GetLocalBaseUrl();     // "http://host:port/v1" or ""
+
+    // When true (default false), a NEW session that has no hand-picked model
+    // selects the first available local model instead of DeepSeek/OpenCode.
+    // Sessions where the user explicitly chose a model keep that choice.
+    static bool GetPreferLocal();
+    static void SetPreferLocal(bool prefer);
 
     // Whether the agent may see and call grit_history_search/fetch.
     // Defaults to true. When false, those tools are omitted from every

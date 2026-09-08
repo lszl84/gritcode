@@ -60,7 +60,8 @@ void SessionStore::Init() {
 }
 
 bool SessionStore::Load(const std::string& cwd,
-                        std::vector<nlohmann::json>& outHistory) const {
+                        std::vector<nlohmann::json>& outHistory,
+                        std::string* modelOut) const {
     PERF_SCOPE("SessionStore::Load");
     std::string path = sessionsDir_ + "/" + IdForCwd(cwd) + ".json";
     std::ifstream f(path);
@@ -69,6 +70,13 @@ bool SessionStore::Load(const std::string& cwd,
     try { f >> j; } catch (...) { return false; }
     if (!j.is_object() || !j.contains("messages") || !j["messages"].is_array())
         return false;
+
+    if (modelOut) {
+        if (j.contains("model") && j["model"].is_string())
+            *modelOut = j["model"].get<std::string>();
+        else
+            modelOut->clear();
+    }
 
     outHistory.clear();
     outHistory.reserve(j["messages"].size());
@@ -91,26 +99,47 @@ std::string SessionStore::NowIso() {
 }
 
 void SessionStore::Save(const std::string& cwd,
-                        const std::vector<nlohmann::json>& history) {
+                        const std::vector<nlohmann::json>& history,
+                        const std::string& model) {
     PERF_SCOPE("SessionStore::Save");
     std::string lastUsed = NowIso();
-    WriteSessionFile(cwd, history, lastUsed);
+    WriteSessionFile(cwd, history, lastUsed, model);
     UpdateIndex(cwd, lastUsed);
 }
 
 void SessionStore::WriteSessionFile(const std::string& cwd,
                                     const std::vector<nlohmann::json>& history,
-                                    const std::string& lastUsed) const {
+                                    const std::string& lastUsed,
+                                    const std::string& model) const {
     std::string id = IdForCwd(cwd);
     nlohmann::json j;
     j["id"] = id;
     j["cwd"] = cwd;
     j["lastUsed"] = lastUsed;
+    if (!model.empty()) j["model"] = model;
     j["messages"] = history;
 
     std::string body = j.dump(2, ' ', false,
                               nlohmann::json::error_handler_t::replace);
     AtomicWrite(sessionsDir_ + "/" + id + ".json", body);
+}
+
+void SessionStore::SetSessionModel(const std::string& cwd,
+                                   const std::string& model) const {
+    std::string path = sessionsDir_ + "/" + IdForCwd(cwd) + ".json";
+    std::ifstream f(path);
+    if (!f.good()) return;  // no session file yet — nothing to update
+    nlohmann::json j;
+    try { f >> j; } catch (...) { return; }
+    f.close();
+    if (!j.is_object()) return;
+
+    if (model.empty()) j.erase("model");
+    else j["model"] = model;
+
+    std::string body = j.dump(2, ' ', false,
+                              nlohmann::json::error_handler_t::replace);
+    AtomicWrite(path, body);
 }
 
 void SessionStore::UpdateIndex(const std::string& cwd,

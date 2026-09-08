@@ -222,47 +222,49 @@ private:
     }
 };
 
-// Per-model routing config. Resolved fresh at each StartCompletion so a model
-// change during a tool-call loop applies on the next request.
-struct ModelRoute {
-    const char* url;
-    const char* model;
-    bool needsApiKey;
-    Preferences::Provider provider;  // only valid when needsApiKey
-    // Output ceiling. Set to each model's documented maximum — leaving it
-    // unset would let deepseek apply its 4096 server-side default, which
-    // clips `write_file` arguments mid-JSON and triggers an unrecoverable
-    // "missing 'path' argument" loop. DeepSeek V4 docs publish 384K as the
-    // hard max; providers clamp silently if a value exceeds the model's own
-    // ceiling, so picking the documented top is safe.
-    int maxTokens;
-    // Total input+output token budget for the model. Used by the context
-    // compactor to decide when to summarize the head of history. Set per
-    // model from the published context window; conservative values are
-    // fine — compaction triggers earlier rather than later.
-    int contextWindow;
-};
-
-ModelRoute RouteFor(ModelChoice m) {
-    switch (m) {
-    case ModelChoice::OpencodeFree:
-        // OpenCode Zen free tier. Models rotate — currently big-pickle
-        // (200K context, 32K output). No API key needed; endpoint is open.
+// Resolve a model key to its wire route. Fixed providers are hardcoded; a
+// local key routes to the configured endpoint and carries conservative limits
+// (MLX-VLM / llama.cpp servers usually support more, but we'd rather compact
+// early than trip a context-overflow 400).
+ModelRoute RouteForKey(const std::string& key,
+                       const std::vector<std::string>& localModels) {
+    if (key == kModelOpenCode) {
         return {"https://opencode.ai/zen/v1/chat/completions",
-                "big-pickle", false, Preferences::Provider::DeepSeek,
+                "big-pickle", false, false, Preferences::Provider::DeepSeek,
                 32000, 200000};
-    case ModelChoice::DeepseekFlash:
+    }
+    if (key == kModelDeepseekFlash) {
         return {"https://api.deepseek.com/chat/completions",
-                "deepseek-v4-flash", true, Preferences::Provider::DeepSeek,
-                384000, 1000000};
-    case ModelChoice::DeepseekPro:
-        return {"https://api.deepseek.com/chat/completions",
-                "deepseek-v4-pro", true, Preferences::Provider::DeepSeek,
+                "deepseek-v4-flash", true, false, Preferences::Provider::DeepSeek,
                 384000, 1000000};
     }
+    if (key == kModelDeepseekPro) {
+        return {"https://api.deepseek.com/chat/completions",
+                "deepseek-v4-pro", true, false, Preferences::Provider::DeepSeek,
+                384000, 1000000};
+    }
+    for (const auto& id : localModels) {
+        if (id == key) {
+            wxString base = Preferences::GetLocalBaseUrl();
+            std::string url = base.ToStdString(wxConvUTF8) + "/chat/completions";
+            return {url, key, false, true, Preferences::Provider::DeepSeek,
+                    8192, 32768};
+        }
+    }
+    // Unknown key (e.g. a stale local id after the server changed models) —
+    // fall back to the no-key free provider.
     return {"https://opencode.ai/zen/v1/chat/completions",
-            "big-pickle", false, Preferences::Provider::DeepSeek,
+            "big-pickle", false, false, Preferences::Provider::DeepSeek,
             32000, 200000};
+}
+
+// Display label for a local model id in the dropdown: strip the common
+// "models/" prefix and mark it so it's clearly not a cloud model.
+wxString LocalModelLabel(const std::string& id) {
+    std::string s = id;
+    const std::string prefix = "models/";
+    if (s.rfind(prefix, 0) == 0) s = s.substr(prefix.size());
+    return wxString::FromUTF8("Local · " + s);
 }
 
 // chdir() into the session's directory so tool subprocesses (bash,
@@ -574,8 +576,7 @@ ChatFrame::ChatFrame()
     modelChoice_->Append("OpenCode Free");
     modelChoice_->Append("DeepSeek V4 Flash");
     modelChoice_->Append("DeepSeek V4 Pro");
-    currentModel_ = static_cast<ModelChoice>(Preferences::GetLastModelIndex());
-    modelChoice_->SetSelection(static_cast<int>(currentModel_));
+    modelChoice_->SetSelection(0);  // resolved for real after session restore
     settingsBtn_ = new wxBitmapButton(panel, ID_SETTINGS, bbSettings,
                                       wxDefaultPosition, kBtnSize,
                                       wxBORDER_NONE);
@@ -825,29 +826,36 @@ ChatFrame::ChatFrame()
     { PERF_SCOPE("RestoreLastSession");
     if (auto last = store_.LastActiveCwd()) {
         std::vector<nlohmann::json> hist;
-        if (store_.Load(*last, hist)) {
+        std::string model;
+        if (store_.Load(*last, hist, &model)) {
             history_ = std::move(hist);
             activeCwd_ = *last;
+            currentModelKey_ = std::move(model);
             restored = true;
         }
     }
     if (!restored && !store_.List().empty()) {
         const auto& e = store_.List().front();  // most recent
         std::vector<nlohmann::json> hist;
-        if (store_.Load(e.cwd, hist)) {
+        std::string model;
+        if (store_.Load(e.cwd, hist, &model)) {
             history_ = std::move(hist);
             activeCwd_ = e.cwd;
+            currentModelKey_ = std::move(model);
             restored = true;
         }
     }
     if (!restored) {
         activeCwd_ = DefaultCwd();
+        currentModelKey_.clear();  // fresh session: no hand-picked model yet
         SeedSystemPrompt();
         { PERF_SCOPE("PersistActive:Save"); store_.Save(activeCwd_, history_); }
         store_.SetLastActiveCwd(activeCwd_);
     }
     } // RestoreLastSession
     ChdirToCwd(activeCwd_);
+    RebuildModelChoice();
+    FetchLocalModelsAsync();
     RefreshSessionChoice();
     PopulateEditorTree();
 
@@ -996,20 +1004,27 @@ ChatFrame::ChatFrame()
     };
     cb.setModel = [this, guiSync](int idx) -> nlohmann::json {
         return guiSync([this, idx]() -> nlohmann::json {
-            if (idx < 0 || idx > 2) return {{"ok", false}, {"reason", "out of range"}};
-            currentModel_ = static_cast<ModelChoice>(idx);
-            modelChoice_->SetSelection(idx);
-            Preferences::SetLastModelIndex(idx);
-            return {{"ok", true}, {"modelIndex", idx}};
+            std::string key = ModelKeyForIndex(idx);
+            if (key.empty()) return {{"ok", false}, {"reason", "out of range"}};
+            currentModelKey_ = key;
+            modelChoice_->SetSelection(ModelIndexForKey(key));
+            // Persist the hand-picked model for the active session.
+            store_.SetSessionModel(activeCwd_, key);
+            return {{"ok", true}, {"modelIndex", idx}, {"modelKey", key}};
         });
     };
-    cb.getPreferences = [guiSync]() -> nlohmann::json {
-        return guiSync([]() -> nlohmann::json {
+    cb.getPreferences = [this, guiSync]() -> nlohmann::json {
+        return guiSync([this]() -> nlohmann::json {
+            std::string effective = currentModelKey_;
+            if (effective.empty() || ModelIndexForKey(effective) < 0)
+                effective = AutoModelKey();
             return {
-                {"modelIndex", Preferences::GetLastModelIndex()},
+                {"modelIndex", ModelIndexForKey(effective)},
+                {"modelKey", currentModelKey_},
                 {"hasDeepseekKey",
                  Preferences::HasApiKey(Preferences::Provider::DeepSeek)},
                 {"enableGritHistory", Preferences::GetEnableGritHistory()},
+                {"preferLocal", Preferences::GetPreferLocal()},
             };
         });
     };
@@ -1108,17 +1123,21 @@ ChatFrame::ChatFrame()
             std::string newCwd = DefaultCwd();
             PersistActive();
             std::vector<nlohmann::json> hist;
-            if (store_.Load(newCwd, hist)) {
+            std::string model;
+            if (store_.Load(newCwd, hist, &model)) {
                 activeCwd_ = newCwd;
                 history_ = std::move(hist);
+                currentModelKey_ = std::move(model);
             } else {
                 activeCwd_ = newCwd;
                 history_.clear();
+                currentModelKey_.clear();  // no hand-picked model yet
                 SeedSystemPrompt();
                 store_.Save(activeCwd_, history_);
             }
             store_.SetLastActiveCwd(activeCwd_);
             ChdirToCwd(activeCwd_);
+            RebuildModelChoice();
             canvas_->Clear();
             RestoreCanvasFromHistory();
             RefreshSessionChoice();
@@ -1350,6 +1369,10 @@ ChatFrame::~ChatFrame() {
         playWorker_.join();
     }
     if (persistWorker_.joinable()) persistWorker_.join();
+    if (localModelWorker_.joinable()) {
+        localModelCancel_.cancelled.store(true);
+        localModelWorker_.join();
+    }
 }
 
 nlohmann::json ChatFrame::BuildBlocksSnapshot() const {
@@ -1598,18 +1621,22 @@ void ChatFrame::CreateNewSession() {
     PersistActive();
     activeCwd_ = chosen;
     std::vector<nlohmann::json> hist;
-    if (store_.Load(activeCwd_, hist)) {
+    std::string model;
+    if (store_.Load(activeCwd_, hist, &model)) {
         // Existing session for this folder — restore it.
         history_ = std::move(hist);
+        currentModelKey_ = std::move(model);
     } else {
         // Brand new folder: seed a fresh system prompt.
         history_.clear();
+        currentModelKey_.clear();  // no hand-picked model yet
         SeedSystemPrompt();
         store_.Save(activeCwd_, history_);
     }
     historyCompactBaseCount_ = 0;  // fresh compaction gate for the new session
     store_.SetLastActiveCwd(activeCwd_);
     ChdirToCwd(activeCwd_);  // keep the process cwd in sync with activeCwd_
+    RebuildModelChoice();
     RestoreCanvasMaybeDeferred();
     RefreshSessionChoice();
     PopulateEditorTree();
@@ -1623,19 +1650,23 @@ bool ChatFrame::SwitchToCwd(const std::string& cwd) {
 
     PersistActive();
     std::vector<nlohmann::json> hist;
-    bool existed = store_.Load(cwd, hist);
+    std::string model;
+    bool existed = store_.Load(cwd, hist, &model);
     activeCwd_ = cwd;
     history_ = std::move(hist);
+    currentModelKey_ = std::move(model);
     if (!existed) {
         // Brand new folder: seed a fresh system prompt and persist so the
         // session shows up in the index immediately.
         history_.clear();
+        currentModelKey_.clear();  // no hand-picked model yet
         SeedSystemPrompt();
         store_.Save(activeCwd_, history_);
     }
     historyCompactBaseCount_ = 0;  // fresh compaction gate for the new session
     store_.SetLastActiveCwd(activeCwd_);
     ChdirToCwd(activeCwd_);
+    RebuildModelChoice();
     RestoreCanvasMaybeDeferred();
     RefreshSessionChoice();
     PopulateEditorTree();
@@ -1651,6 +1682,7 @@ void ChatFrame::PersistActive() {
     std::string cwd = activeCwd_;
     std::vector<nlohmann::json> msgs = history_;
     std::string ts = SessionStore::NowIso();
+    std::string model = currentModelKey_;  // "" = no hand-picked model
 
     // The index update is tiny and touches entries_/sessions.json - keep it on
     // the GUI thread so SessionStore stays single-threaded. The heavy parts
@@ -1661,8 +1693,8 @@ void ChatFrame::PersistActive() {
     // slot while it's still joinable. Normally it finished long ago, so this
     // join is instant; it only blocks if the user switches sessions rapidly.
     if (persistWorker_.joinable()) persistWorker_.join();
-    persistWorker_ = std::thread([this, cwd, msgs = std::move(msgs), ts]() {
-        store_.WriteSessionFile(cwd, msgs, ts);
+    persistWorker_ = std::thread([this, cwd, msgs = std::move(msgs), ts, model]() {
+        store_.WriteSessionFile(cwd, msgs, ts, model);
         if (memory_.IsOpen()) {
             memory_.RebuildSession(SessionStore::IdForCwd(cwd), cwd, msgs, ts);
         }
@@ -1800,9 +1832,125 @@ void ChatFrame::RestoreCanvasFromHistory() {
 
 void ChatFrame::OnModelChoice(wxCommandEvent& evt) {
     int sel = evt.GetSelection();
-    if (sel < 0 || sel > 2) return;
-    currentModel_ = static_cast<ModelChoice>(sel);
-    Preferences::SetLastModelIndex(sel);
+    std::string key = ModelKeyForIndex(sel);
+    if (key.empty()) return;
+    currentModelKey_ = key;
+    // Hand-picked for this session — persist it so the choice survives restarts.
+    store_.SetSessionModel(activeCwd_, key);
+}
+
+std::string ChatFrame::AutoModelKey() const {
+    // Prefer-local steering: only applies to sessions that have no hand-picked
+    // model. Once the user picks a model for a session, currentModelKey_ is
+    // non-empty and this is never consulted for it.
+    if (Preferences::GetPreferLocal() && !localModels_.empty())
+        return localModels_.front();
+    if (Preferences::HasApiKey(Preferences::Provider::DeepSeek))
+        return kModelDeepseekPro;  // best available cloud model
+    return kModelOpenCode;          // no key — only option that works
+}
+
+int ChatFrame::ModelIndexForKey(const std::string& key) const {
+    if (key == kModelOpenCode) return 0;
+    if (key == kModelDeepseekFlash) return 1;
+    if (key == kModelDeepseekPro) return 2;
+    for (size_t i = 0; i < localModels_.size(); ++i)
+        if (localModels_[i] == key) return 3 + (int)i;
+    return -1;
+}
+
+std::string ChatFrame::ModelKeyForIndex(int idx) const {
+    if (idx == 0) return kModelOpenCode;
+    if (idx == 1) return kModelDeepseekFlash;
+    if (idx == 2) return kModelDeepseekPro;
+    int li = idx - 3;
+    if (li >= 0 && li < (int)localModels_.size()) return localModels_[li];
+    return std::string();
+}
+
+ModelRoute ChatFrame::CurrentRoute() const {
+    std::string key = currentModelKey_;
+    if (key.empty() || ModelIndexForKey(key) < 0) key = AutoModelKey();
+    return RouteForKey(key, localModels_);
+}
+
+void ChatFrame::RebuildModelChoice() {
+    modelChoice_->Clear();
+    modelChoice_->Append("OpenCode Free");
+    modelChoice_->Append("DeepSeek V4 Flash");
+    modelChoice_->Append("DeepSeek V4 Pro");
+    for (const auto& id : localModels_)
+        modelChoice_->Append(LocalModelLabel(id));
+
+    // Resolve the dropdown selection from the session's hand-picked key (or
+    // the auto default when none), without mutating currentModelKey_ — the
+    // hand-picked key must survive a transiently unreachable local server.
+    std::string effective = currentModelKey_;
+    if (effective.empty()) effective = AutoModelKey();
+    int sel = ModelIndexForKey(effective);
+    if (sel < 0) {
+        effective = AutoModelKey();
+        sel = ModelIndexForKey(effective);
+    }
+    if (sel < 0) sel = 0;
+    modelChoice_->SetSelection(sel);
+}
+
+void ChatFrame::FetchLocalModelsAsync() {
+    // Serialize with any in-flight fetch. Startup and settings-save both call
+    // this; the earlier one is short (2 s connect / 5 s idle watchdog), so a
+    // join here only blocks if a fetch is genuinely still running.
+    if (localModelWorker_.joinable()) localModelWorker_.join();
+
+    wxString base = Preferences::GetLocalBaseUrl();
+    if (base.IsEmpty()) {
+        localModels_.clear();
+        RebuildModelChoice();
+        return;
+    }
+
+    std::string url = base.ToStdString(wxConvUTF8) + "/models";
+    ChatFrame* self = this;
+    WebCancelToken* token = &localModelCancel_;
+    token->cancelled.store(false);
+    localModelWorker_ = std::thread([self, url, token]() {
+        WebRequestSpec spec;
+        spec.url = url;
+        spec.method = "GET";
+        spec.connectTimeoutSeconds = 2;
+        spec.idleTimeoutSeconds = 5;
+        WebResponse resp = RequestSync(std::move(spec), token);
+
+        std::vector<std::string> models;
+        std::string error = resp.error;
+        if (resp.ok) {
+            try {
+                auto j = nlohmann::json::parse(resp.body);
+                if (j.contains("data") && j["data"].is_array()) {
+                    for (const auto& m : j["data"]) {
+                        if (m.is_object() && m.contains("id") && m["id"].is_string())
+                            models.push_back(m["id"].get<std::string>());
+                    }
+                }
+            } catch (const std::exception& e) {
+                error = std::string("parse error: ") + e.what();
+            }
+        }
+
+        self->CallAfter([self, models = std::move(models),
+                         error = std::move(error)]() mutable {
+            self->OnLocalModelsFetched(std::move(models), std::move(error));
+        });
+    });
+}
+
+void ChatFrame::OnLocalModelsFetched(std::vector<std::string> models,
+                                     std::string error) {
+    localModels_ = std::move(models);
+    RebuildModelChoice();
+    if (!error.empty()) {
+        LogDebug("local models fetch failed: " + error);
+    }
 }
 
 
@@ -1922,7 +2070,11 @@ void ChatFrame::OnPlay(wxCommandEvent&) {
 }
 void ChatFrame::OnSettings(wxCommandEvent&) {
     SettingsDialog dlg(this);
-    dlg.ShowModal();
+    if (dlg.ShowModal() == wxID_OK) {
+        // The local endpoint or prefer-local toggle may have changed —
+        // rediscover local models and rebuild the dropdown.
+        FetchLocalModelsAsync();
+    }
 }
 
 void ChatFrame::OnHamburger(wxCommandEvent&) {
@@ -2897,7 +3049,7 @@ void ChatFrame::DoSendActualRequest() {
         canvas_->AddBlock(std::move(b));
     });
 
-    ModelRoute route = RouteFor(currentModel_);
+    ModelRoute route = CurrentRoute();
 
     // Build an outbound copy of history with the active cwd appended to the
     // system prompt. Done per-request rather than baked into stored history
@@ -3783,7 +3935,7 @@ void ChatFrame::RunSummaryThenSend(int splitIdx) {
 
     // Cap the summary-call input so the summary request itself doesn't
     // overflow. Budget = context window − response budget − prompt overhead.
-    ModelRoute route = RouteFor(currentModel_);
+    ModelRoute route = CurrentRoute();
     size_t maxChars = (size_t)(route.contextWindow - 6000) * 4;
     if (maxChars < 40000) maxChars = 40000;
     if (headText.size() > maxChars) {

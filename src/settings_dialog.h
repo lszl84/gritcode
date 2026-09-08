@@ -26,6 +26,11 @@ private:
     wxCheckBox*   gritHistoryCb_ = nullptr;
     wxStaticText* hint_    = nullptr;
 
+    // Local LLM endpoint.
+    wxTextCtrl*   hostCtrl_ = nullptr;
+    wxTextCtrl*   portCtrl_ = nullptr;
+    wxCheckBox*   preferLocalCb_ = nullptr;
+
     bool keyringWasBroken_ = false;  // snapshot at dialog-open time
 
     void OnSave(wxCommandEvent&);

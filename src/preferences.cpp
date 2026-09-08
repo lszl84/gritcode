@@ -16,8 +16,9 @@ namespace {
 const wxString kServicePrefix = "gritcode/";
 const wxString kUsername      = "api_key";
 
-const char* kModelIndexKey    = "/UI/LastModelIndex";
-const char* kModelExplicitKey = "/UI/ModelExplicit";
+const char* kLocalHostKey     = "/Local/Host";
+const char* kLocalPortKey     = "/Local/Port";
+const char* kLocalPreferKey   = "/Local/PreferLocal";
 const char* kEnableGritKey    = "/UI/EnableGritHistory";
 
 // wxFileConfig key for the plaintext API-key fallback.
@@ -51,32 +52,78 @@ void Preferences::Init() {
     // sharing the directory with run_configs.json and the memory DB.
     auto* cfg = new wxFileConfig("gritcode", wxEmptyString,
                                  wxEmptyString, wxEmptyString,
-                                 wxCONFIG_USE_SUBDIR);
+                                 wxCONFIG_USE_LOCAL_FILE | wxCONFIG_USE_SUBDIR);
     wxConfigBase::Set(cfg);
 }
 
-int Preferences::GetLastModelIndex() {
+wxString Preferences::GetLocalHost() {
     auto* cfg = wxConfigBase::Get();
-    long explicitChoice = 0;
-    cfg->Read(kModelExplicitKey, &explicitChoice, 0L);
-
-    if (!explicitChoice) {
-        // User never changed the dropdown — pick the best available model.
-        if (HasApiKey(Provider::DeepSeek)) return 2;  // DeepSeek Pro
-        return 0;  // OpenCode Free (no key, only option that works)
-    }
-
-    long v = 0;
-    cfg->Read(kModelIndexKey, &v, 0L);
-    if (v < 0 || v > 2) v = 0;
-    return (int)v;
+    if (!cfg) return wxString();
+    return cfg->Read(kLocalHostKey, wxString());
 }
 
-void Preferences::SetLastModelIndex(int idx) {
-    if (idx < 0 || idx > 2) idx = 0;
+void Preferences::SetLocalHost(const wxString& host) {
     auto* cfg = wxConfigBase::Get();
-    cfg->Write(kModelIndexKey, (long)idx);
-    cfg->Write(kModelExplicitKey, 1L);
+    if (!cfg) return;
+    if (host.IsEmpty()) {
+        cfg->DeleteEntry(kLocalHostKey);
+    } else {
+        cfg->Write(kLocalHostKey, host);
+    }
+    cfg->Flush();
+}
+
+int Preferences::GetLocalPort() {
+    auto* cfg = wxConfigBase::Get();
+    if (!cfg) return 8080;
+    long port = 8080;
+    cfg->Read(kLocalPortKey, &port, 8080L);
+    if (port < 1 || port > 65535) port = 8080;
+    return (int)port;
+}
+
+void Preferences::SetLocalPort(int port) {
+    auto* cfg = wxConfigBase::Get();
+    if (!cfg) return;
+    if (port < 1 || port > 65535) port = 8080;
+    cfg->Write(kLocalPortKey, (long)port);
+    cfg->Flush();
+}
+
+wxString Preferences::GetLocalBaseUrl() {
+    wxString host = GetLocalHost();
+    if (host.IsEmpty()) return wxString();
+
+    wxString h = host;
+    h.Trim().Trim(false);
+    if (h.empty()) return wxString();
+
+    // Forgiving parsing: strip a scheme the user may have pasted in, and a
+    // trailing slash, so "http://192.168.0.127/" and "192.168.0.127" both work.
+    wxString scheme;
+    if (h.StartsWith("https://", &scheme)) {
+        h = scheme;
+    } else if (h.StartsWith("http://", &scheme)) {
+        h = scheme;
+    }
+    while (!h.empty() && h.Last() == '/') h.RemoveLast();
+
+    int port = GetLocalPort();
+    return wxString::Format("http://%s:%d/v1", h, port);
+}
+
+bool Preferences::GetPreferLocal() {
+    auto* cfg = wxConfigBase::Get();
+    if (!cfg) return false;
+    bool v = false;
+    cfg->Read(kLocalPreferKey, &v, false);
+    return v;
+}
+
+void Preferences::SetPreferLocal(bool prefer) {
+    auto* cfg = wxConfigBase::Get();
+    if (!cfg) return;
+    cfg->Write(kLocalPreferKey, prefer);
     cfg->Flush();
 }
 

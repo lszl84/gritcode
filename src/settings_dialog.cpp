@@ -64,6 +64,51 @@ SettingsDialog::SettingsDialog(wxWindow* parent)
     }
     outer->Add(hint_, 0, wxLEFT | wxRIGHT | wxTOP, 12);
 
+    // ---- Local models section ----
+    auto* localHeading = new wxStaticText(this, wxID_ANY, "Local models");
+    wxFont lhf = localHeading->GetFont();
+    lhf.MakeBold();
+    localHeading->SetFont(lhf);
+    outer->Add(localHeading, 0, wxLEFT | wxRIGHT | wxTOP, 12);
+
+    auto* localHint = new wxStaticText(this, wxID_ANY,
+        "Connect to an OpenAI-compatible server on your network (e.g. MLX-VLM "
+        "or llama.cpp). Its models then appear in the main Model dropdown.");
+    wxFont lh = localHint->GetFont();
+    lh.SetPointSize(lh.GetPointSize() - 1);
+    localHint->SetFont(lh);
+    outer->Add(localHint, 0, wxLEFT | wxRIGHT | wxTOP, 4);
+
+    auto* hostRow = new wxBoxSizer(wxHORIZONTAL);
+    hostRow->Add(new wxStaticText(this, wxID_ANY, "IP / host:"), 0,
+                 wxALIGN_CENTER_VERTICAL | wxRIGHT, 8);
+    hostCtrl_ = new wxTextCtrl(this, wxID_ANY, Preferences::GetLocalHost(),
+                               wxDefaultPosition, FromDIP(wxSize(180, -1)));
+    hostRow->Add(hostCtrl_, 1, wxALIGN_CENTER_VERTICAL);
+    outer->Add(hostRow, 0, wxEXPAND | wxLEFT | wxRIGHT | wxTOP, 12);
+
+    auto* portRow = new wxBoxSizer(wxHORIZONTAL);
+    portRow->Add(new wxStaticText(this, wxID_ANY, "Port:"), 0,
+                 wxALIGN_CENTER_VERTICAL | wxRIGHT, 8);
+    portCtrl_ = new wxTextCtrl(this, wxID_ANY,
+                               wxString::Format("%d", Preferences::GetLocalPort()),
+                               wxDefaultPosition, FromDIP(wxSize(80, -1)));
+    portRow->Add(portCtrl_, 0, wxALIGN_CENTER_VERTICAL);
+    portRow->AddStretchSpacer(1);
+    outer->Add(portRow, 0, wxEXPAND | wxLEFT | wxRIGHT | wxTOP, 4);
+
+    preferLocalCb_ = new wxCheckBox(this, wxID_ANY, "Prefer local models");
+    preferLocalCb_->SetValue(Preferences::GetPreferLocal());
+    outer->Add(preferLocalCb_, 0, wxLEFT | wxRIGHT | wxTOP, 12);
+
+    auto* preferHint = new wxStaticText(this, wxID_ANY,
+        "When enabled, a new session (or one with no model picked yet) "
+        "selects a local model instead of DeepSeek.");
+    wxFont ph = preferHint->GetFont();
+    ph.SetPointSize(ph.GetPointSize() - 1);
+    preferHint->SetFont(ph);
+    outer->Add(preferHint, 0, wxLEFT | wxRIGHT | wxTOP, 4);
+
     // ---- Agent tools section ----
     auto* toolsHeading = new wxStaticText(this, wxID_ANY, "Agent tools");
     wxFont thf = toolsHeading->GetFont();
@@ -171,6 +216,30 @@ void SettingsDialog::OnSave(wxCommandEvent& evt) {
         // single source of truth.
         Preferences::SetApiKeyPlaintext(provider, wxString());
     }
+
+    // ---- Local models ----
+    wxString host = hostCtrl_->GetValue();
+    host.Trim().Trim(false);
+    wxString rest;
+    if (host.StartsWith("https://", &rest)) host = rest;
+    else if (host.StartsWith("http://", &rest)) host = rest;
+    while (!host.empty() && host.Last() == '/') host.RemoveLast();
+
+    long port = 8080;
+    wxString portStr = portCtrl_->GetValue();
+    portStr.Trim().Trim(false);
+    bool portOk = true;
+    if (!portStr.IsEmpty()) {
+        portOk = portStr.ToLong(&port) && port >= 1 && port <= 65535;
+    }
+    if (!portOk) {
+        wxMessageBox("Local model port must be a number between 1 and 65535.",
+                     "gritcode", wxOK | wxICON_WARNING, this);
+        return;  // keep dialog open
+    }
+    Preferences::SetLocalHost(host);
+    Preferences::SetLocalPort((int)port);
+    Preferences::SetPreferLocal(preferLocalCb_->IsChecked());
 
     // Persist the Grit History tools toggle.
     Preferences::SetEnableGritHistory(gritHistoryCb_->IsChecked());

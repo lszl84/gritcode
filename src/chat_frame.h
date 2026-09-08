@@ -18,18 +18,31 @@
 #include "session_store.h"
 #include "streaming_web_request.h"
 #include "tools.h"
+#include "preferences.h"
 #include <atomic>
 #include <memory>
 #include <string>
 #include <thread>
 #include <vector>
 
-// Single model dropdown picks one of these. Order matches the choice items
-// (OpenCode Free, DeepSeek V4 Flash, DeepSeek V4 Pro).
-enum class ModelChoice {
-    OpencodeFree = 0,
-    DeepseekFlash = 1,
-    DeepseekPro = 2,
+// Model keys are stable string identifiers. The three fixed providers use
+// short well-known keys; a local model uses its server-returned id verbatim
+// (e.g. "models/Qwen3.6-35B-A3B-8bit"). The dropdown renders the fixed three
+// first, then any discovered local models.
+constexpr const char* kModelOpenCode    = "opencode-free";
+constexpr const char* kModelDeepseekFlash = "deepseek-flash";
+constexpr const char* kModelDeepseekPro   = "deepseek-pro";
+
+// Per-model routing config. Resolved fresh at each request so a model change
+// mid-turn applies on the next completion round.
+struct ModelRoute {
+    std::string url;
+    std::string model;      // wire model id
+    bool needsApiKey = false;
+    bool isLocal = false;
+    Preferences::Provider provider = Preferences::Provider::DeepSeek;  // valid when needsApiKey
+    int maxTokens = 32000;      // output ceiling (providers clamp silently)
+    int contextWindow = 200000; // token budget for the context compactor
 };
 
 class DebugWindow;
@@ -108,7 +121,18 @@ private:
     // not required for normal chat.
     MemoryDB memory_;
 
-    ModelChoice currentModel_ = ModelChoice::OpencodeFree;
+    // Hand-picked model key for the active session (empty = none; the
+    // effective model is then resolved from prefer-local + available models).
+    // Persisted per-session in the session file's "model" field and restored
+    // on switch.
+    std::string currentModelKey_;
+    // Server-returned ids of the models offered by the configured local LLM
+    // endpoint. Populated asynchronously after startup / settings changes.
+    std::vector<std::string> localModels_;
+    // Worker that fetches GET /v1/models from the local endpoint. Owned (not
+    // detached) so the destructor can join it before the frame dies.
+    std::thread localModelWorker_;
+    WebCancelToken localModelCancel_;
 
     StreamingWebRequest request_;
     std::unique_ptr<MdStream> mdStream_;
@@ -216,6 +240,22 @@ private:
     void OnSessionChoice(wxCommandEvent&);
     void OnModelChoice(wxCommandEvent&);
     void OnSettings(wxCommandEvent&);
+
+    // ---- model selection / local LLM ----
+    // Rebuild the model dropdown (3 fixed + discovered locals) and resolve
+    // the selection from currentModelKey_ (auto when empty).
+    void RebuildModelChoice();
+    // Fetch GET /v1/models from the configured local endpoint on a worker
+    // thread, then append the ids to the dropdown via CallAfter.
+    void FetchLocalModelsAsync();
+    void OnLocalModelsFetched(std::vector<std::string> models, std::string error);
+    int  ModelIndexForKey(const std::string& key) const;
+    std::string ModelKeyForIndex(int idx) const;
+    // The model key for a session with no hand-picked model: first local model
+    // when prefer-local is on and one exists, else DeepSeek Pro (key) or Free.
+    std::string AutoModelKey() const;
+    // Route for the active session's effective model.
+    ModelRoute CurrentRoute() const;
     void OnPlay(wxCommandEvent&);
     void OnExport(wxCommandEvent&);
     void OnHamburger(wxCommandEvent&);
