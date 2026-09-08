@@ -9,6 +9,7 @@
 #include <wx/statbmp.h>
 #include <wx/wrapsizer.h>
 #include <wx/thread.h>
+#include <wx/timer.h>
 #include <nlohmann/json.hpp>
 #include "chat_canvas.h"
 #include "md_parser.h"
@@ -250,6 +251,7 @@ private:
     void UpdateWindowTitle();
     void OnEditorTextChanged(wxCommandEvent& e);
     void OnEditorContextMenu(wxContextMenuEvent& e);
+    void OnHighlightTimer(wxTimerEvent& e);
     void OnEditorSave(wxCommandEvent& e);
     void OnEditorSaveAs(wxCommandEvent& e);
     void OnEditorReload(wxCommandEvent& e);
@@ -301,6 +303,7 @@ private:
     wxTextCtrl* codeEdit_ = nullptr;                     // editable file content
     wxString editorFilePath_;                            // file open in codeEdit_
     bool editorDirty_ = false;                           // unsaved changes in editor
+    wxTimer* highlightTimer_ = nullptr;                  // debounced syntax highlight
     wxTreeItemId treeCtxItem_;                           // right-clicked tree item
     wxString treeCtxPath_;                               // right-clicked item path
     bool treeCtxIsDir_ = true;                           // right-clicked item is a dir

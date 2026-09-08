@@ -7,6 +7,7 @@
 #include "settings_dialog.h"
 #include "image_store.h"
 #include "debug_window.h"
+#include "syntax.h"
 #include <wx/clipbrd.h>
 #include <wx/dataobj.h>
 #include <wx/dcbuffer.h>
@@ -703,6 +704,9 @@ ChatFrame::ChatFrame()
     codeEdit_->Bind(wxEVT_CONTEXT_MENU, &ChatFrame::OnEditorContextMenu, this);
     editSizer->Add(codeEdit_, 1, wxEXPAND);
     editPane->SetSizer(editSizer);
+
+    highlightTimer_ = new wxTimer(this);
+    Bind(wxEVT_TIMER, &ChatFrame::OnHighlightTimer, this, highlightTimer_->GetId());
 
     // Left/right padding matches the other panes; the tree and editor sit
     // flush against each other with no sash between them.
@@ -2335,6 +2339,7 @@ void ChatFrame::LoadFileIntoEditor(const wxString& path) {
     editorFilePath_ = path;
     editorDirty_ = false;
     UpdateWindowTitle();
+    syntax::Highlight(codeEdit_, path, std::string_view(buf.data(), n));
 }
 
 bool ChatFrame::WriteEditorFile(const wxString& path) {
@@ -2402,8 +2407,10 @@ void ChatFrame::CloseEditorFile() {
 }
 
 void ChatFrame::ClearEditorState() {
+    if (highlightTimer_) highlightTimer_->Stop();
     codeEdit_->SetEditable(true);
     codeEdit_->ChangeValue("");
+    syntax::ClearStyles(codeEdit_);
     editorFilePath_.clear();
     editorDirty_ = false;
     UpdateWindowTitle();
@@ -2429,7 +2436,15 @@ void ChatFrame::OnEditorTextChanged(wxCommandEvent& e) {
         editorDirty_ = true;
         UpdateWindowTitle();
     }
+    if (highlightTimer_) highlightTimer_->Start(300, true);
     e.Skip();
+}
+
+void ChatFrame::OnHighlightTimer(wxTimerEvent&) {
+    if (!codeEdit_ || !codeEdit_->IsEditable() || editorFilePath_.empty()) return;
+    const wxScopedCharBuffer utf8 = codeEdit_->GetValue().utf8_str();
+    syntax::Highlight(codeEdit_, editorFilePath_,
+                      std::string_view(utf8.data(), utf8.length()));
 }
 
 void ChatFrame::OnEditorContextMenu(wxContextMenuEvent& e) {
