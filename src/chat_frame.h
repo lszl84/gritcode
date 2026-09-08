@@ -222,9 +222,9 @@ private:
     void OnImport(wxCommandEvent&);
     void ShowImportDialog();
     // Grow/shrink the frame so the chat pane keeps its width as side panels
-    // open/close, and keep the minimum width in sync with how many are open.
-    void SyncPanelSizing(int delta);
-    void SyncPanelMinSize();
+    // Resize the frame so the chat pane keeps `centerW` pixels regardless of
+    // which side panels are open, and keep the minimum width in sync.
+    void SyncPanelSizing(int centerW);
     // Project file tree in the right editor panel.
     void PopulateEditorTree();
     void PopulateTreeDir(wxTreeItemId parent, const wxString& path);

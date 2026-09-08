@@ -69,14 +69,12 @@ constexpr int ID_EXPORT   = wxID_HIGHEST + 14;
 constexpr int ID_HAMBURGER = wxID_HIGHEST + 15;
 constexpr int ID_EDITOR   = wxID_HIGHEST + 16;
 
-// Side-panel widths (pixels) and the window delta used when toggling them.
-// The import pane lives in the main splitter, so its delta includes a bit for
-// the sash; the editor is a sizer sibling with no sash, so its delta is exact.
+// Side-panel widths (pixels). The import pane lives in the main splitter, so
+// the window must grow by pane width + the splitter sash to keep the chat
+// pane at a fixed width; the editor is a sizer sibling with no sash.
 constexpr int kImportPaneWidth  = 400;
-constexpr int kImportPaneDelta  = kImportPaneWidth + 20;
 constexpr int kEditorPaneWidth  = 560;
-constexpr int kEditorPaneDelta  = kEditorPaneWidth;
-constexpr int kMainMinClientW   = 610;   // min client width with no panels
+constexpr int kMainMinClientW   = 610;   // min chat-pane width with no panels
 
 // Payload attached to each file-tree node.
 class FileTreeItemData : public wxTreeItemData {
@@ -1860,45 +1858,44 @@ void ChatFrame::OnSettings(wxCommandEvent&) {
 }
 
 void ChatFrame::OnHamburger(wxCommandEvent&) {
+    // The chat pane keeps its current width; only the window grows/shrinks.
+    int centerW = mainPanel_->GetSize().x;
     if (splitter_->IsSplit()) {
         splitter_->Unsplit(importPanel_);
         importPanel_->Hide();
-        SyncPanelSizing(-kImportPaneDelta);
     } else {
         importPanel_->Show();
         splitter_->SplitVertically(importPanel_, mainPanel_, kImportPaneWidth);
-        SyncPanelSizing(+kImportPaneDelta);
     }
+    SyncPanelSizing(centerW);
 }
 
 void ChatFrame::OnEditorToggle(wxCommandEvent&) {
+    int centerW = mainPanel_->GetSize().x;
     if (editorPanel_->IsShown()) {
         editorPanel_->Hide();
         GetSizer()->Show(editorPanel_, false);
-        SyncPanelSizing(-kEditorPaneDelta);
     } else {
         editorPanel_->Show();
         GetSizer()->Show(editorPanel_, true);
-        SyncPanelSizing(+kEditorPaneDelta);
     }
+    SyncPanelSizing(centerW);
 }
 
-void ChatFrame::SyncPanelSizing(int delta) {
-    // Capture the width before touching the min size: raising the min size can
-    // auto-grow the frame, which would throw off the +delta arithmetic.
-    int w = GetClientSize().x;
-    SyncPanelMinSize();
-    SetClientSize(wxSize(w + delta, GetClientSize().y));
+void ChatFrame::SyncPanelSizing(int centerW) {
+    // Import pane width includes the splitter sash; the editor is a plain
+    // sizer sibling. The target window width is the fixed chat width plus
+    // whatever panes are currently visible, so toggling never resizes the
+    // chat pane — only dragging the sash (or the window edge) does.
+    int importW = splitter_->IsSplit()
+                ? kImportPaneWidth + splitter_->GetSashSize() : 0;
+    int editorW = editorPanel_->IsShown() ? kEditorPaneWidth : 0;
+
+    SetMinClientSize(wxSize(kMainMinClientW + importW + editorW, 400));
+    SetClientSize(wxSize(centerW + importW + editorW, GetClientSize().y));
     Layout();
     splitter_->UpdateSize();
     editorPanel_->Layout();
-}
-
-void ChatFrame::SyncPanelMinSize() {
-    int minW = kMainMinClientW
-             + (splitter_->IsSplit() ? kImportPaneDelta : 0)
-             + (editorPanel_->IsShown() ? kEditorPaneWidth : 0);
-    SetMinClientSize(wxSize(minW, 400));
 }
 
 void ChatFrame::PopulateEditorTree() {
@@ -2184,9 +2181,10 @@ void ChatFrame::ShowImportDialog() {
 
     // Split to show the import panel on the left.
     if (!splitter_->IsSplit()) {
+        int centerW = mainPanel_->GetSize().x;
         importPanel_->Show();
         splitter_->SplitVertically(importPanel_, mainPanel_, kImportPaneWidth);
-        SyncPanelSizing(+kImportPaneDelta);
+        SyncPanelSizing(centerW);
     }
 }
 
