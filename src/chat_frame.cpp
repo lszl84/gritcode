@@ -1956,7 +1956,7 @@ void ChatFrame::OnLocalModelsFetched(std::vector<std::string> models,
 
 void ChatFrame::OnPlay(wxCommandEvent&) {
     if (streaming_) return;
-    auto cfg = RunConfigStore::Get(activeCwd_);
+    auto cfg = RunConfigStore::GetBest(activeCwd_);
     if (cfg) {
         // Direct execution path — no model inference, just run the stored
         // command. Display-only: the user prompt block and tool result go

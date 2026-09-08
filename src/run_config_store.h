@@ -1,5 +1,7 @@
 #pragma once
 #include <nlohmann/json.hpp>
+#include <map>
+#include <optional>
 #include <string>
 
 // Per-project "run" configuration — one command per project directory.
@@ -24,6 +26,11 @@ public:
 
     // Get the config for a project dir. Returns nullopt if none.
     static std::optional<Config> Get(const std::string& cwd);
+
+    // For the Play button: exact match for `cwd`, otherwise the most recently
+    // used config for a project directory nested inside `cwd` (so a session
+    // rooted above the actual project still finds its run command).
+    static std::optional<Config> GetBest(const std::string& cwd);
 
     // Set (or replace) the config for a project dir. Auto-saves.
     static void Set(const std::string& cwd, const std::string& command,
