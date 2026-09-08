@@ -2,12 +2,14 @@
 #include <wx/wx.h>
 #include <wx/choice.h>
 #include <wx/textctrl.h>
+#include <wx/treectrl.h>
 #include <wx/bmpbuttn.h>
 #include <wx/splitter.h>
 #include <wx/dnd.h>
 #include <wx/statbmp.h>
 #include <wx/wrapsizer.h>
 #include <wx/thread.h>
+#include <wx/timer.h>
 #include <nlohmann/json.hpp>
 #include "chat_canvas.h"
 #include "md_parser.h"
@@ -89,6 +91,7 @@ private:
     wxBitmapButton* settingsBtn_ = nullptr;
     wxBitmapButton* exportBtn_ = nullptr;
     wxBitmapButton* hamburgerBtn_ = nullptr;
+    wxBitmapButton* editorBtn_ = nullptr;
 
     // On-disk session persistence. Sessions are keyed by working directory
     // (one session per folder, gritcode model). The dropdown is rebuilt from
@@ -216,8 +219,45 @@ private:
     void OnPlay(wxCommandEvent&);
     void OnExport(wxCommandEvent&);
     void OnHamburger(wxCommandEvent&);
+    void OnEditorToggle(wxCommandEvent&);
     void OnImport(wxCommandEvent&);
     void ShowImportDialog();
+    // Grow/shrink the frame so the chat pane keeps its width as side panels
+    // Resize the frame so the chat pane keeps `centerW` pixels regardless of
+    // which side panels are open, and keep the minimum width in sync.
+    void SyncPanelSizing(int centerW);
+    void OnInnerSashChanging(wxSplitterEvent& e);
+    // Project file tree in the right editor panel.
+    void PopulateEditorTree();
+    void PopulateTreeDir(wxTreeItemId parent, const wxString& path);
+    void OnEditorTreeExpanding(wxTreeEvent& e);
+    void OnEditorTreeSelect(wxTreeEvent& e);
+    void OnEditorTreeContextMenu(wxContextMenuEvent& e);
+    void ShowTreeContextMenu(wxTreeItemId item);
+    void TreeCtxTarget(wxString& dir, wxTreeItemId& parentItem);
+    void OnTreeNewFile(wxCommandEvent& e);
+    void OnTreeNewFolder(wxCommandEvent& e);
+    void OnTreeRename(wxCommandEvent& e);
+    void OnTreeShowInFiles(wxCommandEvent& e);
+    void ShowFileInManager(const wxString& path);
+    void LoadFileIntoEditor(const wxString& path);
+    bool SaveEditorFile();
+    bool SaveEditorFileAs();
+    bool WriteEditorFile(const wxString& path);
+    void ReloadEditorFile();
+    void CloseEditorFile();
+    void ClearEditorState();
+    bool MaybeSaveEditor();
+    void UpdateWindowTitle();
+    void OnEditorTextChanged(wxCommandEvent& e);
+    void OnEditorContextMenu(wxContextMenuEvent& e);
+    void OnHighlightTimer(wxTimerEvent& e);
+    void OnEditorSave(wxCommandEvent& e);
+    void OnEditorSaveAs(wxCommandEvent& e);
+    void OnEditorReload(wxCommandEvent& e);
+    void OnEditorCloseFile(wxCommandEvent& e);
+    void OnEditorShowInFiles(wxCommandEvent& e);
+    wxTreeItemId FindTreeItemByPath(wxTreeItemId parent, const wxString& path);
 
     // Repopulate the session choice from store_.List() with the leading
     // "New Session…" entry, then restore the active selection.
@@ -227,7 +267,7 @@ private:
     // pops a directory dialog, then either loads existing history for that
     // cwd or seeds a fresh one. Switch loads from disk and rebuilds canvas.
     void CreateNewSession();
-    void SwitchToCwd(const std::string& cwd);
+    bool SwitchToCwd(const std::string& cwd);
 
     // Persist current history to disk under activeCwd_.
     void PersistActive();
@@ -255,7 +295,21 @@ private:
     wxStaticText* refLabel_ = nullptr;                 // "Referenced Session: ..." at bottom
     wxButton* changeBtn_ = nullptr;                      // "Load another…" button
     wxString importedFileName_;                          // display name of imported file
-    int mainWidth_ = 600;                                // window width without import pane
+
+    // ---- Editor panel (right) ----
+    wxSplitterWindow* innerSplitter_ = nullptr;          // main | editor splitter
+    wxPanel* editorPanel_ = nullptr;                     // right pane of inner splitter
+    wxTreeCtrl* fileTree_ = nullptr;                     // project file tree
+    wxTextCtrl* codeEdit_ = nullptr;                     // editable file content
+    wxString editorFilePath_;                            // file open in codeEdit_
+    bool editorDirty_ = false;                           // unsaved changes in editor
+    wxTimer* highlightTimer_ = nullptr;                  // debounced syntax highlight
+    wxTreeItemId treeCtxItem_;                           // right-clicked tree item
+    wxString treeCtxPath_;                               // right-clicked item path
+    bool treeCtxIsDir_ = true;                           // right-clicked item is a dir
+    int editorPaneW_ = 0;                                // editor width (user-adjustable)
+    int imgFolder_ = -1;                                 // tree icon indices
+    int imgFile_ = -1;
 
     // Streaming HTTP callbacks (delivered on the GUI thread via CallAfter).
     // OnStreamData appends to sseBuf_ and parses any complete SSE events.

@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.28 FATAL_ERROR)
 
-project(gritcode VERSION 0.4.6 LANGUAGES CXX)
+project(gritcode VERSION 0.5.0 LANGUAGES C CXX)
 
 # Human-facing version string (used for packaging, bundle metadata, etc.)
 set(GRITCODE_VERSION "${PROJECT_VERSION}")
@@ -75,6 +75,85 @@ else()
     set(SQLITE_LIB PkgConfig::SQLITE3)
 endif()
 
+# ---- tree-sitter (editor syntax highlighting) ----
+# Core runtime plus five grammars. The grammars are compiled into a small
+# static library below; their repos are fetched for the generated sources only.
+set(BUILD_SHARED_LIBS OFF CACHE BOOL "" FORCE)
+FetchContent_Declare(
+    tree_sitter
+    GIT_REPOSITORY https://github.com/tree-sitter/tree-sitter.git
+    GIT_TAG v0.25.7
+    GIT_SHALLOW ON
+    SOURCE_SUBDIR lib
+)
+FetchContent_MakeAvailable(tree_sitter)
+
+FetchContent_Declare(
+    ts_python
+    GIT_REPOSITORY https://github.com/tree-sitter/tree-sitter-python.git
+    GIT_TAG v0.23.6
+    GIT_SHALLOW ON
+    SOURCE_SUBDIR src
+)
+FetchContent_Declare(
+    ts_html
+    GIT_REPOSITORY https://github.com/tree-sitter/tree-sitter-html.git
+    GIT_TAG v0.23.2
+    GIT_SHALLOW ON
+    SOURCE_SUBDIR src
+)
+FetchContent_Declare(
+    ts_css
+    GIT_REPOSITORY https://github.com/tree-sitter/tree-sitter-css.git
+    GIT_TAG v0.23.2
+    GIT_SHALLOW ON
+    SOURCE_SUBDIR src
+)
+FetchContent_Declare(
+    ts_javascript
+    GIT_REPOSITORY https://github.com/tree-sitter/tree-sitter-javascript.git
+    GIT_TAG v0.23.1
+    GIT_SHALLOW ON
+    SOURCE_SUBDIR src
+)
+FetchContent_Declare(
+    ts_markdown
+    GIT_REPOSITORY https://github.com/tree-sitter-grammars/tree-sitter-markdown.git
+    GIT_TAG v0.3.2
+    GIT_SHALLOW ON
+)
+FetchContent_MakeAvailable(ts_python ts_html ts_css ts_javascript ts_markdown)
+
+set(SYNTAX_GRAMMAR_SOURCES
+    ${ts_python_SOURCE_DIR}/src/parser.c
+    ${ts_python_SOURCE_DIR}/src/scanner.c
+    ${ts_html_SOURCE_DIR}/src/parser.c
+    ${ts_html_SOURCE_DIR}/src/scanner.c
+    ${ts_css_SOURCE_DIR}/src/parser.c
+    ${ts_css_SOURCE_DIR}/src/scanner.c
+    ${ts_javascript_SOURCE_DIR}/src/parser.c
+    ${ts_javascript_SOURCE_DIR}/src/scanner.c
+    ${ts_markdown_SOURCE_DIR}/tree-sitter-markdown/src/parser.c
+    ${ts_markdown_SOURCE_DIR}/tree-sitter-markdown/src/scanner.c
+    ${ts_markdown_SOURCE_DIR}/tree-sitter-markdown-inline/src/parser.c
+    ${ts_markdown_SOURCE_DIR}/tree-sitter-markdown-inline/src/scanner.c
+)
+add_library(syntax_grammars STATIC ${SYNTAX_GRAMMAR_SOURCES})
+target_include_directories(syntax_grammars PRIVATE
+    ${ts_python_SOURCE_DIR}/src
+    ${ts_html_SOURCE_DIR}/src
+    ${ts_css_SOURCE_DIR}/src
+    ${ts_javascript_SOURCE_DIR}/src
+    ${ts_markdown_SOURCE_DIR}/tree-sitter-markdown/src
+    ${ts_markdown_SOURCE_DIR}/tree-sitter-markdown-inline/src
+)
+# Generated parsers intentionally trip warnings we can't fix; silence them.
+target_compile_options(syntax_grammars PRIVATE -w)
+set_target_properties(syntax_grammars PROPERTIES
+    C_STANDARD 11
+    POSITION_INDEPENDENT_CODE ON
+)
+
 # ---- Sources ----
 set(SRCS
     src/main.cpp
@@ -88,6 +167,7 @@ set(SRCS
     src/memory.cpp
     src/session_store.cpp
     src/image_store.cpp
+    src/syntax.cpp
     src/debug_window.cpp
     src/shell_env.cpp
     src/preferences.cpp
@@ -138,7 +218,13 @@ target_link_libraries(gritcode PRIVATE
     nlohmann_json::nlohmann_json
     CURL::libcurl
     ${SQLITE_LIB}
+    tree-sitter
+    syntax_grammars
 )
+
+# tree-sitter's own CMake keeps its public include dir private; expose api.h
+# to the syntax highlighting module manually.
+target_include_directories(gritcode PRIVATE ${tree_sitter_SOURCE_DIR}/lib/include)
 
 # On GTK builds we touch GtkSettings directly to disable theme animations on
 # the canvas. This is the smallest GTK dep we can take.
