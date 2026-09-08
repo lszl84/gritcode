@@ -250,6 +250,11 @@ private:
     void UpdateWindowTitle();
     void OnEditorTextChanged(wxCommandEvent& e);
     void OnEditorContextMenu(wxContextMenuEvent& e);
+    void OnEditorSave(wxCommandEvent& e);
+    void OnEditorSaveAs(wxCommandEvent& e);
+    void OnEditorReload(wxCommandEvent& e);
+    void OnEditorCloseFile(wxCommandEvent& e);
+    void OnEditorShowInFiles(wxCommandEvent& e);
     wxTreeItemId FindTreeItemByPath(wxTreeItemId parent, const wxString& path);
 
     // Repopulate the session choice from store_.List() with the leading

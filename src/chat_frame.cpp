@@ -877,6 +877,11 @@ ChatFrame::ChatFrame()
     Bind(wxEVT_MENU, &ChatFrame::OnTreeNewFolder, this, ID_TREE_NEW_FOLDER);
     Bind(wxEVT_MENU, &ChatFrame::OnTreeRename, this, ID_TREE_RENAME);
     Bind(wxEVT_MENU, &ChatFrame::OnTreeShowInFiles, this, ID_TREE_SHOW_IN_FILES);
+    Bind(wxEVT_MENU, &ChatFrame::OnEditorSave, this, ID_EDITOR_SAVE);
+    Bind(wxEVT_MENU, &ChatFrame::OnEditorSaveAs, this, ID_EDITOR_SAVE_AS);
+    Bind(wxEVT_MENU, &ChatFrame::OnEditorReload, this, ID_EDITOR_RELOAD);
+    Bind(wxEVT_MENU, &ChatFrame::OnEditorCloseFile, this, ID_EDITOR_CLOSE);
+    Bind(wxEVT_MENU, &ChatFrame::OnEditorShowInFiles, this, ID_EDITOR_SHOW_IN_FILES);
     Bind(wxEVT_BUTTON, &ChatFrame::OnPlay, this, ID_PLAY);
     Bind(wxEVT_TOOL_BATCH_DONE, &ChatFrame::OnToolBatchDone, this);
     sessionChoice_->Bind(wxEVT_CHOICE, &ChatFrame::OnSessionChoice, this);
@@ -2287,6 +2292,10 @@ void ChatFrame::ShowFileInManager(const wxString& path) {
 }
 
 void ChatFrame::LoadFileIntoEditor(const wxString& path) {
+    // Default to editable; binary/too-large placeholders switch to read-only
+    // below. Reset here so a failed open can't leave the editor read-only.
+    codeEdit_->SetEditable(true);
+
     wxFile f(path, wxFile::read);
     if (!f.IsOpened()) return;
 
@@ -2295,10 +2304,12 @@ void ChatFrame::LoadFileIntoEditor(const wxString& path) {
     if (len > kMaxBytes) {
         // Keep the path so the title bar and close/reload still know the
         // file, but make the placeholder read-only (there is nothing to save).
+        // Set the text first: ChangeValue is ignored once the control is
+        // read-only on wxGTK.
+        codeEdit_->ChangeValue(wxString::Format(
+            wxString::FromUTF8("File is %lld bytes — too large to open here."),
+            (long long)len));
         codeEdit_->SetEditable(false);
-        codeEdit_->ChangeValue(
-            wxString::Format("File is %lld bytes — too large to open here.",
-                             (long long)len));
         editorFilePath_ = path;
         editorDirty_ = false;
         UpdateWindowTitle();
@@ -2310,16 +2321,16 @@ void ChatFrame::LoadFileIntoEditor(const wxString& path) {
     buf[n] = 0;
     if (memchr(buf.data(), 0, n)) {
         // Binary file: keep the path but don't let the user edit the
-        // placeholder (saving it would corrupt the real file).
+        // placeholder (saving it would corrupt the real file). Set the text
+        // first: ChangeValue is ignored once the control is read-only.
+        codeEdit_->ChangeValue(wxString::FromUTF8("[ Binary file — not shown ]"));
         codeEdit_->SetEditable(false);
-        codeEdit_->ChangeValue("[ Binary file — not shown ]");
         editorFilePath_ = path;
         editorDirty_ = false;
         UpdateWindowTitle();
         return;
     }
 
-    codeEdit_->SetEditable(true);
     codeEdit_->ChangeValue(wxString::FromUTF8(buf.data(), n));
     editorFilePath_ = path;
     editorDirty_ = false;
@@ -2423,7 +2434,7 @@ void ChatFrame::OnEditorContextMenu(wxContextMenuEvent& e) {
     bool editable = codeEdit_->IsEditable();
     wxMenu menu;
     wxMenuItem* save = menu.Append(ID_EDITOR_SAVE, "Save\tCtrl+S");
-    wxMenuItem* saveAs = menu.Append(ID_EDITOR_SAVE_AS, "Save As…");
+    wxMenuItem* saveAs = menu.Append(ID_EDITOR_SAVE_AS, wxString::FromUTF8("Save As…"));
     menu.AppendSeparator();
     wxMenuItem* reload = menu.Append(ID_EDITOR_RELOAD, "Reload from Disk");
     wxMenuItem* close = menu.Append(ID_EDITOR_CLOSE, "Close File");
@@ -2436,17 +2447,17 @@ void ChatFrame::OnEditorContextMenu(wxContextMenuEvent& e) {
     close->Enable(hasFile);
     show->Enable(hasFile);
 
-    int id = codeEdit_->GetPopupMenuSelectionFromUser(menu, e.GetPosition());
-    switch (id) {
-        case ID_EDITOR_SAVE:         SaveEditorFile(); break;
-        case ID_EDITOR_SAVE_AS:      SaveEditorFileAs(); break;
-        case ID_EDITOR_RELOAD:       ReloadEditorFile(); break;
-        case ID_EDITOR_CLOSE:        CloseEditorFile(); break;
-        case ID_EDITOR_SHOW_IN_FILES:
-            if (!editorFilePath_.empty()) ShowFileInManager(editorFilePath_);
-            break;
-        default: break;
-    }
+    // PopupMenu() is modal; the actions run from the frame-level menu
+    // handlers bound in the constructor (same pattern as the file tree).
+    codeEdit_->PopupMenu(&menu);
+}
+
+void ChatFrame::OnEditorSave(wxCommandEvent&) { SaveEditorFile(); }
+void ChatFrame::OnEditorSaveAs(wxCommandEvent&) { SaveEditorFileAs(); }
+void ChatFrame::OnEditorReload(wxCommandEvent&) { ReloadEditorFile(); }
+void ChatFrame::OnEditorCloseFile(wxCommandEvent&) { CloseEditorFile(); }
+void ChatFrame::OnEditorShowInFiles(wxCommandEvent&) {
+    if (!editorFilePath_.empty()) ShowFileInManager(editorFilePath_);
 }
 
 void ChatFrame::UpdateWindowTitle() {
