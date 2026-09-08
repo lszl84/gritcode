@@ -1911,9 +1911,27 @@ void ChatFrame::SyncPanelSizing(int centerW) {
 
     SetMinClientSize(wxSize(kMainMinClientW + importW + editorW, 400));
     SetClientSize(wxSize(centerW + importW + editorW, GetClientSize().y));
+
+    // The chat pane pads only its window-facing edges: when a side panel is
+    // open, the chat content sits flush against that panel's sash so it
+    // doesn't get an extra light gap next to the panes.
+    if (wxSizer* chatRoot = mainPanel_->GetSizer()) {
+        if (chatRoot->GetItemCount() == 1) {
+            wxSizerItem* item = chatRoot->GetItem(size_t(0));
+            int flags = wxEXPAND | wxTOP | wxBOTTOM;
+            if (!splitter_->IsSplit())      flags |= wxLEFT;
+            if (!innerSplitter_->IsSplit()) flags |= wxRIGHT;
+            item->SetFlag(flags);
+            item->SetBorder(FromDIP(2));
+        }
+    }
+
     Layout();
     splitter_->UpdateSize();
     innerSplitter_->UpdateSize();
+    // Re-layout the chat panel explicitly: its size may not have changed, so
+    // its sizer would otherwise keep the border it had on the previous pass.
+    mainPanel_->Layout();
     // The inner sash is pinned by OnInnerSashResize, which keeps the editor
     // at editorPaneW_ during any resize; no explicit sash re-assert here.
 }
