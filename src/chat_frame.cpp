@@ -3233,10 +3233,12 @@ void ChatFrame::DoSendActualRequest() {
                                 "Bearer " + std::string(apiKey.utf8_string())});
     }
     // Without an idle watchdog a half-closed SSE stream (server FIN with no
-    // [DONE]) would leave the request hanging forever. 60 s is generous enough
-    // to ride out a slow first token but tight enough to surface a stuck
-    // connection in a recoverable amount of time.
-    spec.idleTimeoutSeconds = 60;
+    // [DONE]) would leave the request hanging forever. Remote providers emit
+    // their first token quickly, so 60 s is plenty. Local models can take
+    // minutes to emit the first token on long contexts (reasoning models
+    // especially), so give them a much larger budget before declaring the
+    // connection stuck.
+    spec.idleTimeoutSeconds = route.isLocal ? 300 : 60;
 
     request_ = StreamingWebRequest(
         this, std::move(spec),
@@ -3372,11 +3374,17 @@ void ChatFrame::OnStreamDone(WebResponse resp) {
             }
         }
 
+        // Prefer the transport error over the status code. A slow local model
+        // killed by the idle watchdog arrives with a 200 status (the server
+        // did respond), so "HTTP 200" would be wildly misleading — the real
+        // problem is "Timeout was reached".
         wxString detail;
-        if (resp.status > 0) {
+        if (!resp.error.empty()) {
+            detail = "Error: " + wxString::FromUTF8(resp.error);
+        } else if (resp.status > 0) {
             detail = FormatU8("Error: HTTP {}", resp.status);
         } else {
-            detail = "Error: " + wxString::FromUTF8(resp.error);
+            detail = "Error: HTTP error";
         }
         wxString body = ExtractErrorBody();
         if (!body.IsEmpty()) detail += "\n\n" + body;
@@ -4020,7 +4028,7 @@ void ChatFrame::RunSummaryThenSend(int splitIdx) {
         spec.headers.push_back({"Authorization",
                                 "Bearer " + std::string(apiKey.utf8_string())});
     }
-    spec.idleTimeoutSeconds = 60;
+    spec.idleTimeoutSeconds = route.isLocal ? 300 : 60;
 
     request_ = StreamingWebRequest(
         this, std::move(spec),
