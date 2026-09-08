@@ -99,16 +99,14 @@ Palette MakePalette(bool dark) {
 }
 
 wxTextAttr Attr(const Palette &p, Cat cat) {
-    wxTextAttr a(p.c[(int)cat]);
-    if (cat == Cat::Keyword || cat == Cat::Heading)
-        a.SetFontWeight(wxFONTWEIGHT_BOLD);
-    return a;
+    // Colour only — never touch the font here. Setting a font weight would
+    // bake a default (proportional) font into the attribute and override the
+    // control's monospace font set with wxTextCtrl::SetFont.
+    return wxTextAttr(p.c[(int)cat]);
 }
 
 wxTextAttr DefaultAttr(const Palette &p) {
-    wxTextAttr a(p.c[(int)Cat::None]);
-    a.SetFontWeight(wxFONTWEIGHT_NORMAL);
-    return a;
+    return wxTextAttr(p.c[(int)Cat::None]);
 }
 
 // Per-language classification tables.

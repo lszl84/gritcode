@@ -2442,9 +2442,10 @@ void ChatFrame::OnEditorTextChanged(wxCommandEvent& e) {
 
 void ChatFrame::OnHighlightTimer(wxTimerEvent&) {
     if (!codeEdit_ || !codeEdit_->IsEditable() || editorFilePath_.empty()) return;
-    const wxScopedCharBuffer utf8 = codeEdit_->GetValue().utf8_str();
-    syntax::Highlight(codeEdit_, editorFilePath_,
-                      std::string_view(utf8.data(), utf8.length()));
+    // GetValue() returns a temporary wxString and utf8_str() is non-owning, so
+    // capturing it directly would dangle. Copy into an owned std::string first.
+    std::string text = codeEdit_->GetValue().ToStdString(wxConvUTF8);
+    syntax::Highlight(codeEdit_, editorFilePath_, text);
 }
 
 void ChatFrame::OnEditorContextMenu(wxContextMenuEvent& e) {
