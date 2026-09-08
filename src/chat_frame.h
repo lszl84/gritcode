@@ -18,6 +18,7 @@
 #include "streaming_web_request.h"
 #include "tools.h"
 #include <atomic>
+#include <chrono>
 #include <memory>
 #include <string>
 #include <thread>
@@ -227,6 +228,10 @@ private:
     void SyncPanelSizing(int centerW);
     void OnInnerSashChanging(wxSplitterEvent& e);
     void OnInnerSashResize(wxSplitterEvent& e);
+    void OnOuterSashChanging(wxSplitterEvent& e);
+    void OnOuterSashResize(wxSplitterEvent& e);
+    void OnFrameMove(wxMoveEvent& e);
+    void OnFrameSize(wxSizeEvent& e);
     // Project file tree in the right editor panel.
     void PopulateEditorTree();
     void PopulateTreeDir(wxTreeItemId parent, const wxString& path);
@@ -292,6 +297,10 @@ private:
     bool treeCtxIsDir_ = true;                           // right-clicked item is a dir
     int mainPaneW_ = 0;                                  // chat pane width (pinned on resize)
     int editorPaneW_ = 0;                                // editor width (user-adjustable)
+    int importPaneW_ = 0;                                // import width (user-adjustable)
+    std::chrono::steady_clock::time_point lastMoveTime_; // last window move
+    bool leftEdgeResize_ = false;                        // current resize is from left edge
+    bool programmaticResize_ = false;                    // toggle-driven layout in progress
     int imgFolder_ = -1;                                 // tree icon indices
     int imgFile_ = -1;
 
