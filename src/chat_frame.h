@@ -225,6 +225,8 @@ private:
     // Resize the frame so the chat pane keeps `centerW` pixels regardless of
     // which side panels are open, and keep the minimum width in sync.
     void SyncPanelSizing(int centerW);
+    void OnInnerSashChanging(wxSplitterEvent& e);
+    void OnInnerSashResize(wxSplitterEvent& e);
     // Project file tree in the right editor panel.
     void PopulateEditorTree();
     void PopulateTreeDir(wxTreeItemId parent, const wxString& path);
@@ -271,11 +273,13 @@ private:
     wxString importedFileName_;                          // display name of imported file
 
     // ---- Editor panel (right) ----
-    wxPanel* editorPanel_ = nullptr;                     // right-side fixed-width panel
+    wxSplitterWindow* innerSplitter_ = nullptr;          // main | editor splitter
+    wxPanel* editorPanel_ = nullptr;                     // right pane of inner splitter
     wxSplitterWindow* editorSplitter_ = nullptr;         // file tree | editor
     wxTreeCtrl* fileTree_ = nullptr;                     // project file tree
     wxTextCtrl* codeEdit_ = nullptr;                     // editable file content
     wxString editorFilePath_;                            // file open in codeEdit_
+    int editorPaneW_ = 0;                                // editor width (user-adjustable)
     int imgFolder_ = -1;                                 // tree icon indices
     int imgFile_ = -1;
 
