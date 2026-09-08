@@ -30,6 +30,8 @@
 #include <wx/artprov.h>
 #include <wx/dir.h>
 #include <wx/filefn.h>
+#include <wx/utils.h>
+#include <wx/textdlg.h>
 #include <algorithm>
 #include <map>
 #include <set>
@@ -68,6 +70,9 @@ constexpr int ID_PLAY     = wxID_HIGHEST + 13;
 constexpr int ID_EXPORT   = wxID_HIGHEST + 14;
 constexpr int ID_HAMBURGER = wxID_HIGHEST + 15;
 constexpr int ID_EDITOR   = wxID_HIGHEST + 16;
+constexpr int ID_TREE_NEW_FILE      = wxID_HIGHEST + 17;
+constexpr int ID_TREE_RENAME        = wxID_HIGHEST + 18;
+constexpr int ID_TREE_SHOW_IN_FILES = wxID_HIGHEST + 19;
 
 // Side-panel widths (pixels). The import pane lives in the main splitter, so
 // the window must grow by pane width + the splitter sash to keep the chat
@@ -860,6 +865,10 @@ ChatFrame::ChatFrame()
     Bind(wxEVT_BUTTON, &ChatFrame::OnEditorToggle, this, ID_EDITOR);
     fileTree_->Bind(wxEVT_TREE_ITEM_EXPANDING, &ChatFrame::OnEditorTreeExpanding, this);
     fileTree_->Bind(wxEVT_TREE_SEL_CHANGED, &ChatFrame::OnEditorTreeSelect, this);
+    fileTree_->Bind(wxEVT_TREE_ITEM_MENU, &ChatFrame::OnEditorTreeItemMenu, this);
+    Bind(wxEVT_MENU, &ChatFrame::OnTreeNewFile, this, ID_TREE_NEW_FILE);
+    Bind(wxEVT_MENU, &ChatFrame::OnTreeRename, this, ID_TREE_RENAME);
+    Bind(wxEVT_MENU, &ChatFrame::OnTreeShowInFiles, this, ID_TREE_SHOW_IN_FILES);
     Bind(wxEVT_BUTTON, &ChatFrame::OnPlay, this, ID_PLAY);
     Bind(wxEVT_TOOL_BATCH_DONE, &ChatFrame::OnToolBatchDone, this);
     sessionChoice_->Bind(wxEVT_CHOICE, &ChatFrame::OnSessionChoice, this);
@@ -2012,6 +2021,156 @@ void ChatFrame::OnEditorTreeSelect(wxTreeEvent& e) {
         LoadFileIntoEditor(data->path);
     }
     e.Skip();
+}
+
+void ChatFrame::OnEditorTreeItemMenu(wxTreeEvent& e) {
+    wxTreeItemId item = e.GetItem();
+    auto* data = item.IsOk()
+        ? dynamic_cast<FileTreeItemData*>(fileTree_->GetItemData(item)) : nullptr;
+
+    treeCtxItem_ = item;
+    if (data) {
+        treeCtxPath_ = data->path;
+        treeCtxIsDir_ = data->isDir;
+    } else {
+        // Right-click on empty space targets the project root.
+        treeCtxPath_ = wxString::FromUTF8(activeCwd_);
+        treeCtxIsDir_ = true;
+    }
+
+    wxMenu menu;
+    menu.Append(ID_TREE_NEW_FILE, "New File");
+    if (item.IsOk()) {
+        menu.AppendSeparator();
+        menu.Append(ID_TREE_RENAME, "Rename");
+        menu.Append(ID_TREE_SHOW_IN_FILES, "Show in Files");
+    }
+    fileTree_->PopupMenu(&menu);
+}
+
+void ChatFrame::OnTreeNewFile(wxCommandEvent&) {
+    wxString dir;
+    wxTreeItemId parentItem;
+    if (treeCtxItem_.IsOk() && treeCtxIsDir_) {
+        dir = treeCtxPath_;
+        parentItem = treeCtxItem_;
+    } else if (treeCtxItem_.IsOk()) {
+        dir = wxFileName(treeCtxPath_).GetPath();
+        parentItem = fileTree_->GetItemParent(treeCtxItem_);
+    } else {
+        dir = wxString::FromUTF8(activeCwd_);
+        parentItem = wxTreeItemId();
+    }
+
+    wxString name = wxGetTextFromUser("File name:", "New File", "", this);
+    if (name.empty()) return;
+    if (name.Find(wxFILE_SEP_PATH) != wxNOT_FOUND) {
+        wxMessageBox("The file name cannot contain path separators.",
+                     "gritcode", wxOK | wxICON_ERROR, this);
+        return;
+    }
+
+    wxString path = dir + wxFILE_SEP_PATH + name;
+    if (wxFileExists(path) || wxDirExists(path)) {
+        wxMessageBox("A file or directory with that name already exists:\n" + path,
+                     "gritcode", wxOK | wxICON_ERROR, this);
+        return;
+    }
+
+    wxFile f(path, wxFile::write);
+    if (!f.IsOpened()) {
+        wxMessageBox("Could not create file:\n" + path,
+                     "gritcode", wxOK | wxICON_ERROR, this);
+        return;
+    }
+    f.Close();
+
+    if (parentItem.IsOk()) {
+        PopulateTreeDir(parentItem, dir);
+        fileTree_->Expand(parentItem);
+        // Select the new file and open it in the editor.
+        wxTreeItemIdValue cookie;
+        for (wxTreeItemId c = fileTree_->GetFirstChild(parentItem, cookie);
+             c.IsOk(); c = fileTree_->GetNextChild(parentItem, cookie)) {
+            if (fileTree_->GetItemText(c) == name) {
+                fileTree_->SelectItem(c);
+                LoadFileIntoEditor(path);
+                break;
+            }
+        }
+    } else {
+        PopulateEditorTree();
+    }
+}
+
+void ChatFrame::OnTreeRename(wxCommandEvent&) {
+    if (!treeCtxItem_.IsOk()) return;
+
+    wxString oldPath = treeCtxPath_;
+    wxString oldName = wxFileName(oldPath).GetFullName();
+    wxString newName = wxGetTextFromUser("New name:", "Rename", oldName, this);
+    if (newName.empty() || newName == oldName) return;
+    if (newName.Find(wxFILE_SEP_PATH) != wxNOT_FOUND) {
+        wxMessageBox("The name cannot contain path separators.",
+                     "gritcode", wxOK | wxICON_ERROR, this);
+        return;
+    }
+
+    wxString newPath = wxFileName(oldPath).GetPath() + wxFILE_SEP_PATH + newName;
+    if (wxFileExists(newPath) || wxDirExists(newPath)) {
+        wxMessageBox("A file or directory with that name already exists:\n" + newPath,
+                     "gritcode", wxOK | wxICON_ERROR, this);
+        return;
+    }
+
+    if (!wxRenameFile(oldPath, newPath)) {
+        wxMessageBox("Could not rename:\n" + oldPath,
+                     "gritcode", wxOK | wxICON_ERROR, this);
+        return;
+    }
+
+    // Keep the open file's path in sync if it was just renamed.
+    if (!treeCtxIsDir_ && editorFilePath_ == oldPath) {
+        editorFilePath_ = newPath;
+    }
+
+    wxTreeItemId parent = fileTree_->GetItemParent(treeCtxItem_);
+    if (parent.IsOk()) {
+        wxString parentPath = wxFileName(oldPath).GetPath();
+        PopulateTreeDir(parent, parentPath);
+    } else {
+        PopulateEditorTree();
+    }
+}
+
+void ChatFrame::OnTreeShowInFiles(wxCommandEvent&) {
+    ShowFileInManager(treeCtxPath_);
+}
+
+void ChatFrame::ShowFileInManager(const wxString& path) {
+    const bool isDir = wxDirExists(path);
+#ifdef __WXMSW__
+    wxString cmd = isDir
+        ? "explorer.exe \"" + path + "\""
+        : "explorer.exe /select,\"" + path + "\"";
+    wxExecute(cmd, wxEXEC_ASYNC | wxEXEC_HIDE_CONSOLE);
+#elif defined(__WXOSX__)
+    wxString cmd = isDir ? "open \"" + path + "\"" : "open -R \"" + path + "\"";
+    wxExecute(cmd, wxEXEC_ASYNC | wxEXEC_HIDE_CONSOLE);
+#else
+    // Prefer the freedesktop FileManager1 interface so the file gets selected
+    // in the file manager; fall back to opening the containing directory.
+    wxString uri = wxFileName::FileNameToURL(wxFileName(path));
+    wxString cmd =
+        "dbus-send --session --dest=org.freedesktop.FileManager1 "
+        "--type=method_call /org/freedesktop/FileManager1 "
+        "org.freedesktop.FileManager1.ShowItems "
+        "array:string:\"" + uri + "\" string:\"\"";
+    if (wxExecute(cmd, wxEXEC_ASYNC | wxEXEC_HIDE_CONSOLE) == 0) {
+        wxString target = isDir ? path : wxFileName(path).GetPath();
+        if (!target.empty()) wxLaunchDefaultApplication(target);
+    }
+#endif
 }
 
 void ChatFrame::LoadFileIntoEditor(const wxString& path) {

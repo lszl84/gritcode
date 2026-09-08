@@ -232,6 +232,11 @@ private:
     void PopulateTreeDir(wxTreeItemId parent, const wxString& path);
     void OnEditorTreeExpanding(wxTreeEvent& e);
     void OnEditorTreeSelect(wxTreeEvent& e);
+    void OnEditorTreeItemMenu(wxTreeEvent& e);
+    void OnTreeNewFile(wxCommandEvent& e);
+    void OnTreeRename(wxCommandEvent& e);
+    void OnTreeShowInFiles(wxCommandEvent& e);
+    void ShowFileInManager(const wxString& path);
     void LoadFileIntoEditor(const wxString& path);
     void SaveEditorFile();
 
@@ -278,6 +283,9 @@ private:
     wxTreeCtrl* fileTree_ = nullptr;                     // project file tree
     wxTextCtrl* codeEdit_ = nullptr;                     // editable file content
     wxString editorFilePath_;                            // file open in codeEdit_
+    wxTreeItemId treeCtxItem_;                           // right-clicked tree item
+    wxString treeCtxPath_;                               // right-clicked item path
+    bool treeCtxIsDir_ = true;                           // right-clicked item is a dir
     int editorPaneW_ = 0;                                // editor width (user-adjustable)
     int imgFolder_ = -1;                                 // tree icon indices
     int imgFile_ = -1;
