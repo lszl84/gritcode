@@ -2062,7 +2062,14 @@ void ChatFrame::ShowTreeContextMenu(wxTreeItemId item) {
         renameItem->Enable(false);
         showItem->Enable(false);
     }
+    pendingShowFiles_ = false;
     fileTree_->PopupMenu(&menu);
+    // PopupMenu() is modal and only returns once the menu is gone, so this is
+    // the safe moment to open the file manager without leaving the menu open.
+    if (pendingShowFiles_) {
+        pendingShowFiles_ = false;
+        ShowFileInManager(treeCtxPath_);
+    }
 }
 
 void ChatFrame::TreeCtxTarget(wxString& dir, wxTreeItemId& parentItem) {
@@ -2199,7 +2206,10 @@ void ChatFrame::OnTreeRename(wxCommandEvent&) {
 }
 
 void ChatFrame::OnTreeShowInFiles(wxCommandEvent&) {
-    ShowFileInManager(treeCtxPath_);
+    // Don't launch yet: this runs inside the popup menu's event handler, and
+    // opening the file manager while the GTK menu still has its grab can
+    // leave the menu on screen. Defer until PopupMenu() has returned.
+    pendingShowFiles_ = true;
 }
 
 void ChatFrame::ShowFileInManager(const wxString& path) {

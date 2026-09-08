@@ -289,6 +289,7 @@ private:
     wxTreeItemId treeCtxItem_;                           // right-clicked tree item
     wxString treeCtxPath_;                               // right-clicked item path
     bool treeCtxIsDir_ = true;                           // right-clicked item is a dir
+    bool pendingShowFiles_ = false;                      // launch after menu closes
     int editorPaneW_ = 0;                                // editor width (user-adjustable)
     int imgFolder_ = -1;                                 // tree icon indices
     int imgFile_ = -1;
