@@ -2396,6 +2396,9 @@ void ChatFrame::ReloadEditorFile() {
 void ChatFrame::CloseEditorFile() {
     if (!MaybeSaveEditor()) return;
     ClearEditorState();
+    // Deselect the tree item so clicking the same file again reloads it
+    // (otherwise it is already selected and won't fire SEL_CHANGED).
+    if (fileTree_) fileTree_->Unselect();
 }
 
 void ChatFrame::ClearEditorState() {
