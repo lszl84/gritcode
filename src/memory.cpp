@@ -1,8 +1,8 @@
 #include "memory.h"
+#include "app_paths.h"
 #include "perf_log.h"
 #include <sqlite3.h>
 #include <cstdio>
-#include <cstdlib>
 #include <filesystem>
 
 namespace fs = std::filesystem;
@@ -10,24 +10,11 @@ namespace fs = std::filesystem;
 MemoryDB::~MemoryDB() { Close(); }
 
 std::string MemoryDB::DefaultPath() {
-    const char* xdg = std::getenv("XDG_DATA_HOME");
-    std::string base;
-    if (xdg && *xdg) {
-        base = std::string(xdg) + "/gritcode";
-    } else {
-        const char* home = std::getenv("HOME");
-        if (!home) home = "/tmp";
-        base = std::string(home) + "/.local/share/gritcode";
-    }
-    return base + "/memory.db";
+    return app_paths::AppDataDir() + "/memory.db";
 }
 
 std::string MemoryDB::SessionsDir() {
-    const char* xdg = std::getenv("XDG_DATA_HOME");
-    if (xdg && *xdg) return std::string(xdg) + "/gritcode/sessions";
-    const char* home = std::getenv("HOME");
-    if (!home) home = "/tmp";
-    return std::string(home) + "/.local/share/gritcode/sessions";
+    return app_paths::AppDataDir() + "/sessions";
 }
 
 bool MemoryDB::Open(const std::string& path) {

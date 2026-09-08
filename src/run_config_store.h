@@ -3,8 +3,8 @@
 #include <string>
 
 // Per-project "run" configuration — one command per project directory.
-// Stored as a JSON file next to the memory database:
-//   $XDG_DATA_HOME/gritcode/run_configs.json
+// Stored as a JSON file in the app data dir (see app_paths.h):
+//   <data dir>/run_configs.json
 //
 // Keyed by absolute project path. Each entry holds the shell command the
 // model discovered to build/run the project, plus metadata.

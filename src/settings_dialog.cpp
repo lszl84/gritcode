@@ -74,7 +74,8 @@ SettingsDialog::SettingsDialog(wxWindow* parent)
         hint_ = addHint(
             "System keyring not fully initialized - known issue on some "
             "Debian-based systems on first login. Keys will be stored in the "
-            "application settings file (~/.gritcode/gritcode.conf) in plaintext.");
+            "application settings file (" + Preferences::ConfigFilePath() +
+            ") in plaintext.");
     } else {
         hint_ = addHint("Stored securely in your system keyring.");
     }
@@ -170,8 +171,9 @@ void SettingsDialog::OnSave(wxCommandEvent& evt) {
             "A system reboot fixes it, but until then the API key cannot "
             "be stored\n"
             "in the keyring.\n\n"
-            "Store the key in gritcode's settings file as plaintext instead?\n"
-            "(~/.gritcode/gritcode.conf)\n\n"
+            "Store the key in gritcode's settings file as plaintext instead?\n(" +
+            Preferences::ConfigFilePath() +
+            ")\n\n"
             "Alternatively, cancel and reboot your system to clear the issue "
             "at\n"
             "the source - after a reboot the keyring will work normally.",

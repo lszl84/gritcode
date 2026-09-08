@@ -5,11 +5,13 @@
 #include <vector>
 
 // On-disk persistence for chat sessions, keyed by working directory (one
-// session per folder). Storage layout mirrors gritcode:
-//   ~/.local/share/gritcode/sessions/<hash>.json   (per-session)
-//   ~/.local/share/gritcode/sessions.json          (index of cwds)
-// Writes are atomic (temp file then rename) so a crash mid-write can't
-// corrupt the index or any session file.
+// session per folder). Storage layout:
+//   <data dir>/sessions/<hash>.json   (per-session)
+//   <data dir>/sessions.json          (index of cwds)
+// where <data dir> is app_paths::AppDataDir() ($XDG_DATA_HOME/gritcode on
+// Linux, ~/Library/Application Support/gritcode on macOS). Writes are atomic
+// (temp file then rename) so a crash mid-write can't corrupt the index or
+// any session file.
 class SessionStore {
 public:
     struct Entry {
@@ -80,7 +82,7 @@ public:
     void SetSessionModel(const std::string& cwd, const std::string& model) const;
 
 private:
-    std::string root_;         // ~/.local/share/gritcode
+    std::string root_;         // app_paths::AppDataDir()
     std::string sessionsDir_;  // root_ + "/sessions"
     std::string indexPath_;    // root_ + "/sessions.json"
 

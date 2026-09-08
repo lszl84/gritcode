@@ -1,23 +1,12 @@
 #include "run_config_store.h"
-#include <cstdlib>
+#include "app_paths.h"
 #include <ctime>
 #include <fstream>
 
 namespace fs = std::filesystem;
 
 std::string RunConfigStore::StoragePath() {
-    // Match the DataRoot() convention from session_store.cpp:
-    //   $XDG_DATA_HOME/gritcode  or  $HOME/.local/share/gritcode.
-    // Don't use wxStandardPaths here — on some systems it resolves to
-    // ~/.gritcode instead of ~/.local/share/gritcode, which puts the
-    // run config in a different directory than sessions and memory.
-    if (const char* xdg = std::getenv("XDG_DATA_HOME")) {
-        if (xdg[0] != '\0') return std::string(xdg) + "/gritcode/run_configs.json";
-    }
-    if (const char* home = std::getenv("HOME")) {
-        return std::string(home) + "/.local/share/gritcode/run_configs.json";
-    }
-    return "gritcode_data/run_configs.json";
+    return app_paths::AppDataDir() + "/run_configs.json";
 }
 
 std::map<std::string, RunConfigStore::Config> RunConfigStore::Load() {

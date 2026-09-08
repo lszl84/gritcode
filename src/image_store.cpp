@@ -1,8 +1,8 @@
 #include "image_store.h"
+#include "app_paths.h"
 
 #include <cstdint>
 #include <cstdio>
-#include <cstdlib>
 #include <filesystem>
 #include <fstream>
 #include <sstream>
@@ -10,13 +10,7 @@
 namespace fs = std::filesystem;
 
 std::string ImageStore::DataRoot() {
-    if (const char* xdg = std::getenv("XDG_DATA_HOME")) {
-        if (xdg[0] != '\0') return std::string(xdg) + "/gritcode";
-    }
-    if (const char* home = std::getenv("HOME")) {
-        return std::string(home) + "/.local/share/gritcode";
-    }
-    return ".gritcode";  // fallback (shouldn't happen on Linux/macOS)
+    return app_paths::AppDataDir();
 }
 
 std::string ImageStore::ExtForMime(const std::string& mime) {

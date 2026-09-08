@@ -1,9 +1,9 @@
 #include "session_store.h"
+#include "app_paths.h"
 #include "perf_log.h"
 #include <algorithm>
 #include <chrono>
 #include <cstdio>
-#include <cstdlib>
 #include <ctime>
 #include <filesystem>
 #include <fstream>
@@ -13,13 +13,7 @@ namespace fs = std::filesystem;
 
 namespace {
 std::string DataRoot() {
-    if (const char* xdg = std::getenv("XDG_DATA_HOME")) {
-        if (xdg[0] != '\0') return std::string(xdg) + "/gritcode";
-    }
-    if (const char* home = std::getenv("HOME")) {
-        return std::string(home) + "/.local/share/gritcode";
-    }
-    return ".gritcode";  // fallback (shouldn't happen on Linux/macOS)
+    return app_paths::AppDataDir();
 }
 
 void AtomicWrite(const std::string& path, const std::string& content) {

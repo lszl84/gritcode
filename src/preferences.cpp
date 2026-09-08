@@ -1,4 +1,5 @@
 #include "preferences.h"
+#include "app_paths.h"
 #include <wx/config.h>
 #include <wx/fileconf.h>
 #if wxUSE_SECRETSTORE
@@ -7,6 +8,8 @@
 #include <libsecret/secret.h>
 #include <gio/gio.h>
 #endif
+
+#include <filesystem>
 
 namespace {
 
@@ -47,13 +50,22 @@ const SecretSchema kSecretSchema = {
 
 void Preferences::Init() {
     if (wxConfigBase::Get(false) != nullptr) return;
-    // wxFileConfig path with wxCONFIG_USE_SUBDIR: stores inside
-    // wxStandardPaths::GetUserDataDir() as ~/.gritcode/gritcode.conf,
-    // sharing the directory with run_configs.json and the memory DB.
-    auto* cfg = new wxFileConfig("gritcode", wxEmptyString,
-                                 wxEmptyString, wxEmptyString,
-                                 wxCONFIG_USE_LOCAL_FILE | wxCONFIG_USE_SUBDIR);
+    // Move any legacy ~/.gritcode/gritcode.conf (and, on macOS, the
+    // ~/.local/share/gritcode data dir) into the current layout before the
+    // config file is opened so we read the migrated values, not an empty file.
+    app_paths::MigrateLegacyLayout();
+
+    std::error_code ec;
+    std::filesystem::create_directories(app_paths::AppConfigDir(), ec);
+
+    wxString path = ConfigFilePath();
+    auto* cfg = new wxFileConfig("gritcode", wxEmptyString, path, wxEmptyString,
+                                 wxCONFIG_USE_LOCAL_FILE);
     wxConfigBase::Set(cfg);
+}
+
+wxString Preferences::ConfigFilePath() {
+    return wxString::FromUTF8(app_paths::AppConfigDir() + "/gritcode.conf");
 }
 
 wxString Preferences::GetLocalHost() {

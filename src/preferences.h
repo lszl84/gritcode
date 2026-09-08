@@ -3,8 +3,10 @@
 
 // Facade over wxConfig (plaintext app prefs) and wxSecretStore (OS-backed
 // secrets). Non-secret state — last selected model, future UI toggles — goes
-// through wxConfig at ~/.gritcode/gritcode.conf. API keys go through
-// wxSecretStore, which on Linux talks to libsecret (gnome-keyring/kwallet).
+// through wxConfig at the platform config path (see app_paths.h:
+// $XDG_CONFIG_HOME/gritcode on Linux, ~/Library/Application Support/gritcode
+// on macOS). API keys go through wxSecretStore, which on Linux talks to
+// libsecret (gnome-keyring/kwallet).
 //
 // A known gnome-keyring bug on Debian/XFCE/lightdm (first login after a fresh
 // install) leaves the daemon in a state where it reports a default collection
@@ -21,6 +23,10 @@ class Preferences {
 public:
     // Install the global wxConfig singleton with our app name. Idempotent.
     static void Init();
+
+    // Full path to the wxConfig file (gritcode.conf in the platform config
+    // dir). Used for user-facing messages and by Init().
+    static wxString ConfigFilePath();
 
     // ---- non-secret prefs (wxConfig) ----
 

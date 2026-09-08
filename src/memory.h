@@ -78,8 +78,9 @@ public:
                            int before,
                            int after);
 
-    // Default db path: $XDG_DATA_HOME/gritcode/memory.db (or
-    // ~/.local/share/gritcode/memory.db).
+    // Default db path: <data dir>/memory.db, where <data dir> is
+    // app_paths::AppDataDir() ($XDG_DATA_HOME/gritcode on Linux,
+    // ~/Library/Application Support/gritcode on macOS).
     static std::string DefaultPath();
 
     // Default sessions directory we walk during --reindex.
