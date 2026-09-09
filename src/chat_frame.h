@@ -387,6 +387,10 @@ private:
     // return immediately); false if history fits and the caller should
     // proceed to send the normal request.
     bool MaybeCompactThenSend();
+    // Index into history_ marking the start of the verbatim tail (the most
+    // recent ~kTailBudgetTokens of non-summary, non-system, non-compacted
+    // messages). Messages before this index are the head to summarize.
+    int SelectTailSplit() const;
     // Fires the summary stream request. The head [0..splitIdx) of
     // history_ is summarized into a single user-role message.
     void RunSummaryThenSend(int splitIdx);

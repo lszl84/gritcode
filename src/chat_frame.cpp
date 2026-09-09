@@ -102,15 +102,31 @@ public:
 };
 
 // ---- Context management (compaction.md) ----
-constexpr int kContextWindowTokens   = 1'048'576;  // real DeepSeek limit
-constexpr int kHistoryBudgetTokens   = 150'000;    // Layer 2 cost-control trigger
-constexpr int kKeepRecentTokens      = 8'000;
-constexpr int kKeepRecentTurns       = 2;
+// Tail retention: keep the most recent ~15K tokens of conversation verbatim;
+// everything older is the "head" that gets summarized. This mirrors OpenCode's
+// preserveRecentBudget (which caps at 15K for every model we route to). The
+// tail is the only part re-sent every round, so bounding it controls cost.
+constexpr int kTailBudgetTokens      = 15'000;
 constexpr int kSummaryMaxTokens      = 8'000;
+// Output ceiling, matching OpenCode's OUTPUT_TOKEN_MAX (32K). Replaces the old
+// 384K cap so a runaway reasoning/write stream can't bill 384K in one response.
+constexpr int kOutputTokenMax        = 32'000;
+// Reserve kept free of the input estimate when deciding to compact (OpenCode's
+// COMPACTION_BUFFER). Compaction fires when the rendered view reaches
+// contextWindow - kBufferTokens.
 constexpr int kBufferTokens          = 20'000;
 constexpr int kToolOutputMaxChars    = 2'000;
+// Cap on any single tool-call argument re-sent in the tail (e.g. a giant
+// write_file `content`). A1 ages oversized args out of the 15K tail, but this
+// bounds the residual case where one oversized call sits inside the retained
+// tail. The model already executed the call (its result follows), so it only
+// needs the shape of the args, not the full payload.
+constexpr int kToolCallArgsMaxChars  = 32'000;
 constexpr int kPruneProtectTokens    = 40'000;
 constexpr int kPruneMinFreedTokens   = 20'000;
+// Tool-output pruning protects outputs from the most recent kPruneFreshTurns
+// user turns (OpenCode's prune keeps the last 2 turns verbatim).
+constexpr int kPruneFreshTurns       = 2;
 
 int EstimateMessageTokens(const nlohmann::json& m) {
     if (!m.is_object()) return 0;
@@ -130,6 +146,32 @@ int EstimateMessageTokens(const nlohmann::json& m) {
         }
     }
     return (chars + 3) / 4;
+}
+
+// Estimate the input tokens of a rendered message array (chars/3 ≈ 3.3
+// tokens/char, plus fixed overhead for tool definitions + JSON structure).
+// Used both to clamp max_tokens and to decide when compaction must fire.
+int EstimatePromptTokens(const nlohmann::json& messages) {
+    size_t promptChars = 0;
+    for (const auto& m : messages) {
+        if (!m.is_object()) continue;
+        if (m.contains("content") && m["content"].is_string())
+            promptChars += m["content"].get_ref<const std::string&>().size();
+        if (m.contains("reasoning_content") && m["reasoning_content"].is_string())
+            promptChars += m["reasoning_content"].get_ref<const std::string&>().size();
+        if (m.contains("tool_calls") && m["tool_calls"].is_array()) {
+            for (const auto& tc : m["tool_calls"]) {
+                if (tc.is_object() && tc.contains("function")
+                    && tc["function"].is_object()
+                    && tc["function"].contains("arguments")
+                    && tc["function"]["arguments"].is_string())
+                    promptChars += tc["function"]["arguments"]
+                                     .get_ref<const std::string&>().size();
+            }
+        }
+    }
+    promptChars += 32000;  // tool definitions + JSON structural overhead
+    return (int)(promptChars / 3);
 }
 
 
@@ -232,12 +274,11 @@ struct ModelRoute {
     const char* model;
     bool needsApiKey;
     Preferences::Provider provider;  // only valid when needsApiKey
-    // Output ceiling. Set to each model's documented maximum — leaving it
-    // unset would let deepseek apply its 4096 server-side default, which
-    // clips `write_file` arguments mid-JSON and triggers an unrecoverable
-    // "missing 'path' argument" loop. DeepSeek V4 docs publish 384K as the
-    // hard max; providers clamp silently if a value exceeds the model's own
-    // ceiling, so picking the documented top is safe.
+    // Output ceiling, matching OpenCode's OUTPUT_TOKEN_MAX (32K). Leaving it
+    // unset would let deepseek apply its 4096 server-side default, which clips
+    // `write_file` arguments mid-JSON and triggers an unrecoverable "missing
+    // 'path' argument" loop. 32K is plenty for any single response and also
+    // bounds reasoning-token blowups that previously billed 384K.
     int maxTokens;
     // Total input+output token budget for the model. Used by the context
     // compactor to decide when to summarize the head of history. Set per
@@ -261,21 +302,21 @@ ModelRoute RouteForIndex(int idx, const std::vector<std::string>& remoteModels) 
         // (200K context, 32K output). No API key needed; endpoint is open.
         return {"https://opencode.ai/zen/v1/chat/completions",
                 "big-pickle", false, Preferences::Provider::DeepSeek,
-                32000, 200000};
+                kOutputTokenMax, 200000};
     case kModelDeepseekFlash:
         return {"https://api.deepseek.com/chat/completions",
                 "deepseek-v4-flash", true, Preferences::Provider::DeepSeek,
-                384000, 1000000};
+                kOutputTokenMax, 1000000};
     case kModelDeepseekPro:
         return {"https://api.deepseek.com/chat/completions",
                 "deepseek-v4-pro", true, Preferences::Provider::DeepSeek,
-                384000, 1000000};
+                kOutputTokenMax, 1000000};
     default: {
         size_t i = (size_t)(idx - 3);
         if (i < remoteModels.size()) {
             return {"https://api.deepseek.com/chat/completions",
                     remoteModels[i].c_str(), true, Preferences::Provider::DeepSeek,
-                    384000, 1000000};
+                    kOutputTokenMax, 1000000};
         }
     }
     }
@@ -3037,7 +3078,7 @@ void ChatFrame::PruneToolOutputs(nlohmann::json& tail) const {
         if (!m.is_object() || m.value("role", std::string{}) != "tool")
             continue;
         if (!m.contains("content") || !m["content"].is_string()) continue;
-        bool fresh = turnOf[i] < kKeepRecentTurns
+        bool fresh = turnOf[i] < kPruneFreshTurns
                      || toolTokensBelow[i] < kPruneProtectTokens;
         if (fresh) continue;
         const auto& c = m["content"].get_ref<const std::string&>();
@@ -3053,7 +3094,7 @@ void ChatFrame::PruneToolOutputs(nlohmann::json& tail) const {
         if (!m.is_object() || m.value("role", std::string{}) != "tool")
             continue;
         if (!m.contains("content") || !m["content"].is_string()) continue;
-        bool fresh = turnOf[i] < kKeepRecentTurns
+        bool fresh = turnOf[i] < kPruneFreshTurns
                      || toolTokensBelow[i] < kPruneProtectTokens;
         if (fresh) continue;
         std::string c = m["content"].get<std::string>();
@@ -3157,17 +3198,47 @@ void ChatFrame::DoSendActualRequest() {
         messages = std::move(deduped);
     }
 
-    // DeepSeek's reasoning models reject any request whose history has an
-    // assistant message without a `reasoning_content` field (even an empty
-    // one). For OpenCode-originated history or assistant turns where we never
-    // captured reasoning, inject an empty string to keep the request valid.
-    if (route.provider == Preferences::Provider::DeepSeek
-        && route.needsApiKey) {
-        for (auto& m : messages) {
-            if (m.is_object()
-                && m.value("role", std::string{}) == "assistant"
-                && !m.contains("reasoning_content")) {
+    // Strip reasoning_content from outbound assistant messages. DeepSeek's
+    // reasoning models reject a request if an assistant message lacks the
+    // FIELD (even an empty one), so for DeepSeek we keep the field but drop
+    // the text; other routes get it erased entirely. The model re-derives its
+    // own reasoning each turn, so re-sending it is pure input cost (OpenCode
+    // keeps it but bounded by its 15K tail — we cut it outright). The full
+    // reasoning stays in durable history_ for display/export/compaction.
+    for (auto& m : messages) {
+        if (m.is_object() && m.value("role", std::string{}) == "assistant") {
+            if (route.provider == Preferences::Provider::DeepSeek
+                && route.needsApiKey) {
                 m["reasoning_content"] = "";
+            } else {
+                m.erase("reasoning_content");
+            }
+        }
+    }
+
+    // B2: bound any single retained tool-call argument (e.g. a huge write_file
+    // `content`) so one message can't dominate the tail. The call already ran
+    // (its result follows it in the history), so the model only needs the
+    // shape of the arguments to stay coherent, not the full payload. The
+    // durable history_ is untouched — this only affects the outbound request.
+    for (auto& m : messages) {
+        if (!m.is_object() || m.value("role", std::string{}) != "assistant"
+            || !m.contains("tool_calls") || !m["tool_calls"].is_array()) {
+            continue;
+        }
+        for (auto& tc : m["tool_calls"]) {
+            if (!tc.is_object() || !tc.contains("function")
+                || !tc["function"].is_object()
+                || !tc["function"].contains("arguments")
+                || !tc["function"]["arguments"].is_string()) {
+                continue;
+            }
+            const std::string& args =
+                tc["function"]["arguments"].get_ref<const std::string&>();
+            if ((int)args.size() > kToolCallArgsMaxChars) {
+                std::string t = args.substr(0, kToolCallArgsMaxChars);
+                t += "\n...[arguments truncated]";
+                tc["function"]["arguments"] = std::move(t);
             }
         }
     }
@@ -3217,29 +3288,9 @@ void ChatFrame::DoSendActualRequest() {
 
     // Estimate the prompt size and clamp max_tokens so prompt + completion
     // fits the model context. The API reserves max_tokens against the window
-    // even when the completion doesn't use it, so a fixed 384K cap overflows
-    // once history is large. Use chars/3 (real ratio is ~3.3) and rely on
-    // contextWindow being ~48K under the model's true limit as extra slack.
-    size_t promptChars = 0;
-    for (const auto& m : messages) {
-        if (!m.is_object()) continue;
-        if (m.contains("content") && m["content"].is_string())
-            promptChars += m["content"].get_ref<const std::string&>().size();
-        if (m.contains("reasoning_content") && m["reasoning_content"].is_string())
-            promptChars += m["reasoning_content"].get_ref<const std::string&>().size();
-        if (m.contains("tool_calls") && m["tool_calls"].is_array()) {
-            for (const auto& tc : m["tool_calls"]) {
-                if (tc.is_object() && tc.contains("function")
-                    && tc["function"].is_object()
-                    && tc["function"].contains("arguments")
-                    && tc["function"]["arguments"].is_string())
-                    promptChars += tc["function"]["arguments"]
-                                     .get_ref<const std::string&>().size();
-            }
-        }
-    }
-    promptChars += 32000;  // tool definitions + JSON structural overhead
-    int promptTokens = (int)(promptChars / 3);
+    // even when the completion doesn't use it. Use chars/3 (real ratio is
+    // ~3.3); the overflow trigger + provider-400 recovery are the backstops.
+    int promptTokens = EstimatePromptTokens(messages);
     int maxTokens = route.maxTokens;
     int avail = route.contextWindow - promptTokens - 8000;
     if (avail < 8000) avail = 8000;
@@ -3894,34 +3945,47 @@ bool ChatFrame::MaybeCompactThenSend() {
     int growth = histSize - historyCompactBaseCount_;
     if (growth < 5 && historyCompactBaseCount_ > 0) return false;
 
-    // Keep the last kKeepRecentTurns user turns verbatim; the durable history
-    // before them is what we compact. Split at the (kKeepRecentTurns)-th
-    // non-summary, non-compacted user message from the end.
-    int splitIdx = -1;
-    int userCount = 0;
-    for (int i = histSize - 1; i >= 0; --i) {
-        if (!history_[i].is_object()) continue;
-        if (history_[i].value("compacted", false)) continue;
-        if (history_[i].value("role", std::string{}) != "user") continue;
-        if (history_[i].value("isSummary", false)) continue;
-        ++userCount;
-        if (userCount == kKeepRecentTurns) { splitIdx = i; break; }
-    }
-    // Nothing older than the protected turns to summarize.
+    // Select the token-budget tail: the most recent ~kTailBudgetTokens of
+    // conversation stays verbatim; everything before it is the head we
+    // summarize. This replaces the old "keep 2 user turns" rule (which was
+    // unbounded) with OpenCode's bounded preserveRecentBudget.
+    int splitIdx = SelectTailSplit();
+    // Nothing older than the protected tail to summarize.
     if (splitIdx <= 1) return false;
 
-    // History budget: only the visible (non-hidden) head counts. Hidden
-    // messages are already summarized and are never sent to the model.
-    int historyTokens = 0;
-    for (int i = 0; i < splitIdx; ++i) {
-        if (history_[i].is_object() && !history_[i].value("compacted", false))
-            historyTokens += EstimateMessageTokens(history_[i]);
-    }
-
-    if (historyTokens <= kHistoryBudgetTokens) return false;
+    // Overflow trigger (OpenCode's isOverflow): compact only when the full
+    // rendered view would exceed the context window minus a reserve. This is
+    // ~contextWindow (≈980K for DeepSeek) instead of the old 150K head budget,
+    // so compaction fires ~7x less often.
+    nlohmann::json view = BuildModelView();
+    int viewTokens = EstimatePromptTokens(view);
+    ModelRoute route = RouteForIndex(currentModelIndex_, remoteModels_);
+    int usable = route.contextWindow - kBufferTokens;
+    if (viewTokens < usable) return false;
 
     RunSummaryThenSend(splitIdx);
     return true;
+}
+
+int ChatFrame::SelectTailSplit() const {
+    int histSize = (int)history_.size();
+    int tailTokens = 0;
+    int splitIdx = histSize;
+    for (int i = histSize - 1; i >= 0; --i) {
+        const auto& m = history_[i];
+        if (!m.is_object()) continue;
+        if (m.value("compacted", false)) continue;
+        // A summary checkpoint is a head boundary: everything older than it
+        // is already represented by that summary, so it must not leak into
+        // the verbatim tail.
+        if (m.value("isSummary", false)) break;
+        if (m.value("role", std::string{}) == "system") break;
+        int t = EstimateMessageTokens(m);
+        if (tailTokens > 0 && tailTokens + t > kTailBudgetTokens) break;
+        tailTokens += t;
+        splitIdx = i;
+    }
+    return splitIdx;
 }
 
 bool ChatFrame::ForceCompactForOverflow() {
@@ -3957,18 +4021,27 @@ void ChatFrame::RunSummaryThenSend(int splitIdx) {
     // transcript rather than the raw tool_calls / tool_result structure —
     // (a) it works identically for any wire protocol, and (b) the summary
     // model doesn't need machine-readable tool shape, just what happened.
+    //
+    // A previous summary checkpoint (isSummary) is carried forward as a
+    // dedicated `previousSummary` string rather than dumped inline — inline
+    // dumps sit at the FRONT of the head and are the first thing the size cap
+    // below truncates away, silently breaking the summary chain. Keeping it
+    // separate mirrors OpenCode's buildPrompt({ previousSummary, context }).
     std::string headText;
     headText.reserve(16384);
+    std::string previousSummary;
     for (int i = 0; i < splitIdx; ++i) {
         const auto& m = history_[i];
         if (!m.is_object()) continue;
         if (m.value("compacted", false)) continue;  // already summarized
+        if (m.value("isSummary", false)) {
+            if (m.contains("content") && m["content"].is_string())
+                previousSummary = m["content"].get_ref<const std::string&>();
+            continue;
+        }
         std::string role = m.value("role", std::string{});
         if (role == "system") continue;  // omit our own seed prompt
-        headText += "--- ";
-        if (m.value("isSummary", false)) headText += "earlier summary";
-        else headText += role;
-        headText += " ---\n";
+        headText += "--- " + role + " ---\n";
         if (m.contains("content") && m["content"].is_string()) {
             const auto& c = m["content"].get_ref<const std::string&>();
             if (!c.empty()) { headText += c; headText += '\n'; }
@@ -4011,12 +4084,24 @@ void ChatFrame::RunSummaryThenSend(int splitIdx) {
         "  - Results of commands run (build pass/fail, test outcomes, error messages).\n"
         "  - Open questions, blockers, and what should happen next.\n"
         "  - Any user preferences, constraints, or corrections given.\n"
-        "Write a compact past-tense narrative. Do not invent details, do "
-        "not add a sign-off, do not ask questions. Output only the summary.";
+        "If a previous summary is provided, UPDATE and EXTEND it with the new "
+        "content rather than summarizing from scratch; preserve details already "
+        "in the previous summary. Write a compact past-tense narrative. Do not "
+        "invent details, do not add a sign-off, do not ask questions. Output "
+        "only the summary.";
 
-    std::string summaryUser =
-        "Summarize this conversation so a fresh session can continue the "
-        "work without re-reading it:\n\n" + headText;
+    std::string summaryUser;
+    if (previousSummary.empty()) {
+        summaryUser =
+            "Summarize this conversation so a fresh session can continue the "
+            "work without re-reading it:\n\n" + headText;
+    } else {
+        summaryUser =
+            "Previous summary:\n" + previousSummary +
+            "\n\nSummarize the following NEW conversation content since that "
+            "summary, and merge it with the previous summary into one updated "
+            "summary:\n\n" + headText;
+    }
 
     nlohmann::json req;
     req["model"] = route.model;
