@@ -250,6 +250,7 @@ private:
     bool MaybeSaveEditor();
     void UpdateWindowTitle();
     void OnEditorTextChanged(wxCommandEvent& e);
+    void OnEditorChar(wxKeyEvent& e);
     void OnEditorContextMenu(wxContextMenuEvent& e);
     void OnHighlightTimer(wxTimerEvent& e);
     void OnEditorSave(wxCommandEvent& e);

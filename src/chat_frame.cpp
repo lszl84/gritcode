@@ -1,4 +1,5 @@
 #include "chat_frame.h"
+#include "editor_indent.h"
 #include "format_u8.h"
 #include "inline_parser.h"
 #include "tools.h"
@@ -694,13 +695,14 @@ ChatFrame::ChatFrame()
     auto* editSizer = new wxBoxSizer(wxVERTICAL);
     codeEdit_ = new wxTextCtrl(editPane, wxID_ANY, "",
                                wxDefaultPosition, wxDefaultSize,
-                               wxTE_MULTILINE | wxTE_RICH2);
+                               wxTE_MULTILINE | wxTE_RICH2 | wxTE_PROCESS_TAB);
     {
         wxFont mono = wxSystemSettings::GetFont(wxSYS_DEFAULT_GUI_FONT);
         mono.SetFamily(wxFONTFAMILY_TELETYPE);
         codeEdit_->SetFont(mono);
     }
     codeEdit_->Bind(wxEVT_TEXT, &ChatFrame::OnEditorTextChanged, this);
+    codeEdit_->Bind(wxEVT_CHAR, &ChatFrame::OnEditorChar, this);
     codeEdit_->Bind(wxEVT_CONTEXT_MENU, &ChatFrame::OnEditorContextMenu, this);
     editSizer->Add(codeEdit_, 1, wxEXPAND);
     editPane->SetSizer(editSizer);
@@ -2457,6 +2459,58 @@ void ChatFrame::OnHighlightTimer(wxTimerEvent&) {
     // capturing it directly would dangle. Copy into an owned std::string first.
     std::string text = codeEdit_->GetValue().ToStdString(wxConvUTF8);
     syntax::Highlight(codeEdit_, editorFilePath_, text);
+}
+
+void ChatFrame::OnEditorChar(wxKeyEvent& e) {
+    if (!codeEdit_ || !codeEdit_->IsEditable()) {
+        e.Skip();
+        return;
+    }
+    int key = e.GetKeyCode();
+
+    // Tab inserts spaces (never a literal tab, and never focus navigation —
+    // the editor has wxTE_PROCESS_TAB so it receives the key).
+    if (key == WXK_TAB) {
+        long from, to;
+        codeEdit_->GetSelection(&from, &to);
+        codeEdit_->Replace(from, to, "    ");
+        codeEdit_->SetInsertionPoint(from + (long)editor_indent::kIndentWidth);
+        return;
+    }
+
+    // Enter keeps the current line's indentation on the new line.
+    if (key == WXK_RETURN || key == WXK_NUMPAD_ENTER) {
+        long from, to;
+        codeEdit_->GetSelection(&from, &to);
+        wxString value = codeEdit_->GetValue();
+        wxString indent = editor_indent::LineLeadingIndent(value, from);
+        wxString insert = "\n" + indent;
+        codeEdit_->Replace(from, to, insert);
+        codeEdit_->SetInsertionPoint(from + 1 + (long)indent.length());
+        return;
+    }
+
+    // Backspace deletes a whole indent level when the cursor is inside the
+    // line's leading spaces (8 -> 4 -> 0, with a partial indent snapping to
+    // the previous multiple of the indent width).
+    if (key == WXK_BACK) {
+        long from, to;
+        codeEdit_->GetSelection(&from, &to);
+        if (from != to) {  // selection: default single-character delete
+            e.Skip();
+            return;
+        }
+        long deleteCount =
+            editor_indent::BackspaceIndentCount(codeEdit_->GetValue(), from);
+        if (deleteCount == 0) {
+            e.Skip();
+            return;
+        }
+        codeEdit_->Remove(from - deleteCount, from);
+        return;
+    }
+
+    e.Skip();
 }
 
 void ChatFrame::OnEditorContextMenu(wxContextMenuEvent& e) {
