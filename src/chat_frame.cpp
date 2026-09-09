@@ -2343,12 +2343,23 @@ void ChatFrame::LoadFileIntoEditor(const wxString& path) {
 }
 
 bool ChatFrame::WriteEditorFile(const wxString& path) {
-    wxFile f(path, wxFile::write);
-    if (!f.IsOpened()) return false;
-    const wxScopedCharBuffer utf8 = codeEdit_->GetValue().utf8_str();
-    bool ok = f.Write(utf8.data(), utf8.length()) == utf8.length();
-    f.Close();
-    return ok;
+    // GetValue() returns a temporary wxString, and utf8_str() is a NON-OWNING
+    // view into it in every build (CreateNonOwned over the string's internal
+    // buffer in UTF-8 builds, and over m_convertedToChar in wchar builds).
+    // Storing it in a variable dangles the instant the temporary is destroyed,
+    // so the old code wrote freed heap memory to disk (the allocator reuses
+    // the block and the first bytes come out as garbage — e.g. a tcache
+    // pointer). Copy into an owned std::string first — the same pattern
+    // OnHighlightTimer already uses for exactly this reason — and write with
+    // truncation so a shorter save can't leave the tail of the previous
+    // contents behind.
+    std::string utf8Path = path.ToStdString(wxConvUTF8);
+    std::string utf8 = codeEdit_->GetValue().ToStdString(wxConvUTF8);
+    std::ofstream f(utf8Path, std::ios::binary | std::ios::trunc);
+    if (!f) return false;
+    f.write(utf8.data(), (std::streamsize)utf8.size());
+    if (!f) return false;
+    return true;
 }
 
 bool ChatFrame::SaveEditorFile() {
