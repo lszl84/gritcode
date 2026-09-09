@@ -24,14 +24,6 @@
 #include <thread>
 #include <vector>
 
-// Single model dropdown picks one of these. Order matches the choice items
-// (OpenCode Free, DeepSeek V4 Flash, DeepSeek V4 Pro).
-enum class ModelChoice {
-    OpencodeFree = 0,
-    DeepseekFlash = 1,
-    DeepseekPro = 2,
-};
-
 class DebugWindow;
 
 class ChatFrame : public wxFrame {
@@ -108,7 +100,11 @@ private:
     // not required for normal chat.
     MemoryDB memory_;
 
-    ModelChoice currentModel_ = ModelChoice::OpencodeFree;
+    // Selected model dropdown index. 0/1/2 are the fixed entries (OpenCode
+    // Free, DeepSeek V4 Flash, DeepSeek V4 Pro); indices >= 3 map into
+    // remoteModels_, the dynamic DeepSeek models discovered via GET /models.
+    int currentModelIndex_ = 0;
+    std::vector<std::string> remoteModels_;
 
     StreamingWebRequest request_;
     std::unique_ptr<MdStream> mdStream_;
@@ -165,6 +161,12 @@ private:
     // destructor joins it before the frame goes away.
     std::thread persistWorker_;
 
+    // Remote DeepSeek model discovery (GET https://api.deepseek.com/models).
+    // Owned (not detached) so the destructor can join it; results are applied
+    // on the GUI thread via CallAfter.
+    std::thread remoteModelsWorker_;
+    WebCancelToken remoteModelsCancel_;
+
     // Graceful close — see OnClose.
     void RestoreSession();       // renders history_ into the canvas + clears loading
 
@@ -215,6 +217,13 @@ private:
     void RequestCancel();
     void OnSessionChoice(wxCommandEvent&);
     void OnModelChoice(wxCommandEvent&);
+    void OnModelContextMenu(wxContextMenuEvent&);
+    // Rebuild the model dropdown from the 3 fixed entries + remoteModels_.
+    void RebuildModelChoice();
+    // Fetch the DeepSeek model catalog (GET /models) on a worker thread and
+    // merge new model ids into the dropdown. No-op without an API key.
+    void FetchRemoteModelsAsync();
+    void OnRemoteModelsFetched(std::vector<std::string> models);
     void OnSettings(wxCommandEvent&);
     void OnPlay(wxCommandEvent&);
     void OnExport(wxCommandEvent&);

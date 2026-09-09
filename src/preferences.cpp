@@ -68,12 +68,12 @@ int Preferences::GetLastModelIndex() {
 
     long v = 0;
     cfg->Read(kModelIndexKey, &v, 0L);
-    if (v < 0 || v > 2) v = 0;
+    if (v < 0) v = 0;
     return (int)v;
 }
 
 void Preferences::SetLastModelIndex(int idx) {
-    if (idx < 0 || idx > 2) idx = 0;
+    if (idx < 0) idx = 0;
     auto* cfg = wxConfigBase::Get();
     cfg->Write(kModelIndexKey, (long)idx);
     cfg->Write(kModelExplicitKey, 1L);

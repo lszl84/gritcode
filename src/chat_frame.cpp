@@ -35,6 +35,7 @@
 #include <wx/utils.h>
 #include <wx/textdlg.h>
 #include <algorithm>
+#include <cctype>
 #include <map>
 #include <set>
 #include <chrono>
@@ -81,6 +82,7 @@ constexpr int ID_EDITOR_SAVE_AS     = wxID_HIGHEST + 22;
 constexpr int ID_EDITOR_RELOAD      = wxID_HIGHEST + 23;
 constexpr int ID_EDITOR_CLOSE       = wxID_HIGHEST + 24;
 constexpr int ID_EDITOR_SHOW_IN_FILES = wxID_HIGHEST + 25;
+constexpr int ID_MODEL_REFRESH        = wxID_HIGHEST + 26;
 
 // Side-panel widths (pixels). The import pane lives in the outer splitter and
 // the editor pane lives in the inner (chat | editor) splitter, so the window
@@ -244,26 +246,61 @@ struct ModelRoute {
     int contextWindow;
 };
 
-ModelRoute RouteFor(ModelChoice m) {
-    switch (m) {
-    case ModelChoice::OpencodeFree:
+// Fixed dropdown entries. Order must match RebuildModelChoice: OpenCode Free,
+// DeepSeek V4 Flash, DeepSeek V4 Pro, then dynamic /models entries.
+enum {
+    kModelOpenCode = 0,
+    kModelDeepseekFlash = 1,
+    kModelDeepseekPro = 2,
+};
+
+ModelRoute RouteForIndex(int idx, const std::vector<std::string>& remoteModels) {
+    switch (idx) {
+    case kModelOpenCode:
         // OpenCode Zen free tier. Models rotate — currently big-pickle
         // (200K context, 32K output). No API key needed; endpoint is open.
         return {"https://opencode.ai/zen/v1/chat/completions",
                 "big-pickle", false, Preferences::Provider::DeepSeek,
                 32000, 200000};
-    case ModelChoice::DeepseekFlash:
+    case kModelDeepseekFlash:
         return {"https://api.deepseek.com/chat/completions",
                 "deepseek-v4-flash", true, Preferences::Provider::DeepSeek,
                 384000, 1000000};
-    case ModelChoice::DeepseekPro:
+    case kModelDeepseekPro:
         return {"https://api.deepseek.com/chat/completions",
                 "deepseek-v4-pro", true, Preferences::Provider::DeepSeek,
                 384000, 1000000};
+    default: {
+        size_t i = (size_t)(idx - 3);
+        if (i < remoteModels.size()) {
+            return {"https://api.deepseek.com/chat/completions",
+                    remoteModels[i].c_str(), true, Preferences::Provider::DeepSeek,
+                    384000, 1000000};
+        }
     }
+    }
+    // Unknown/stale index — fall back to the no-key free provider.
     return {"https://opencode.ai/zen/v1/chat/completions",
             "big-pickle", false, Preferences::Provider::DeepSeek,
             32000, 200000};
+}
+
+// "deepseek-v4.1-flash" -> "DeepSeek V4.1 Flash".
+wxString RemoteModelLabel(const std::string& id) {
+    std::string s = id;
+    const std::string prefix = "deepseek-";
+    if (s.rfind(prefix, 0) == 0) s = s.substr(prefix.size());
+    bool cap = true;
+    for (char& c : s) {
+        if (c == '-') {
+            c = ' ';
+            cap = true;
+        } else if (cap) {
+            c = (char)std::toupper((unsigned char)c);
+            cap = false;
+        }
+    }
+    return wxString::FromUTF8("DeepSeek " + s);
 }
 
 // chdir() into the session's directory so tool subprocesses (bash,
@@ -572,11 +609,8 @@ ChatFrame::ChatFrame()
     sessionChoice_->SetMinSize(FromDIP(wxSize(220, -1)));
     auto* modelLabel = new wxStaticText(panel, wxID_ANY, "Model:");
     modelChoice_ = new wxChoice(panel, ID_MODEL);
-    modelChoice_->Append("OpenCode Free");
-    modelChoice_->Append("DeepSeek V4 Flash");
-    modelChoice_->Append("DeepSeek V4 Pro");
-    currentModel_ = static_cast<ModelChoice>(Preferences::GetLastModelIndex());
-    modelChoice_->SetSelection(static_cast<int>(currentModel_));
+    currentModelIndex_ = Preferences::GetLastModelIndex();
+    RebuildModelChoice();
     settingsBtn_ = new wxBitmapButton(panel, ID_SETTINGS, bbSettings,
                                       wxDefaultPosition, kBtnSize,
                                       wxBORDER_NONE);
@@ -892,6 +926,10 @@ ChatFrame::ChatFrame()
     Bind(wxEVT_TOOL_BATCH_DONE, &ChatFrame::OnToolBatchDone, this);
     sessionChoice_->Bind(wxEVT_CHOICE, &ChatFrame::OnSessionChoice, this);
     modelChoice_->Bind(wxEVT_CHOICE, &ChatFrame::OnModelChoice, this);
+    modelChoice_->Bind(wxEVT_CONTEXT_MENU, &ChatFrame::OnModelContextMenu, this);
+    Bind(wxEVT_MENU,
+         [this](wxCommandEvent&) { FetchRemoteModelsAsync(); },
+         ID_MODEL_REFRESH);
     Bind(wxEVT_SYS_COLOUR_CHANGED,
          [this](wxSysColourChangedEvent& e) { ReloadToolbarIcons(); e.Skip(); });
 
@@ -998,8 +1036,9 @@ ChatFrame::ChatFrame()
     };
     cb.setModel = [this, guiSync](int idx) -> nlohmann::json {
         return guiSync([this, idx]() -> nlohmann::json {
-            if (idx < 0 || idx > 2) return {{"ok", false}, {"reason", "out of range"}};
-            currentModel_ = static_cast<ModelChoice>(idx);
+            if (idx < 0 || idx >= (int)modelChoice_->GetCount())
+                return {{"ok", false}, {"reason", "out of range"}};
+            currentModelIndex_ = idx;
             modelChoice_->SetSelection(idx);
             Preferences::SetLastModelIndex(idx);
             return {{"ok", true}, {"modelIndex", idx}};
@@ -1184,6 +1223,10 @@ ChatFrame::ChatFrame()
 
     input_->SetFocus();
     SetMinSize(wxSize(620, 400));
+
+    // Discover current DeepSeek model ids (e.g. a newly shipped flash) and
+    // merge them into the dropdown. No-op when no API key is configured.
+    FetchRemoteModelsAsync();
 }
 
 void ChatFrame::RestoreSession() {
@@ -1352,6 +1395,7 @@ ChatFrame::~ChatFrame() {
         playWorker_.join();
     }
     if (persistWorker_.joinable()) persistWorker_.join();
+    if (remoteModelsWorker_.joinable()) remoteModelsWorker_.join();
 }
 
 nlohmann::json ChatFrame::BuildBlocksSnapshot() const {
@@ -1802,11 +1846,108 @@ void ChatFrame::RestoreCanvasFromHistory() {
 
 void ChatFrame::OnModelChoice(wxCommandEvent& evt) {
     int sel = evt.GetSelection();
-    if (sel < 0 || sel > 2) return;
-    currentModel_ = static_cast<ModelChoice>(sel);
+    if (sel < 0) return;
+    currentModelIndex_ = sel;
     Preferences::SetLastModelIndex(sel);
 }
 
+void ChatFrame::RebuildModelChoice() {
+    if (!modelChoice_) return;
+    modelChoice_->Clear();
+    modelChoice_->Append("OpenCode Free");
+    modelChoice_->Append("DeepSeek V4 Flash");
+    modelChoice_->Append("DeepSeek V4 Pro");
+    for (const auto& id : remoteModels_)
+        modelChoice_->Append(RemoteModelLabel(id));
+
+    // currentModelIndex_ is the *desired* selection and may index a dynamic
+    // entry that hasn't arrived yet (or just disappeared). Clamp only for
+    // display so the dropdown never renders unselected; routing falls back
+    // to OpenCode Free for an out-of-range index.
+    int sel = currentModelIndex_;
+    int count = (int)modelChoice_->GetCount();
+    if (sel < 0 || sel >= count) sel = 0;
+    modelChoice_->SetSelection(sel);
+}
+
+void ChatFrame::FetchRemoteModelsAsync() {
+    // Serialize with any in-flight fetch (startup and settings-close can both
+    // fire). The request is short (5 s connect / 5 s idle), so joining here
+    // only blocks if a fetch is genuinely still running.
+    if (remoteModelsWorker_.joinable()) remoteModelsWorker_.join();
+
+    wxString key = Preferences::GetApiKey(Preferences::Provider::DeepSeek);
+    if (key.IsEmpty()) {
+        // No key: nothing to fetch. Leave any previously-fetched list in
+        // place — it's the best model info we have, and the three hardcoded
+        // entries are always present underneath.
+        return;
+    }
+
+    std::string url = "https://api.deepseek.com/models";
+    std::string bearer = "Bearer " + std::string(key.utf8_str());
+    ChatFrame* self = this;
+    WebCancelToken* token = &remoteModelsCancel_;
+    token->cancelled.store(false);
+    remoteModelsWorker_ = std::thread([self, url, bearer, token]() {
+        WebRequestSpec spec;
+        spec.url = url;
+        spec.method = "GET";
+        spec.connectTimeoutSeconds = 5;
+        spec.idleTimeoutSeconds = 5;
+        spec.headers.push_back({"Authorization", bearer});
+        spec.headers.push_back({"Accept", "application/json"});
+        WebResponse resp = RequestSync(std::move(spec), token);
+
+        std::vector<std::string> models;
+        bool ok = false;
+        if (resp.ok) {
+            try {
+                auto j = nlohmann::json::parse(resp.body);
+                for (const auto& m : j.value("data", nlohmann::json::array())) {
+                    if (!m.is_object()) continue;
+                    std::string id = m.value("id", std::string{});
+                    // Only remote DeepSeek chat models: skip vision models
+                    // (they're used internally by the image tool, not offered
+                    // as a chat model) and the two already hardcoded so the
+                    // dropdown doesn't list them twice.
+                    if (id.rfind("deepseek-", 0) == 0
+                        && id.find("vision") == std::string::npos
+                        && id != "deepseek-v4-flash"
+                        && id != "deepseek-v4-pro") {
+                        models.push_back(std::move(id));
+                    }
+                }
+                ok = true;
+            } catch (const std::exception&) {
+                // Parse failure: ok stays false, fall through.
+            }
+        }
+
+        self->CallAfter([self, models = std::move(models), ok]() mutable {
+            if (self->destroying_.load()) return;
+            // Replace remoteModels_ only on a successful fetch. On failure
+            // (HTTP error or unparseable body) leave it untouched so the last
+            // successfully-fetched list remains the first fallback, with the
+            // hardcoded entries still underneath.
+            if (ok) self->OnRemoteModelsFetched(std::move(models));
+        });
+    });
+}
+
+void ChatFrame::OnRemoteModelsFetched(std::vector<std::string> models) {
+    remoteModels_ = std::move(models);
+    RebuildModelChoice();
+}
+
+void ChatFrame::OnModelContextMenu(wxContextMenuEvent&) {
+    wxMenu menu;
+    wxMenuItem* refresh = menu.Append(ID_MODEL_REFRESH,
+                                      wxString::FromUTF8("Refresh model list…"));
+    if (Preferences::GetApiKey(Preferences::Provider::DeepSeek).IsEmpty())
+        refresh->Enable(false);
+    PopupMenu(&menu);
+}
 
 void ChatFrame::OnPlay(wxCommandEvent&) {
     if (streaming_) return;
@@ -1925,6 +2066,9 @@ void ChatFrame::OnPlay(wxCommandEvent&) {
 void ChatFrame::OnSettings(wxCommandEvent&) {
     SettingsDialog dlg(this);
     dlg.ShowModal();
+    // The API key may have been added/rotated/removed — refresh the model
+    // catalog against the new credential (no-op if there is still no key).
+    FetchRemoteModelsAsync();
 }
 
 void ChatFrame::OnHamburger(wxCommandEvent&) {
@@ -2962,7 +3106,7 @@ void ChatFrame::DoSendActualRequest() {
         canvas_->AddBlock(std::move(b));
     });
 
-    ModelRoute route = RouteFor(currentModel_);
+    ModelRoute route = RouteForIndex(currentModelIndex_, remoteModels_);
 
     // Build an outbound copy of history with the active cwd appended to the
     // system prompt. Done per-request rather than baked into stored history
@@ -3848,7 +3992,7 @@ void ChatFrame::RunSummaryThenSend(int splitIdx) {
 
     // Cap the summary-call input so the summary request itself doesn't
     // overflow. Budget = context window − response budget − prompt overhead.
-    ModelRoute route = RouteFor(currentModel_);
+    ModelRoute route = RouteForIndex(currentModelIndex_, remoteModels_);
     size_t maxChars = (size_t)(route.contextWindow - 6000) * 4;
     if (maxChars < 40000) maxChars = 40000;
     if (headText.size() > maxChars) {
