@@ -1,5 +1,27 @@
 #!/bin/sh
 set -e
+
+# GTK/freedesktop icon loaders skip a theme directory that has no index.theme.
+# The system hicolor-icon-theme normally provides /usr/share/icons/hicolor/
+# index.theme, but a minimal install may not — and without it our app icon is
+# invisible to launchers. Create it if it's missing; never clobber an existing
+# one.
+if [ ! -f /usr/share/icons/hicolor/index.theme ]; then
+    cat > /usr/share/icons/hicolor/index.theme <<'EOF'
+[Icon Theme]
+Name=Hicolor
+Comment=Fallback icon theme
+Hidden=true
+Directories=scalable/apps
+
+[scalable/apps]
+Size=48
+MinSize=8
+MaxSize=512
+Type=Scalable
+EOF
+fi
+
 # Refresh the icon cache so gritcode.svg shows up in launchers and software center.
 if command -v update-icon-caches >/dev/null 2>&1; then
     update-icon-caches /usr/share/icons/hicolor

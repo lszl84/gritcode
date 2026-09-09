@@ -79,12 +79,18 @@ endif()
 # Core runtime plus five grammars. The grammars are compiled into a small
 # static library below; their repos are fetched for the generated sources only.
 set(BUILD_SHARED_LIBS OFF CACHE BOOL "" FORCE)
+# tree-sitter's CMake installs its headers + static lib unconditionally; without
+# EXCLUDE_FROM_ALL those install rules leak into our .deb/.dmg
+# (include/tree_sitter/api.h, lib/libtree-sitter.a, lib/pkgconfig/...).
+# EXCLUDE_FROM_ALL keeps the dependency out of the parent install script, the
+# same way the wxWidgets fetch above avoids polluting the package.
 FetchContent_Declare(
     tree_sitter
     GIT_REPOSITORY https://github.com/tree-sitter/tree-sitter.git
     GIT_TAG v0.25.7
     GIT_SHALLOW ON
     SOURCE_SUBDIR lib
+    EXCLUDE_FROM_ALL
 )
 FetchContent_MakeAvailable(tree_sitter)
 
@@ -277,24 +283,11 @@ if(UNIX AND NOT APPLE)
     install(FILES packaging/gritcode.svg
         DESTINATION ${CMAKE_INSTALL_DATADIR}/icons/hicolor/scalable/apps
     )
-
-    # GTK/freedesktop icon loaders skip an icon theme directory that lacks an
-    # index.theme file. System packages (hicolor-icon-theme) ship one to
-    # /usr/share/icons/hicolor/, but a fresh per-user prefix (~/.local) won't
-    # have one, which makes our installed app icon invisible to launchers.
-    # Install our minimal index.theme only when the destination doesn't already
-    # have one, so we never clobber a system-managed file.
-    install(CODE "
-        set(_dest \"\$ENV{DESTDIR}\${CMAKE_INSTALL_PREFIX}/${CMAKE_INSTALL_DATADIR}/icons/hicolor/index.theme\")
-        if(NOT EXISTS \"\${_dest}\")
-            file(INSTALL \"${CMAKE_SOURCE_DIR}/packaging/hicolor-index.theme\"
-                DESTINATION \"\$ENV{DESTDIR}\${CMAKE_INSTALL_PREFIX}/${CMAKE_INSTALL_DATADIR}/icons/hicolor\"
-                RENAME index.theme
-            )
-        else()
-            message(STATUS \"hicolor index.theme already present at \${_dest} — skipping\")
-        endif()
-    ")
+    # NOTE: the hicolor index.theme (which GTK icon loaders require before they
+    # index a theme dir) is created-if-missing at install time by
+    # packaging/debian/postinst. It must NOT ship inside the package — the
+    # system's hicolor-icon-theme already owns /usr/share/icons/hicolor/
+    # index.theme, and installing our own would clash with it.
 endif()
 
 # ---- CPack ----
