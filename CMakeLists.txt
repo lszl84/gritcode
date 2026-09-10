@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.28 FATAL_ERROR)
 
-project(gritcode VERSION 0.5.4 LANGUAGES C CXX)
+project(gritcode VERSION 0.5.5 LANGUAGES C CXX)
 
 # Human-facing version string (used for packaging, bundle metadata, etc.)
 set(GRITCODE_VERSION "${PROJECT_VERSION}")
