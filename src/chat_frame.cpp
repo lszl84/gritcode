@@ -287,42 +287,42 @@ struct ModelRoute {
     int contextWindow;
 };
 
-// Fixed dropdown entries. Order must match RebuildModelChoice: OpenCode Free,
-// DeepSeek Flash, DeepSeek V4 Pro, then dynamic /models entries.
-enum {
-    kModelOpenCode = 0,
-    kModelDeepseekFlash = 1,
-    kModelDeepseekPro = 2,
-};
+// Index 0 is always OpenCode Free. Indices >= 1 map into remoteModels_, the
+// DeepSeek model list — which is either the live GET /models result or the
+// hardcoded fallback below, never both.
+constexpr int kModelOpenCode = 0;
+
+// Hardcoded DeepSeek fallback, used only when GET /models is unavailable
+// (no API key, network error, or unparseable response). Kept in a stable
+// order (flash, then pro) so a persisted dropdown index resolves to the same
+// model whether the live list or this fallback is showing.
+const std::vector<std::string>& FallbackDeepseekModels() {
+    static const std::vector<std::string> models = {
+        "deepseek-flash", "deepseek-v4-pro"};
+    return models;
+}
 
 ModelRoute RouteForIndex(int idx, const std::vector<std::string>& remoteModels) {
-    switch (idx) {
-    case kModelOpenCode:
+    if (idx == kModelOpenCode) {
         // OpenCode Zen free tier. Models rotate — currently big-pickle
         // (200K context, 32K output). No API key needed; endpoint is open.
         return {"https://opencode.ai/zen/v1/chat/completions",
                 "big-pickle", false, Preferences::Provider::DeepSeek,
                 kOutputTokenMax, 200000};
-    case kModelDeepseekFlash:
-        // DeepSeek renamed the Flash API id from deepseek-v4-flash to
-        // deepseek-flash (both currently serve the same model, but the
-        // new id is canonical and listed by GET /models).
-        return {"https://api.deepseek.com/chat/completions",
-                "deepseek-flash", true, Preferences::Provider::DeepSeek,
-                kOutputTokenMax, 1000000};
-    case kModelDeepseekPro:
-        return {"https://api.deepseek.com/chat/completions",
-                "deepseek-v4-pro", true, Preferences::Provider::DeepSeek,
-                kOutputTokenMax, 1000000};
-    default: {
-        size_t i = (size_t)(idx - 3);
-        if (i < remoteModels.size()) {
-            return {"https://api.deepseek.com/chat/completions",
-                    remoteModels[i].c_str(), true, Preferences::Provider::DeepSeek,
-                    kOutputTokenMax, 1000000};
-        }
     }
+
+    // DeepSeek models occupy indices >= 1. `remoteModels` is the single
+    // source of truth for DeepSeek ids: the live list when the fetch
+    // succeeded, the fallback above otherwise.
+    const std::vector<std::string>& models =
+        remoteModels.empty() ? FallbackDeepseekModels() : remoteModels;
+    size_t i = (size_t)(idx - 1);
+    if (i < models.size()) {
+        return {"https://api.deepseek.com/chat/completions",
+                models[i].c_str(), true, Preferences::Provider::DeepSeek,
+                kOutputTokenMax, 1000000};
     }
+
     // Unknown/stale index — fall back to the no-key free provider.
     return {"https://opencode.ai/zen/v1/chat/completions",
             "big-pickle", false, Preferences::Provider::DeepSeek,
@@ -1899,9 +1899,12 @@ void ChatFrame::RebuildModelChoice() {
     if (!modelChoice_) return;
     modelChoice_->Clear();
     modelChoice_->Append("OpenCode Free");
-    modelChoice_->Append("DeepSeek Flash");
-    modelChoice_->Append("DeepSeek V4 Pro");
-    for (const auto& id : remoteModels_)
+    // DeepSeek models come from one source only: the live list when the
+    // fetch succeeded, the hardcoded fallback otherwise. They are never
+    // concatenated, so a renamed model can't show up twice.
+    const auto& ds = remoteModels_.empty() ? FallbackDeepseekModels()
+                                           : remoteModels_;
+    for (const auto& id : ds)
         modelChoice_->Append(RemoteModelLabel(id));
 
     // currentModelIndex_ is the *desired* selection and may index a dynamic
@@ -1922,9 +1925,7 @@ void ChatFrame::FetchRemoteModelsAsync() {
 
     wxString key = Preferences::GetApiKey(Preferences::Provider::DeepSeek);
     if (key.IsEmpty()) {
-        // No key: nothing to fetch. Leave any previously-fetched list in
-        // place — it's the best model info we have, and the three hardcoded
-        // entries are always present underneath.
+        // No key: nothing to fetch. The hardcoded fallback list shows.
         return;
     }
 
@@ -1953,12 +1954,10 @@ void ChatFrame::FetchRemoteModelsAsync() {
                     std::string id = m.value("id", std::string{});
                     // Only remote DeepSeek chat models: skip vision models
                     // (they're used internally by the image tool, not offered
-                    // as a chat model) and the two already hardcoded so the
-                    // dropdown doesn't list them twice.
+                    // as a chat model). This list REPLACES the hardcoded
+                    // DeepSeek fallback, so there is no dedup here.
                     if (id.rfind("deepseek-", 0) == 0
-                        && id.find("vision") == std::string::npos
-                        && id != "deepseek-flash"
-                        && id != "deepseek-v4-pro") {
+                        && id.find("vision") == std::string::npos) {
                         models.push_back(std::move(id));
                     }
                 }
@@ -1972,8 +1971,8 @@ void ChatFrame::FetchRemoteModelsAsync() {
             if (self->destroying_.load()) return;
             // Replace remoteModels_ only on a successful fetch. On failure
             // (HTTP error or unparseable body) leave it untouched so the last
-            // successfully-fetched list remains the first fallback, with the
-            // hardcoded entries still underneath.
+            // successfully-fetched list remains; if it's empty, the hardcoded
+            // fallback shows.
             if (ok) self->OnRemoteModelsFetched(std::move(models));
         });
     });

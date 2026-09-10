@@ -100,9 +100,11 @@ private:
     // not required for normal chat.
     MemoryDB memory_;
 
-    // Selected model dropdown index. 0/1/2 are the fixed entries (OpenCode
-    // Free, DeepSeek Flash, DeepSeek V4 Pro); indices >= 3 map into
-    // remoteModels_, the dynamic DeepSeek models discovered via GET /models.
+    // Selected model dropdown index. 0 is OpenCode Free; indices >= 1 map
+    // into remoteModels_ (the DeepSeek model list). remoteModels_ is the live
+    // GET /models result when available, otherwise empty — and an empty list
+    // means the dropdown uses the hardcoded DeepSeek fallback instead. The
+    // live list and fallback are never shown together.
     int currentModelIndex_ = 0;
     std::vector<std::string> remoteModels_;
 
@@ -218,7 +220,8 @@ private:
     void OnSessionChoice(wxCommandEvent&);
     void OnModelChoice(wxCommandEvent&);
     void OnModelContextMenu(wxContextMenuEvent&);
-    // Rebuild the model dropdown from the 3 fixed entries + remoteModels_.
+    // Rebuild the model dropdown: OpenCode Free plus the DeepSeek list
+    // (live remoteModels_ when present, hardcoded fallback otherwise).
     void RebuildModelChoice();
     // Fetch the DeepSeek model catalog (GET /models) on a worker thread and
     // merge new model ids into the dropdown. No-op without an API key.
