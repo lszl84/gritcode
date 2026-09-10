@@ -288,7 +288,7 @@ struct ModelRoute {
 };
 
 // Fixed dropdown entries. Order must match RebuildModelChoice: OpenCode Free,
-// DeepSeek V4 Flash, DeepSeek V4 Pro, then dynamic /models entries.
+// DeepSeek Flash, DeepSeek V4 Pro, then dynamic /models entries.
 enum {
     kModelOpenCode = 0,
     kModelDeepseekFlash = 1,
@@ -304,8 +304,11 @@ ModelRoute RouteForIndex(int idx, const std::vector<std::string>& remoteModels) 
                 "big-pickle", false, Preferences::Provider::DeepSeek,
                 kOutputTokenMax, 200000};
     case kModelDeepseekFlash:
+        // DeepSeek renamed the Flash API id from deepseek-v4-flash to
+        // deepseek-flash (both currently serve the same model, but the
+        // new id is canonical and listed by GET /models).
         return {"https://api.deepseek.com/chat/completions",
-                "deepseek-v4-flash", true, Preferences::Provider::DeepSeek,
+                "deepseek-flash", true, Preferences::Provider::DeepSeek,
                 kOutputTokenMax, 1000000};
     case kModelDeepseekPro:
         return {"https://api.deepseek.com/chat/completions",
@@ -1896,7 +1899,7 @@ void ChatFrame::RebuildModelChoice() {
     if (!modelChoice_) return;
     modelChoice_->Clear();
     modelChoice_->Append("OpenCode Free");
-    modelChoice_->Append("DeepSeek V4 Flash");
+    modelChoice_->Append("DeepSeek Flash");
     modelChoice_->Append("DeepSeek V4 Pro");
     for (const auto& id : remoteModels_)
         modelChoice_->Append(RemoteModelLabel(id));
@@ -1954,7 +1957,7 @@ void ChatFrame::FetchRemoteModelsAsync() {
                     // dropdown doesn't list them twice.
                     if (id.rfind("deepseek-", 0) == 0
                         && id.find("vision") == std::string::npos
-                        && id != "deepseek-v4-flash"
+                        && id != "deepseek-flash"
                         && id != "deepseek-v4-pro") {
                         models.push_back(std::move(id));
                     }

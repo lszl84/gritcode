@@ -101,7 +101,7 @@ private:
     MemoryDB memory_;
 
     // Selected model dropdown index. 0/1/2 are the fixed entries (OpenCode
-    // Free, DeepSeek V4 Flash, DeepSeek V4 Pro); indices >= 3 map into
+    // Free, DeepSeek Flash, DeepSeek V4 Pro); indices >= 3 map into
     // remoteModels_, the dynamic DeepSeek models discovered via GET /models.
     int currentModelIndex_ = 0;
     std::vector<std::string> remoteModels_;
