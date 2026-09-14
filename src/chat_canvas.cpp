@@ -352,6 +352,22 @@ void ChatCanvas::ToggleToolCall(int blockIdx) {
     Refresh();
 }
 
+void ChatCanvas::UpdateThinkingBlock(int blockIdx, const wxString& text,
+                                     bool live) {
+    if (blockIdx < 0 || blockIdx >= (int)blocks_.size()) return;
+    Block& b = blocks_[blockIdx];
+    if (b.type != BlockType::Thinking) return;
+    b.rawText = text;
+    b.visibleText = text;
+    b.thinkingLive = live;
+    // Same single-block invalidation as ToggleToolCall.
+    b.cachedWidth = -1;
+    layoutDirty_ = true;
+    Relayout(GetClientSize().x);
+    ScrollToBottomIfPinned();
+    Refresh();
+}
+
 void ChatCanvas::AddBlock(Block b) {
     // The new block hasn't been laid out yet; the existing blocks are already
     // laid out at the current width. Relayout's per-block guard makes this
@@ -644,8 +660,10 @@ void ChatCanvas::LayoutBlock(wxDC& dc, Block& b, int contentWidth, int /*topSpac
 
         // Single-line mode: no embedded newlines AND wraps to one visual line.
         // Render the body inline (no chevron, no toggle).
+        // A live (still-streaming) block stays collapsed even while short.
         const bool hasNewline = (b.rawText.Find('\n') != wxNOT_FOUND);
-        b.thinkingSingleLine = (!hasNewline && b.lines.size() <= 1);
+        b.thinkingSingleLine =
+            (!b.thinkingLive && !hasNewline && b.lines.size() <= 1);
 
         MeasSetFont(dc, fontThinking_);
         int lineH = dc.GetCharHeight();
