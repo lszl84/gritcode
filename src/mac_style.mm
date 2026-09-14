@@ -3,6 +3,8 @@
 #include <wx/wx.h>
 #include <wx/anybutton.h>
 #include <wx/bmpbuttn.h>
+#include <wx/graphics.h>
+#include <wx/renderer.h>
 #include <wx/scrolwin.h>
 #include <wx/splitter.h>
 #include <wx/treectrl.h>
@@ -156,6 +158,50 @@
     [self reveal];
 }
 @end
+
+// wx's macOS renderer draws tree expanders with the Carbon HITheme disclosure
+// triangle, which comes out black on dark backgrounds. Draw a small vector
+// chevron in the secondary label colour instead; every other control keeps
+// the native renderer.
+class ChevronTreeRenderer : public wxDelegateRendererNative {
+public:
+    // The default wxDelegateRendererNative forwards to the *generic* renderer.
+    ChevronTreeRenderer() : wxDelegateRendererNative(wxRendererNative::GetDefault()) {}
+
+    void DrawTreeItemButton(wxWindow* win, wxDC& dc, const wxRect& rect,
+                            int flags) override {
+        wxGraphicsContext* gc = dc.GetGraphicsContext();
+        if (!gc) {
+            wxDelegateRendererNative::DrawTreeItemButton(win, dc, rect, flags);
+            return;
+        }
+        __block CGFloat r = 0, g = 0, b = 0, a = 1;
+        NSView* view = (NSView*)win->GetHandle();
+        [view.effectiveAppearance performAsCurrentDrawingAppearance:^{
+            NSColor* c = [NSColor.secondaryLabelColor
+                colorUsingColorSpace:NSColorSpace.sRGBColorSpace];
+            r = c.redComponent; g = c.greenComponent; b = c.blueComponent; a = c.alphaComponent;
+        }];
+        const wxColour colour(r * 255, g * 255, b * 255, a * 255);
+
+        // Proportions of a 9px box (the generic tree's button size).
+        const double k = rect.width / 9.0;
+        const double cx = rect.x + rect.width / 2.0, cy = rect.y + rect.height / 2.0;
+        wxPoint2DDouble pts[3];
+        if (flags & wxCONTROL_EXPANDED) {   // pointing down
+            pts[0] = {cx - 3 * k, cy - 1.5 * k};
+            pts[1] = {cx, cy + 1.5 * k};
+            pts[2] = {cx + 3 * k, cy - 1.5 * k};
+        } else {                            // pointing right
+            pts[0] = {cx - 1.5 * k, cy - 3 * k};
+            pts[1] = {cx + 1.5 * k, cy};
+            pts[2] = {cx - 1.5 * k, cy + 3 * k};
+        }
+        gc->SetPen(gc->CreatePen(
+            wxGraphicsPenInfo(colour).Width(1.5).Cap(wxCAP_ROUND).Join(wxJOIN_ROUND)));
+        gc->StrokeLines(3, pts);
+    }
+};
 
 namespace {
 
@@ -315,6 +361,13 @@ void ApplyMacStyle(const MacStyleParts& parts) {
     ApplyButtons(parts);
     ApplyNativeOverlayScrollers(parts.frame);
     ApplyScrollKnobs(*s);
+
+    // App-wide and only once: Set() takes ownership, returns any previous one.
+    static bool chevronsInstalled = false;
+    if (!chevronsInstalled) {
+        delete wxRendererNative::Set(new ChevronTreeRenderer);
+        chevronsInstalled = true;
+    }
 
     // Keep knobs in step with content/size changes (cheap: a few views).
     parts.frame->Bind(wxEVT_IDLE, [s](wxIdleEvent& e) {

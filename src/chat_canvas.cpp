@@ -55,6 +55,10 @@ constexpr int kCodeLineGap   = 2;    // code blocks
 constexpr int kLineGap       = 0;
 constexpr int kCodeLineGap   = 0;
 #endif
+// The extra leading is split around the text (larger half above), so a
+// selection highlight, which spans the whole line, is centred on the glyphs.
+constexpr int kLineTopPad     = (kLineGap + 1) / 2;
+constexpr int kCodeLineTopPad = (kCodeLineGap + 1) / 2;
 
 bool IsDarkMode() {
     auto appearance = wxSystemSettings::GetAppearance();
@@ -294,9 +298,11 @@ int ChatCanvas::FontHeight(wxDC& dc, int fi, const wxFont& f) const {
 int ChatCanvas::FontAscent(wxDC& dc, int fi, const wxFont& f) const {
     if (fontAscentCache_[fi] <= 0) {
         MeasSetFont(dc, f);
-        wxCoord w = 0, h = 0, descent = 0;
-        dc.GetTextExtent("Hg", &w, &h, &descent);
-        fontAscentCache_[fi] = std::max(1, (int)(h - descent));
+        // wx's macOS height is ascent + descent + leading, while DrawText
+        // puts the baseline at top + ascent; drop the leading too.
+        wxCoord w = 0, h = 0, descent = 0, leading = 0;
+        dc.GetTextExtent("Hg", &w, &h, &descent, &leading);
+        fontAscentCache_[fi] = std::max(1, (int)(h - descent - leading));
     }
     return fontAscentCache_[fi];
 }
@@ -885,6 +891,7 @@ void ChatCanvas::WrapRuns(wxDC& dc, const std::vector<InlineRun>& runs,
         cur.lineWidth = curX;  // glyphX is computed lazily on first hit-test
         cur.textEnd = cur.textStart + (int)cur.text.size();
         cur.height = (lineHeight > 0 ? lineHeight : styleFontHeight()) + kLineGap;
+        cur.textTop = kLineTopPad;
         outLines.push_back(std::move(cur));
         cur = WrappedLine();
         cur.textStart = 0;
@@ -898,6 +905,7 @@ void ChatCanvas::WrapRuns(wxDC& dc, const std::vector<InlineRun>& runs,
         if (t.isNewline) {
             if (cur.text.IsEmpty() && cur.runs.empty()) {
                 cur.height = styleFontHeight() + kLineGap;
+                cur.textTop = kLineTopPad;
                 cur.textEnd = cur.textStart;
                 cur.lineWidth = 0;
                 outLines.push_back(std::move(cur));
@@ -974,6 +982,7 @@ void ChatCanvas::WrapMonospace(wxDC& dc, const wxString& text, int maxW,
         WrappedLine wl;
         wl.text = seg;
         wl.height = charH + kCodeLineGap;
+        wl.textTop = kCodeLineTopPad;
         wl.textStart = textOffBase + srcStart;
         wl.textEnd = wl.textStart + (int)seg.size();
         InlineRun r;
@@ -1494,11 +1503,11 @@ void ChatCanvas::PaintBlock(wxDC& dc, const Block& b, int yTop, BlockPos selStar
                         dc.SetTextForeground(isLink ? pal.linkColour
                                                     : (run.code ? pal.codeFg : pal.text));
                         int xr = xBase + (ri < wl.runX.size() ? wl.runX[ri] : 0);
-                        dc.DrawText(run.text, xr, yLine + dy);
+                        dc.DrawText(run.text, xr, yLine + wl.textTop + dy);
                         if (isLink) {
                             wxCoord rw = 0, rh = 0;
                             dc.GetTextExtent(run.text, &rw, &rh);
-                            dc.DrawLine(xr, yLine + dy + rh, xr + rw, yLine + dy + rh);
+                            dc.DrawLine(xr, yLine + wl.textTop + dy + rh, xr + rw, yLine + wl.textTop + dy + rh);
                         }
                     }
                     yLine += wl.height;
@@ -1569,7 +1578,7 @@ void ChatCanvas::PaintBlock(wxDC& dc, const Block& b, int yTop, BlockPos selStar
                     }
                 }
                 dc.SetTextForeground(pal.thinkingText);
-                dc.DrawText(wl.text, textXLeft, yLine);
+                dc.DrawText(wl.text, textXLeft, yLine + wl.textTop);
             }
             return;
         }
@@ -1612,7 +1621,7 @@ void ChatCanvas::PaintBlock(wxDC& dc, const Block& b, int yTop, BlockPos selStar
                     const wxFont& f = FontFor(run, BlockType::Thinking, 0);
                     dc.SetFont(f);
                     int xr = textXLeft + (ri < wl.runX.size() ? wl.runX[ri] : 0);
-                    dc.DrawText(run.text, xr, yLine + dy);
+                    dc.DrawText(run.text, xr, yLine + wl.textTop + dy);
                 }
                 yLine += wl.height;
             }
@@ -1760,7 +1769,7 @@ void ChatCanvas::PaintBlock(wxDC& dc, const Block& b, int yTop, BlockPos selStar
                     }
                 }
                 dc.SetTextForeground(pal.codeFg);
-                if (!wl.text.IsEmpty()) dc.DrawText(wl.text, textXLeft, yLine);
+                if (!wl.text.IsEmpty()) dc.DrawText(wl.text, textXLeft, yLine + wl.textTop);
                 yLine += wl.height;
             }
         }
@@ -1790,7 +1799,7 @@ void ChatCanvas::PaintBlock(wxDC& dc, const Block& b, int yTop, BlockPos selStar
                     dc.DrawRectangle(x1, yLine, x2 - x1, wl.height);
                 }
             }
-            dc.DrawText(wl.text, blockX + kCodePadding, yLine);
+            dc.DrawText(wl.text, blockX + kCodePadding, yLine + wl.textTop);
             yLine += wl.height;
         }
         return;
@@ -1840,11 +1849,11 @@ void ChatCanvas::PaintBlock(wxDC& dc, const Block& b, int yTop, BlockPos selStar
             dc.SetTextForeground(isLink ? pal.linkColour
                                         : (r.code ? pal.codeFg : pal.text));
             int xr = textXLeft + (ri < wl.runX.size() ? wl.runX[ri] : 0);
-            dc.DrawText(r.text, xr, yLine + dy);
+            dc.DrawText(r.text, xr, yLine + wl.textTop + dy);
             if (isLink) {
                 wxCoord rw = 0, rh = 0;
                 dc.GetTextExtent(r.text, &rw, &rh);
-                dc.DrawLine(xr, yLine + dy + rh, xr + rw, yLine + dy + rh);
+                dc.DrawLine(xr, yLine + wl.textTop + dy + rh, xr + rw, yLine + wl.textTop + dy + rh);
             }
         }
         yLine += wl.height;

@@ -750,6 +750,10 @@ ChatFrame::ChatFrame()
     inputRow->Add(continueQueueBtn_, 1, wxEXPAND | wxRIGHT | wxTOP, 6);
     inputRow->Add(clearQueueBtn_, 0, wxALIGN_CENTER_VERTICAL | wxTOP, 6);
     inputRow->Add(sendBtn_, 0, wxALIGN_CENTER_VERTICAL | wxLEFT | wxTOP, 6);
+#ifdef __WXOSX__
+    // The capsule Send button fills its frame; keep it off the window edge.
+    inputRow->AddSpacer(FromDIP(2));
+#endif
     outer->Add(chipRow_, 0, wxEXPAND | wxTOP, 4);
     outer->Add(imageRow_, 0, wxEXPAND | wxTOP, 4);
     outer->Add(inputRow, 0, wxEXPAND);
@@ -794,12 +798,15 @@ ChatFrame::ChatFrame()
                                wxDefaultPosition, wxDefaultSize,
                                wxTE_MULTILINE | wxTE_RICH2 | wxTE_PROCESS_TAB);
     {
+        // One point above the GUI font, closer to the chat's body text size.
+        const int editorPt =
+            wxSystemSettings::GetFont(wxSYS_DEFAULT_GUI_FONT).GetPointSize() + 1;
 #ifdef __WXOSX__
-        wxFont mono = MacMonospaceFont(
-            wxSystemSettings::GetFont(wxSYS_DEFAULT_GUI_FONT).GetPointSize());
+        wxFont mono = MacMonospaceFont(editorPt);
 #else
         wxFont mono = wxSystemSettings::GetFont(wxSYS_DEFAULT_GUI_FONT);
         mono.SetFamily(wxFONTFAMILY_TELETYPE);
+        mono.SetPointSize(editorPt);
 #endif
         codeEdit_->SetFont(mono);
     }

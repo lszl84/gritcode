@@ -74,17 +74,13 @@ SettingsDialog::SettingsDialog(wxWindow* parent)
     gritHistoryCb_ = new wxCheckBox(this, wxID_ANY,
         "Enable Grit History tools");
     gritHistoryCb_->SetValue(Preferences::GetEnableGritHistory());
+    // The explanation lives in a tooltip: as a static label it set the
+    // dialog's minimum width and didn't reflow on resize.
+    gritHistoryCb_->SetToolTip(
+        "Lets the agent search your past gritcode sessions across projects "
+        "(grit_history_search/fetch). Turn off for self-contained sessions "
+        "that can be exported and shared without referencing your other work.");
     outer->Add(gritHistoryCb_, 0, wxLEFT | wxRIGHT | wxTOP, 12);
-
-    auto* toolsHint = new wxStaticText(this, wxID_ANY,
-        "When enabled, the agent can search your past gritcode sessions "
-        "across projects (grit_history_search/fetch).\n"
-        "Turn this off to create self-contained sessions that can be "
-        "exported and shared without referencing your other work.");
-    wxFont th = toolsHint->GetFont();
-    th.SetPointSize(th.GetPointSize() - 1);
-    toolsHint->SetFont(th);
-    outer->Add(toolsHint, 0, wxLEFT | wxRIGHT | wxTOP, 4);
 
     outer->AddStretchSpacer(1);
 
