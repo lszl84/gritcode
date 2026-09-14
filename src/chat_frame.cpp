@@ -114,6 +114,10 @@ constexpr int kSummaryMaxTokens      = 8'000;
 // Output ceiling, matching OpenCode's OUTPUT_TOKEN_MAX (32K). Replaces the old
 // 384K cap so a runaway reasoning/write stream can't bill 384K in one response.
 constexpr int kOutputTokenMax        = 32'000;
+// DeepSeek at "max" reasoning effort can think long enough that the reasoning
+// alone would use up a 32K budget before any answer; give it the 384K output
+// DeepSeek recommends for agents. The context-window clamp still applies.
+constexpr int kOutputTokenMaxDeepSeekMax = 384'000;
 // Reserve kept free of the input estimate when deciding to compact (OpenCode's
 // COMPACTION_BUFFER). Compaction fires when the rendered view reaches
 // contextWindow - kBufferTokens.
@@ -3182,6 +3186,8 @@ void ChatFrame::DoSendActualRequest() {
     activeReasoning_.clear();
     activeToolCalls_.clear();
     thinkingEmitted_ = false;
+    liveThinkingIdx_ = -1;
+    finishReason_.clear();
     sseBuf_.clear();
     mdStream_ = std::make_unique<MdStream>([this](Block b) {
         canvas_->AddBlock(std::move(b));
@@ -3238,18 +3244,21 @@ void ChatFrame::DoSendActualRequest() {
         messages = std::move(deduped);
     }
 
-    // Strip reasoning_content from outbound assistant messages. DeepSeek's
-    // reasoning models reject a request if an assistant message lacks the
-    // FIELD (even an empty one), so for DeepSeek we keep the field but drop
-    // the text; other routes get it erased entirely. The model re-derives its
-    // own reasoning each turn, so re-sending it is pure input cost (OpenCode
-    // keeps it but bounded by its 15K tail — we cut it outright). The full
-    // reasoning stays in durable history_ for display/export/compaction.
+    // DeepSeek requires the reasoning of earlier assistant turns whenever a
+    // request carries `tools` (every chat request here does): "the
+    // reasoning_content must be fully passed back to the API in all
+    // subsequent requests", including turns without a tool call. So for
+    // DeepSeek we send it back verbatim, and turns that have none still get
+    // the (empty) field, which the API also insists on. The repeated history
+    // is served from DeepSeek's prefix cache, and compaction already counts
+    // reasoning when sizing the window. Other routes get it erased, as before.
     for (auto& m : messages) {
         if (m.is_object() && m.value("role", std::string{}) == "assistant") {
             if (route.provider == Preferences::Provider::DeepSeek
                 && route.needsApiKey) {
-                m["reasoning_content"] = "";
+                if (!m.contains("reasoning_content")
+                    || !m["reasoning_content"].is_string())
+                    m["reasoning_content"] = "";
             } else {
                 m.erase("reasoning_content");
             }
@@ -3332,9 +3341,14 @@ void ChatFrame::DoSendActualRequest() {
     // ~3.3); the overflow trigger + provider-400 recovery are the backstops.
     int promptTokens = EstimatePromptTokens(messages);
     int maxTokens = route.maxTokens;
+    if (route.provider == Preferences::Provider::DeepSeek && route.needsApiKey
+        && Preferences::GetReasoningEffort() == "max") {
+        maxTokens = kOutputTokenMaxDeepSeekMax;
+    }
     int avail = route.contextWindow - promptTokens - 8000;
     if (avail < 8000) avail = 8000;
     if (maxTokens > avail) maxTokens = avail;
+    requestMaxTokens_ = maxTokens;
 
     nlohmann::json req;
     req["model"] = route.model;
@@ -3342,6 +3356,12 @@ void ChatFrame::DoSendActualRequest() {
     req["max_tokens"] = maxTokens;
     req["messages"] = std::move(messages);
     req["tools"] = GetToolDefinitions(Preferences::GetEnableGritHistory());
+    // DeepSeek thinking effort ("high" is the API default; "max" is opt-in
+    // from Settings).
+    if (route.provider == Preferences::Provider::DeepSeek && route.needsApiKey) {
+        req["reasoning_effort"] =
+            std::string(Preferences::GetReasoningEffort().utf8_string());
+    }
 
     // error_handler_t::replace silently swaps invalid UTF-8 bytes in any
     // history string (bash output, file contents, model glitches, user paste)
@@ -3412,6 +3432,9 @@ void ChatFrame::OnStreamData(std::string_view chunk) {
                 auto j = nlohmann::json::parse(payload);
                 if (!j.contains("choices") || j["choices"].empty()) continue;
                 const auto& choice = j["choices"][0];
+                if (choice.contains("finish_reason")
+                    && choice["finish_reason"].is_string())
+                    finishReason_ = choice["finish_reason"].get<std::string>();
                 if (!choice.contains("delta")) continue;
                 const auto& delta = choice["delta"];
 
@@ -3425,6 +3448,7 @@ void ChatFrame::OnStreamData(std::string_view chunk) {
                 for (const char* f : {"reasoning_content", "reasoning", "reasoning_text"}) {
                     if (delta.contains(f) && delta[f].is_string()) {
                         activeReasoning_ += delta[f].get<std::string>();
+                        UpdateLiveThinking();
                         break;
                     }
                 }
@@ -3585,6 +3609,16 @@ void ChatFrame::HandleCompletion(const wxString& errorIfFailed) {
         return;
     }
 
+    // The reply stopped at max_tokens. With tool calls the truncated
+    // arguments already produce a retry error for the model; for a plain
+    // reply, tell the user instead of ending silently.
+    if (finishReason_ == "length" && activeToolCalls_.empty()) {
+        RenderErrorBlock(FormatU8(
+            "The reply was cut off: it reached the output limit ({} tokens). "
+            "Say \"continue\" to let the model pick up where it stopped.",
+            requestMaxTokens_));
+    }
+
     if (activeToolCalls_.empty()) {
         // Plain assistant message — record and finish.
         if (!activeAssistantText_.empty() || !activeReasoning_.empty()) {
@@ -3735,6 +3769,13 @@ void ChatFrame::OnToolBatchDone(wxThreadEvent& e) {
 }
 
 void ChatFrame::FinalizeTurn(bool wasCancelledOrError) {
+    // A cancelled/failed round may never reach EmitPendingThinking; don't
+    // leave its Thinking block live with stale text.
+    if (liveThinkingIdx_ >= 0) {
+        canvas_->UpdateThinkingBlock(liveThinkingIdx_,
+                                     wxString::FromUTF8(activeReasoning_), false);
+        liveThinkingIdx_ = -1;
+    }
     canvas_->SetThinking(false);
     streaming_ = false;
     activeAssistantText_.clear();
@@ -3818,8 +3859,50 @@ void ChatFrame::RenderThinkingBlock(const wxString& text) {
 void ChatFrame::EmitPendingThinking() {
     if (thinkingEmitted_) return;
     thinkingEmitted_ = true;
+    if (liveThinkingIdx_ >= 0) {
+        // The block is already on the canvas: give it the complete reasoning
+        // and end live mode, after which it behaves like any Thinking block.
+        canvas_->UpdateThinkingBlock(liveThinkingIdx_,
+                                     wxString::FromUTF8(activeReasoning_), false);
+        liveThinkingIdx_ = -1;
+        return;
+    }
     if (activeReasoning_.empty()) return;
     RenderThinkingBlock(wxString::FromUTF8(activeReasoning_));
+}
+
+void ChatFrame::UpdateLiveThinking() {
+    if (thinkingEmitted_ || activeReasoning_.empty()) return;
+    const auto now = std::chrono::steady_clock::now();
+    if (liveThinkingIdx_ < 0) {
+        Block b;
+        b.type = BlockType::Thinking;
+        b.rawText = wxString::FromUTF8(activeReasoning_);
+        b.visibleText = b.rawText;
+        b.toolExpanded = false;  // collapsed, like every Thinking block
+        b.thinkingLive = true;
+        canvas_->AddBlock(std::move(b));
+        liveThinkingIdx_ = (int)canvas_->Blocks().size() - 1;
+        liveThinkingLastUpdate_ = now;
+        liveThinkingLayoutCost_ = {};
+        return;
+    }
+    // A collapsed block only draws its header, so its text can wait until the
+    // round finalizes it. When expanded, refresh it in chunks, not per token.
+    const auto& blocks = canvas_->Blocks();
+    if (liveThinkingIdx_ >= (int)blocks.size()
+        || !blocks[liveThinkingIdx_].toolExpanded)
+        return;
+    // Each refresh re-wraps the whole reasoning, which gets slower as it
+    // grows, so the interval grows with it: at least 500 ms, and 20x the last
+    // re-layout, keeping layout under ~5% of the UI thread on long runs.
+    const auto interval = std::max<std::chrono::steady_clock::duration>(
+        std::chrono::milliseconds(500), liveThinkingLayoutCost_ * 20);
+    if (now - liveThinkingLastUpdate_ < interval) return;
+    canvas_->UpdateThinkingBlock(liveThinkingIdx_,
+                                 wxString::FromUTF8(activeReasoning_), true);
+    liveThinkingLastUpdate_ = std::chrono::steady_clock::now();
+    liveThinkingLayoutCost_ = liveThinkingLastUpdate_ - now;
 }
 
 void ChatFrame::DispatchNextQueued() {

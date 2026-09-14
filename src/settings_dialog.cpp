@@ -64,6 +64,24 @@ SettingsDialog::SettingsDialog(wxWindow* parent)
     }
     outer->Add(hint_, 0, wxLEFT | wxRIGHT | wxTOP, 12);
 
+    auto* effortRow = new wxBoxSizer(wxHORIZONTAL);
+    auto* effortLabel = new wxStaticText(this, wxID_ANY, "Reasoning effort:");
+    effortChoice_ = new wxChoice(this, wxID_ANY);
+    effortChoice_->Append("High");
+    effortChoice_->Append("Max");
+    // The best size of a choice with short labels is too narrow on macOS
+    // (the popup chevron eats the text); give it room like sessionChoice_.
+    effortChoice_->SetMinSize(FromDIP(wxSize(110, -1)));
+    effortChoice_->SetSelection(
+        Preferences::GetReasoningEffort() == "max" ? 1 : 0);
+    effortChoice_->SetToolTip(
+        "How hard DeepSeek thinks before answering. High is DeepSeek's "
+        "default. Max can do better on hard coding tasks but is slower and "
+        "uses more reasoning tokens.");
+    effortRow->Add(effortLabel, 0, wxALIGN_CENTER_VERTICAL);
+    effortRow->Add(effortChoice_, 0, wxALIGN_CENTER_VERTICAL | wxLEFT, 8);
+    outer->Add(effortRow, 0, wxLEFT | wxRIGHT | wxTOP, 12);
+
     // ---- Agent tools section ----
     auto* toolsHeading = new wxStaticText(this, wxID_ANY, "Agent tools");
     wxFont thf = toolsHeading->GetFont();
@@ -168,8 +186,10 @@ void SettingsDialog::OnSave(wxCommandEvent& evt) {
         Preferences::SetApiKeyPlaintext(provider, wxString());
     }
 
-    // Persist the Grit History tools toggle.
+    // Persist the Grit History tools toggle and the reasoning effort.
     Preferences::SetEnableGritHistory(gritHistoryCb_->IsChecked());
+    Preferences::SetReasoningEffort(
+        effortChoice_->GetSelection() == 1 ? "max" : "high");
 
     evt.Skip();  // let default handler close with wxID_OK
 }

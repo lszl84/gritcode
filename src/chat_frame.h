@@ -10,6 +10,7 @@
 #include <wx/wrapsizer.h>
 #include <wx/thread.h>
 #include <wx/timer.h>
+#include <chrono>
 #include <nlohmann/json.hpp>
 #include "chat_canvas.h"
 #include "md_parser.h"
@@ -122,6 +123,20 @@ private:
     // reasoning response). Keeps us from rendering the same reasoning twice
     // when a delta carries both reasoning and content.
     bool thinkingEmitted_ = false;
+    // Canvas index of this round's Thinking block while reasoning is still
+    // streaming (-1 when there is none). It is added collapsed at the first
+    // reasoning delta; while expanded, its text is refreshed a few times a
+    // second so the user can watch the reasoning. EmitPendingThinking /
+    // FinalizeTurn finalize it.
+    int liveThinkingIdx_ = -1;
+    std::chrono::steady_clock::time_point liveThinkingLastUpdate_{};
+    // How long the last live re-layout took; paces the next one.
+    std::chrono::steady_clock::duration liveThinkingLayoutCost_{};
+    // finish_reason of the in-flight completion ("stop", "length",
+    // "tool_calls", ...) and the max_tokens it was sent with, so a reply that
+    // hit the output limit can say so instead of ending silently.
+    std::string finishReason_;
+    int requestMaxTokens_ = 0;
     bool streaming_ = false;
 
     // SSE parsing state. Doubles as raw-body capture: on a non-2xx response the
@@ -432,4 +447,8 @@ private:
     // Emit the pending thinking block (if any) for the current completion
     // round and set thinkingEmitted_ true. Idempotent.
     void EmitPendingThinking();
+    // Called as reasoning deltas arrive: adds the collapsed live Thinking
+    // block on the first one, then (throttled, and only while the user has it
+    // expanded) refreshes its text. No-op once the round's thinking is emitted.
+    void UpdateLiveThinking();
 };

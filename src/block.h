@@ -119,6 +119,10 @@ struct Block {
     // chevron and no toggle, so 1-liners look like an inline italic comment
     // rather than a collapsible block.
     bool thinkingSingleLine = false;
+    // True while the block's reasoning is still streaming in. A live block
+    // never uses single-line mode, so it stays a collapsed "Thinking" header
+    // (expand it to watch the reasoning grow) until the round finalizes it.
+    bool thinkingLive = false;
 };
 
 // (blockIndex, charOffset-in-visibleText). Stable across reflows because both

@@ -51,6 +51,11 @@ public:
     // Toggle a ToolCall block's collapsed/expanded state. No-op for other types.
     void ToggleToolCall(int blockIdx);
 
+    // Replace the text of an existing Thinking block and set whether it is
+    // still live (streaming). Used to grow the current round's reasoning in
+    // place; only that block is re-laid out. No-op for other block types.
+    void UpdateThinkingBlock(int blockIdx, const wxString& text, bool live);
+
     // Show/hide an animated "thinking dots" indicator below the last block.
     // Driven by web request streaming start/end. Mutates only the indicator —
     // never touches committed blocks.
