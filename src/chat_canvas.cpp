@@ -364,6 +364,12 @@ void ChatCanvas::UpdateThinkingBlock(int blockIdx, const wxString& text,
     b.cachedWidth = -1;
     layoutDirty_ = true;
     Relayout(GetClientSize().x);
+    // Measure the block now rather than leaving it to OnPaint. Otherwise we
+    // scroll to the *estimated* bottom and the paint re-measures and scrolls
+    // again — for a live block updated several times a second, the view
+    // visibly jumps on every update.
+    if (layoutWidth_ > 0)
+        EnsureBlockLaidOut((size_t)blockIdx, ContentWidthFor(layoutWidth_));
     ScrollToBottomIfPinned();
     Refresh();
 }

@@ -3884,19 +3884,25 @@ void ChatFrame::UpdateLiveThinking() {
         canvas_->AddBlock(std::move(b));
         liveThinkingIdx_ = (int)canvas_->Blocks().size() - 1;
         liveThinkingLastUpdate_ = now;
+        liveThinkingLayoutCost_ = {};
         return;
     }
     // A collapsed block only draws its header, so its text can wait until the
-    // round finalizes it. When expanded, re-lay it out a few times a second
-    // rather than on every token.
+    // round finalizes it. When expanded, refresh it in chunks, not per token.
     const auto& blocks = canvas_->Blocks();
     if (liveThinkingIdx_ >= (int)blocks.size()
         || !blocks[liveThinkingIdx_].toolExpanded)
         return;
-    if (now - liveThinkingLastUpdate_ < std::chrono::milliseconds(150)) return;
-    liveThinkingLastUpdate_ = now;
+    // Each refresh re-wraps the whole reasoning, which gets slower as it
+    // grows, so the interval grows with it: at least 500 ms, and 20x the last
+    // re-layout, keeping layout under ~5% of the UI thread on long runs.
+    const auto interval = std::max<std::chrono::steady_clock::duration>(
+        std::chrono::milliseconds(500), liveThinkingLayoutCost_ * 20);
+    if (now - liveThinkingLastUpdate_ < interval) return;
     canvas_->UpdateThinkingBlock(liveThinkingIdx_,
                                  wxString::FromUTF8(activeReasoning_), true);
+    liveThinkingLastUpdate_ = std::chrono::steady_clock::now();
+    liveThinkingLayoutCost_ = liveThinkingLastUpdate_ - now;
 }
 
 void ChatFrame::DispatchNextQueued() {

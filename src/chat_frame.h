@@ -130,6 +130,8 @@ private:
     // FinalizeTurn finalize it.
     int liveThinkingIdx_ = -1;
     std::chrono::steady_clock::time_point liveThinkingLastUpdate_{};
+    // How long the last live re-layout took; paces the next one.
+    std::chrono::steady_clock::duration liveThinkingLayoutCost_{};
     // finish_reason of the in-flight completion ("stop", "length",
     // "tool_calls", ...) and the max_tokens it was sent with, so a reply that
     // hit the output limit can say so instead of ending silently.
