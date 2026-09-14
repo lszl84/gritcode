@@ -9,6 +9,9 @@
 #include "image_store.h"
 #include "debug_window.h"
 #include "syntax.h"
+#ifdef __WXOSX__
+#include "mac_style.h"
+#endif
 #include <wx/clipbrd.h>
 #include <wx/dataobj.h>
 #include <wx/dcbuffer.h>
@@ -604,9 +607,25 @@ bool ImportSessionFile(const std::string& path, nlohmann::json& outJ,
 
 }  // namespace
 
+// Padding between the window edge and the panes. macOS gets a little more
+// room: Tahoe's rounder window corners crowd controls sitting 2px in.
+#ifdef __WXOSX__
+constexpr int kEdgePad = 4;
+#else
+constexpr int kEdgePad = 2;
+#endif
+
+// Default window width. macOS popups are wider than GTK's, and at 600 the
+// toolbar row squeezes the Model dropdown down to nothing.
+#ifdef __WXOSX__
+constexpr int kDefaultWidth = 640;
+#else
+constexpr int kDefaultWidth = 600;
+#endif
+
 ChatFrame::ChatFrame()
     : wxFrame(nullptr, wxID_ANY, "gritcode",
-              wxDefaultPosition, wxSize(600, 850)) {
+              wxDefaultPosition, wxSize(kDefaultWidth, 850)) {
     PERF_SCOPE("ChatFrame::ctor");
 
     { PERF_SCOPE("LoadAppIcon"); SetIcons(LoadAppIcon()); }
@@ -740,7 +759,7 @@ ChatFrame::ChatFrame()
     // Left/right padding only: the top/bottom padding lives on the frame
     // sizer around the whole splitter, so the sashes don't overhang the
     // padded content.
-    root->Add(outer, 1, wxEXPAND | wxLEFT | wxRIGHT, FromDIP(2));
+    root->Add(outer, 1, wxEXPAND | wxLEFT | wxRIGHT, FromDIP(kEdgePad));
     panel->SetSizer(root);
 
     // Editor — right pane of the inner splitter, hidden until the editor
@@ -775,8 +794,13 @@ ChatFrame::ChatFrame()
                                wxDefaultPosition, wxDefaultSize,
                                wxTE_MULTILINE | wxTE_RICH2 | wxTE_PROCESS_TAB);
     {
+#ifdef __WXOSX__
+        wxFont mono = MacMonospaceFont(
+            wxSystemSettings::GetFont(wxSYS_DEFAULT_GUI_FONT).GetPointSize());
+#else
         wxFont mono = wxSystemSettings::GetFont(wxSYS_DEFAULT_GUI_FONT);
         mono.SetFamily(wxFONTFAMILY_TELETYPE);
+#endif
         codeEdit_->SetFont(mono);
     }
     codeEdit_->Bind(wxEVT_TEXT, &ChatFrame::OnEditorTextChanged, this);
@@ -790,8 +814,8 @@ ChatFrame::ChatFrame()
 
     // Left/right padding matches the other panes; the tree and editor sit
     // flush against each other with no sash between them.
-    editorSizer->Add(treePane, 0, wxEXPAND | wxLEFT, FromDIP(2));
-    editorSizer->Add(editPane, 1, wxEXPAND | wxRIGHT, FromDIP(2));
+    editorSizer->Add(treePane, 0, wxEXPAND | wxLEFT, FromDIP(kEdgePad));
+    editorSizer->Add(editPane, 1, wxEXPAND | wxRIGHT, FromDIP(kEdgePad));
     editorPanel_->SetSizer(editorSizer);
     editorPanel_->Hide();
 
@@ -841,16 +865,18 @@ ChatFrame::ChatFrame()
         wxString::FromUTF8("load another\xE2\x80\xA6"),
         wxDefaultPosition, wxDefaultSize, wxBORDER_NONE);
     changeBtn_ = changeBtn;
-    auto cf = changeBtn->GetFont();
-    cf.SetPointSize(cf.GetPointSize() - 1);
-    changeBtn->SetFont(cf);
-    // Match tool accent colour from ChatCanvas palette.
+    // Match tool accent colour from ChatCanvas palette. Set before the font:
+    // macOS only applies a button's text colour when SetFont/SetLabel rebuild
+    // its title, so the reverse order leaves the link in the default colour.
     {
         wxColour bg = wxSystemSettings::GetColour(wxSYS_COLOUR_WINDOW);
         bool isDark = (bg.Red() * 299 + bg.Green() * 587 + bg.Blue() * 114) < 50000;
         changeBtn->SetForegroundColour(
             isDark ? wxColour(140, 200, 255) : wxColour(30, 90, 170));
     }
+    auto cf = changeBtn->GetFont();
+    cf.SetPointSize(cf.GetPointSize() - 1);
+    changeBtn->SetFont(cf);
     changeBtn->Hide();
     changeBtn->Bind(wxEVT_BUTTON, [this](wxCommandEvent&) {
         wxCommandEvent dummy;
@@ -865,7 +891,7 @@ ChatFrame::ChatFrame()
     importSizer->Add(importCanvas_, 1, wxEXPAND);
     importSizer->Add(bottomBox, 0, wxEXPAND);
     auto* importRoot = new wxBoxSizer(wxVERTICAL);
-    importRoot->Add(importSizer, 1, wxEXPAND | wxLEFT | wxRIGHT, FromDIP(2));
+    importRoot->Add(importSizer, 1, wxEXPAND | wxLEFT | wxRIGHT, FromDIP(kEdgePad));
     importPanel_->SetSizer(importRoot);
     importPanel_->Hide();  // hidden until split
 
@@ -892,7 +918,7 @@ ChatFrame::ChatFrame()
     auto* frameSizer = new wxBoxSizer(wxHORIZONTAL);
     // Top/bottom padding wraps the whole splitter so its sashes are inset
     // from the window edges instead of running edge-to-edge.
-    frameSizer->Add(splitter_, 1, wxEXPAND | wxTOP | wxBOTTOM, FromDIP(2));
+    frameSizer->Add(splitter_, 1, wxEXPAND | wxTOP | wxBOTTOM, FromDIP(kEdgePad));
     SetSizer(frameSizer);
 
     // Open the most recent session if one exists; otherwise seed one for the
@@ -1267,6 +1293,11 @@ ChatFrame::ChatFrame()
 
     input_->SetFocus();
     SetMinSize(wxSize(620, 400));
+
+#ifdef __WXOSX__
+    // Tahoe look: native styling only, the layout above stays shared.
+    ApplyMacStyle({this, canvas_, sendBtn_, importPanel_});
+#endif
 
     // Discover current DeepSeek model ids (e.g. a newly shipped flash) and
     // merge them into the dropdown. No-op when no API key is configured.

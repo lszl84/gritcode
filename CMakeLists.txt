@@ -182,6 +182,14 @@ set(SRCS
     src/run_config_store.cpp
 )
 
+# macOS-only native styling (Objective-C++); see src/mac_style.h.
+if(APPLE)
+    enable_language(OBJCXX)
+    list(APPEND SRCS src/mac_style.mm)
+    set_source_files_properties(src/mac_style.mm
+        PROPERTIES COMPILE_OPTIONS "-fobjc-arc")
+endif()
+
 if(APPLE)
     # Copy each asset SVG into Contents/Resources/icons inside the .app bundle.
     # wxStandardPaths::GetResourcesDir() resolves to that path on macOS, so the

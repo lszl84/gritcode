@@ -13,6 +13,9 @@
 #ifdef __WXGTK__
 #include <gtk/gtk.h>
 #endif
+#ifdef __WXOSX__
+#include "mac_style.h"
+#endif
 
 namespace {
 
@@ -32,6 +35,26 @@ constexpr int kToolPadY      = 6;
 constexpr int kToolGap       = 4;    // space between header and body (when expanded)
 constexpr int kImagePad      = 4;    // padding around image thumbnails
 constexpr int kMaxCacheTokenChars = 256;  // don't memoize longer tokens (URLs/blobs)
+
+// Corner radii. macOS 26 (Tahoe) uses noticeably rounder shapes; match it
+// there, the same way EnsureFonts picks Mac-specific sizes.
+#ifdef __APPLE__
+constexpr int kCardRadius    = 10;   // code, tool, thinking, image cards
+constexpr int kBubbleRadius  = 14;   // user prompt bubble
+#else
+constexpr int kCardRadius    = 6;
+constexpr int kBubbleRadius  = 8;
+#endif
+
+// Extra leading per wrapped line. Lines are exactly the font height, which
+// reads cramped with macOS font metrics; GTK's metrics already leave room.
+#ifdef __APPLE__
+constexpr int kLineGap       = 3;    // prose
+constexpr int kCodeLineGap   = 2;    // code blocks
+#else
+constexpr int kLineGap       = 0;
+constexpr int kCodeLineGap   = 0;
+#endif
 
 bool IsDarkMode() {
     auto appearance = wxSystemSettings::GetAppearance();
@@ -219,7 +242,11 @@ void ChatCanvas::EnsureFonts() {
     fontBodyBold_ = wxFont(wxFontInfo(bodySz).Family(wxFONTFAMILY_DEFAULT).Bold());
     fontBodyItalic_ = wxFont(wxFontInfo(bodySz).Family(wxFONTFAMILY_DEFAULT).Italic());
     fontBodyBoldItalic_ = wxFont(wxFontInfo(bodySz).Family(wxFONTFAMILY_DEFAULT).Bold().Italic());
+#ifdef __WXOSX__
+    fontCode_ = MacMonospaceFont(codeSz);  // SF Mono, not Courier
+#else
     fontCode_ = wxFont(wxFontInfo(codeSz).Family(wxFONTFAMILY_TELETYPE));
+#endif
     fontThinking_ = wxFont(wxFontInfo(codeSz).Family(wxFONTFAMILY_DEFAULT).Italic());
 
     for (int i = 0; i < 6; ++i) {
@@ -260,6 +287,33 @@ int ChatCanvas::FontHeight(wxDC& dc, int fi, const wxFont& f) const {
         fontHeightCache_[fi] = h > 0 ? h : 1;
     }
     return fontHeightCache_[fi];
+}
+
+// Distance from the top of the text box to the baseline, cached per font
+// like FontHeight.
+int ChatCanvas::FontAscent(wxDC& dc, int fi, const wxFont& f) const {
+    if (fontAscentCache_[fi] <= 0) {
+        MeasSetFont(dc, f);
+        wxCoord w = 0, h = 0, descent = 0;
+        dc.GetTextExtent("Hg", &w, &h, &descent);
+        fontAscentCache_[fi] = std::max(1, (int)(h - descent));
+    }
+    return fontAscentCache_[fi];
+}
+
+// Runs are drawn from the line top, so a run whose font has a different
+// ascent than the block's regular text — inline code in SF Mono next to
+// SF Pro — sits off the baseline. macOS only: GTK's font pairs already line
+// up, and its rendering stays as it was.
+int ChatCanvas::BaselineShift(wxDC& dc, const InlineRun& r, BlockType bt, int hLvl) const {
+#ifdef __APPLE__
+    const InlineRun plain;
+    return FontAscent(dc, FontIndex(plain, bt, hLvl), FontFor(plain, bt, hLvl))
+         - FontAscent(dc, FontIndex(r, bt, hLvl), FontFor(r, bt, hLvl));
+#else
+    (void)dc; (void)r; (void)bt; (void)hLvl;
+    return 0;
+#endif
 }
 
 const std::vector<int>& ChatCanvas::LineGlyphs(wxDC& dc, const Block& b,
@@ -830,7 +884,7 @@ void ChatCanvas::WrapRuns(wxDC& dc, const std::vector<InlineRun>& runs,
         if (cur.runs.empty() && cur.text.IsEmpty()) return;
         cur.lineWidth = curX;  // glyphX is computed lazily on first hit-test
         cur.textEnd = cur.textStart + (int)cur.text.size();
-        cur.height = lineHeight > 0 ? lineHeight : styleFontHeight();
+        cur.height = (lineHeight > 0 ? lineHeight : styleFontHeight()) + kLineGap;
         outLines.push_back(std::move(cur));
         cur = WrappedLine();
         cur.textStart = 0;
@@ -843,7 +897,7 @@ void ChatCanvas::WrapRuns(wxDC& dc, const std::vector<InlineRun>& runs,
 
         if (t.isNewline) {
             if (cur.text.IsEmpty() && cur.runs.empty()) {
-                cur.height = styleFontHeight();
+                cur.height = styleFontHeight() + kLineGap;
                 cur.textEnd = cur.textStart;
                 cur.lineWidth = 0;
                 outLines.push_back(std::move(cur));
@@ -919,7 +973,7 @@ void ChatCanvas::WrapMonospace(wxDC& dc, const wxString& text, int maxW,
     auto emitLine = [&](const wxString& seg, int srcStart) {
         WrappedLine wl;
         wl.text = seg;
-        wl.height = charH;
+        wl.height = charH + kCodeLineGap;
         wl.textStart = textOffBase + srcStart;
         wl.textEnd = wl.textStart + (int)seg.size();
         InlineRun r;
@@ -1355,7 +1409,7 @@ void ChatCanvas::PaintBlock(wxDC& dc, const Block& b, int yTop, BlockPos selStar
         const int cardH = (b.imageH > 0 ? b.imageH : 24) + 2 * kImagePad;
         dc.SetPen(*wxTRANSPARENT_PEN);
         dc.SetBrush(wxBrush(pal.tableHeaderBg));
-        dc.DrawRoundedRectangle(blockX, yTop, cardW, cardH, 6);
+        dc.DrawRoundedRectangle(blockX, yTop, cardW, cardH, kCardRadius);
 
         if (b.imageBmp.IsOk()) {
             dc.DrawBitmap(b.imageBmp, blockX + kImagePad, yTop + kImagePad, true);
@@ -1433,17 +1487,18 @@ void ChatCanvas::PaintBlock(wxDC& dc, const Block& b, int yTop, BlockPos selStar
 
                     for (size_t ri = 0; ri < wl.runs.size(); ++ri) {
                         const auto& run = wl.runs[ri];
+                        const int dy = BaselineShift(dc, run, BlockType::Paragraph, 0);
                         const wxFont& f = FontFor(run, BlockType::Paragraph, 0);
                         dc.SetFont(f);
                         bool isLink = !run.link.IsEmpty();
                         dc.SetTextForeground(isLink ? pal.linkColour
                                                     : (run.code ? pal.codeFg : pal.text));
                         int xr = xBase + (ri < wl.runX.size() ? wl.runX[ri] : 0);
-                        dc.DrawText(run.text, xr, yLine);
+                        dc.DrawText(run.text, xr, yLine + dy);
                         if (isLink) {
                             wxCoord rw = 0, rh = 0;
                             dc.GetTextExtent(run.text, &rw, &rh);
-                            dc.DrawLine(xr, yLine + rh, xr + rw, yLine + rh);
+                            dc.DrawLine(xr, yLine + dy + rh, xr + rw, yLine + dy + rh);
                         }
                     }
                     yLine += wl.height;
@@ -1467,7 +1522,7 @@ void ChatCanvas::PaintBlock(wxDC& dc, const Block& b, int yTop, BlockPos selStar
     }
 
     if (b.type == BlockType::Thinking) {
-        const int radius = 6;
+        const int radius = kCardRadius;
 
         // Tinting rule mirrors collapsed-tool behavior:
         //  - Single-line:  per-char selection on the one visible line.
@@ -1553,10 +1608,11 @@ void ChatCanvas::PaintBlock(wxDC& dc, const Block& b, int yTop, BlockPos selStar
                 dc.SetTextForeground(pal.thinkingText);
                 for (size_t ri = 0; ri < wl.runs.size(); ++ri) {
                     const auto& run = wl.runs[ri];
+                    const int dy = BaselineShift(dc, run, BlockType::Thinking, 0);
                     const wxFont& f = FontFor(run, BlockType::Thinking, 0);
                     dc.SetFont(f);
                     int xr = textXLeft + (ri < wl.runX.size() ? wl.runX[ri] : 0);
-                    dc.DrawText(run.text, xr, yLine);
+                    dc.DrawText(run.text, xr, yLine + dy);
                 }
                 yLine += wl.height;
             }
@@ -1565,7 +1621,7 @@ void ChatCanvas::PaintBlock(wxDC& dc, const Block& b, int yTop, BlockPos selStar
     }
 
     if (b.type == BlockType::ToolCall) {
-        const int radius = 6;
+        const int radius = kCardRadius;
 
         // fullySelected drives the whole-block background tint behind the
         // header + (collapsed) body slot.
@@ -1715,7 +1771,7 @@ void ChatCanvas::PaintBlock(wxDC& dc, const Block& b, int yTop, BlockPos selStar
         // Background fill.
         dc.SetPen(*wxTRANSPARENT_PEN);
         dc.SetBrush(wxBrush(pal.codeBg));
-        dc.DrawRoundedRectangle(blockX, yTop, blockW, b.cachedHeight, 6);
+        dc.DrawRoundedRectangle(blockX, yTop, blockW, b.cachedHeight, kCardRadius);
 
         int yLine = yTop + kCodePadding;
         dc.SetFont(fontCode_);
@@ -1754,7 +1810,7 @@ void ChatCanvas::PaintBlock(wxDC& dc, const Block& b, int yTop, BlockPos selStar
         int bubbleX = blockX + blockW - bubbleW;
         dc.SetPen(*wxTRANSPARENT_PEN);
         dc.SetBrush(wxBrush(pal.userBubbleBg));
-        dc.DrawRoundedRectangle(bubbleX, yTop, bubbleW, b.cachedHeight, 8);
+        dc.DrawRoundedRectangle(bubbleX, yTop, bubbleW, b.cachedHeight, kBubbleRadius);
         textXLeft = bubbleX + kUserBubblePad;
         textYTop  = yTop + kUserBubblePad;
     }
@@ -1777,17 +1833,18 @@ void ChatCanvas::PaintBlock(wxDC& dc, const Block& b, int yTop, BlockPos selStar
         // Draw runs.
         for (size_t ri = 0; ri < wl.runs.size(); ++ri) {
             const auto& r = wl.runs[ri];
+            const int dy = BaselineShift(dc, r, b.type, b.headingLevel);
             const wxFont& f = FontFor(r, b.type, b.headingLevel);
             dc.SetFont(f);
             bool isLink = !r.link.IsEmpty();
             dc.SetTextForeground(isLink ? pal.linkColour
                                         : (r.code ? pal.codeFg : pal.text));
             int xr = textXLeft + (ri < wl.runX.size() ? wl.runX[ri] : 0);
-            dc.DrawText(r.text, xr, yLine);
+            dc.DrawText(r.text, xr, yLine + dy);
             if (isLink) {
                 wxCoord rw = 0, rh = 0;
                 dc.GetTextExtent(r.text, &rw, &rh);
-                dc.DrawLine(xr, yLine + rh, xr + rw, yLine + rh);
+                dc.DrawLine(xr, yLine + dy + rh, xr + rw, yLine + dy + rh);
             }
         }
         yLine += wl.height;
