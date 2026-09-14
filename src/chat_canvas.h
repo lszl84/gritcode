@@ -203,9 +203,14 @@ private:
     // Heights are constant per font, cached separately in fontHeightCache_.
     mutable std::unordered_map<std::wstring, int> widthCache_;
     mutable std::array<int, 12> fontHeightCache_{};  // 0 = not cached
+    mutable std::array<int, 12> fontAscentCache_{};  // 0 = not cached
 
     int FontIndex(const InlineRun& r, BlockType bt, int hLvl) const;
     int FontHeight(wxDC& dc, int fi, const wxFont& f) const;
+    int FontAscent(wxDC& dc, int fi, const wxFont& f) const;
+    // Offset from the line top that puts run `r` on the baseline of the
+    // block's regular text. Call before setting the run's font on `dc`.
+    int BaselineShift(wxDC& dc, const InlineRun& r, BlockType bt, int hLvl) const;
 
     // Lazily compute and return the per-char x positions for a wrapped line.
     // Only used for partial-line selection and hit-testing; full-line work

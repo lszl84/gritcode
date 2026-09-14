@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.28 FATAL_ERROR)
 
-project(gritcode VERSION 0.5.5 LANGUAGES C CXX)
+project(gritcode VERSION 0.5.6 LANGUAGES C CXX)
 
 # Human-facing version string (used for packaging, bundle metadata, etc.)
 set(GRITCODE_VERSION "${PROJECT_VERSION}")
@@ -181,6 +181,14 @@ set(SRCS
     src/streaming_web_request.cpp
     src/run_config_store.cpp
 )
+
+# macOS-only native styling (Objective-C++); see src/mac_style.h.
+if(APPLE)
+    enable_language(OBJCXX)
+    list(APPEND SRCS src/mac_style.mm)
+    set_source_files_properties(src/mac_style.mm
+        PROPERTIES COMPILE_OPTIONS "-fobjc-arc")
+endif()
 
 if(APPLE)
     # Copy each asset SVG into Contents/Resources/icons inside the .app bundle.

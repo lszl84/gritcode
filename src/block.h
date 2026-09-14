@@ -41,6 +41,7 @@ struct WrappedLine {
     mutable std::vector<int> glyphX;
     int lineWidth = 0;              // pixel width of the trimmed line text
     int height = 0;
+    int textTop = 0;                // space above the text within `height` (line spacing)
     // Range of visible chars (in the block's visibleText) that this line covers.
     int textStart = 0;
     int textEnd   = 0;
