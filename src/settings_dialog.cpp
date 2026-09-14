@@ -69,6 +69,9 @@ SettingsDialog::SettingsDialog(wxWindow* parent)
     effortChoice_ = new wxChoice(this, wxID_ANY);
     effortChoice_->Append("High");
     effortChoice_->Append("Max");
+    // The best size of a choice with short labels is too narrow on macOS
+    // (the popup chevron eats the text); give it room like sessionChoice_.
+    effortChoice_->SetMinSize(FromDIP(wxSize(110, -1)));
     effortChoice_->SetSelection(
         Preferences::GetReasoningEffort() == "max" ? 1 : 0);
     effortChoice_->SetToolTip(
