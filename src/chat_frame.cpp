@@ -3238,18 +3238,21 @@ void ChatFrame::DoSendActualRequest() {
         messages = std::move(deduped);
     }
 
-    // Strip reasoning_content from outbound assistant messages. DeepSeek's
-    // reasoning models reject a request if an assistant message lacks the
-    // FIELD (even an empty one), so for DeepSeek we keep the field but drop
-    // the text; other routes get it erased entirely. The model re-derives its
-    // own reasoning each turn, so re-sending it is pure input cost (OpenCode
-    // keeps it but bounded by its 15K tail — we cut it outright). The full
-    // reasoning stays in durable history_ for display/export/compaction.
+    // DeepSeek requires the reasoning of earlier assistant turns whenever a
+    // request carries `tools` (every chat request here does): "the
+    // reasoning_content must be fully passed back to the API in all
+    // subsequent requests", including turns without a tool call. So for
+    // DeepSeek we send it back verbatim, and turns that have none still get
+    // the (empty) field, which the API also insists on. The repeated history
+    // is served from DeepSeek's prefix cache, and compaction already counts
+    // reasoning when sizing the window. Other routes get it erased, as before.
     for (auto& m : messages) {
         if (m.is_object() && m.value("role", std::string{}) == "assistant") {
             if (route.provider == Preferences::Provider::DeepSeek
                 && route.needsApiKey) {
-                m["reasoning_content"] = "";
+                if (!m.contains("reasoning_content")
+                    || !m["reasoning_content"].is_string())
+                    m["reasoning_content"] = "";
             } else {
                 m.erase("reasoning_content");
             }
@@ -3342,6 +3345,12 @@ void ChatFrame::DoSendActualRequest() {
     req["max_tokens"] = maxTokens;
     req["messages"] = std::move(messages);
     req["tools"] = GetToolDefinitions(Preferences::GetEnableGritHistory());
+    // DeepSeek thinking effort ("high" is the API default; "max" is opt-in
+    // from Settings).
+    if (route.provider == Preferences::Provider::DeepSeek && route.needsApiKey) {
+        req["reasoning_effort"] =
+            std::string(Preferences::GetReasoningEffort().utf8_string());
+    }
 
     // error_handler_t::replace silently swaps invalid UTF-8 bytes in any
     // history string (bash output, file contents, model glitches, user paste)

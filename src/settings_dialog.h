@@ -2,6 +2,7 @@
 #include <wx/dialog.h>
 #include <wx/textctrl.h>
 #include <wx/checkbox.h>
+#include <wx/choice.h>
 #include <wx/stattext.h>
 
 // Modal dialog for editing API keys. Reads the current DeepSeek key from
@@ -24,6 +25,7 @@ private:
     wxTextCtrl*   keyCtrl_ = nullptr;
     wxCheckBox*   showCb_  = nullptr;
     wxCheckBox*   gritHistoryCb_ = nullptr;
+    wxChoice*     effortChoice_  = nullptr;
     wxStaticText* hint_    = nullptr;
 
     bool keyringWasBroken_ = false;  // snapshot at dialog-open time

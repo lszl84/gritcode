@@ -19,6 +19,7 @@ const wxString kUsername      = "api_key";
 const char* kModelIndexKey    = "/UI/LastModelIndex";
 const char* kModelExplicitKey = "/UI/ModelExplicit";
 const char* kEnableGritKey    = "/UI/EnableGritHistory";
+const char* kReasoningEffortKey = "/DeepSeek/ReasoningEffort";
 
 // wxFileConfig key for the plaintext API-key fallback.
 const char* kApiKeyPlaintext  = "/ApiKey/DeepSeek";
@@ -53,6 +54,17 @@ void Preferences::Init() {
                                  wxEmptyString, wxEmptyString,
                                  wxCONFIG_USE_SUBDIR);
     wxConfigBase::Set(cfg);
+}
+
+wxString Preferences::GetReasoningEffort() {
+    wxString v = wxConfigBase::Get()->Read(kReasoningEffortKey, wxString("high"));
+    return v == "max" ? wxString("max") : wxString("high");
+}
+
+void Preferences::SetReasoningEffort(const wxString& effort) {
+    auto* cfg = wxConfigBase::Get();
+    cfg->Write(kReasoningEffortKey, wxString(effort == "max" ? "max" : "high"));
+    cfg->Flush();
 }
 
 int Preferences::GetLastModelIndex() {

@@ -39,6 +39,12 @@ public:
     static bool GetEnableGritHistory();
     static void SetEnableGritHistory(bool enabled);
 
+    // DeepSeek reasoning effort, sent as `reasoning_effort` on every DeepSeek
+    // chat request: "high" (DeepSeek's own default, and ours) or "max".
+    // Anything else stored in the config reads back as "high".
+    static wxString GetReasoningEffort();
+    static void     SetReasoningEffort(const wxString& effort);
+
     // ---- API keys (wxSecretStore) ----
 
     enum class Provider {
