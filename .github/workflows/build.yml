@@ -52,7 +52,10 @@ jobs:
 
   macos:
     name: macOS
-    runs-on: macos-14
+    # macOS 26 image (Xcode 26): an app built against the older SDK runs in
+    # compatibility mode on Tahoe, with pre-Tahoe controls. The minimum
+    # supported macOS is pinned separately (CMAKE_OSX_DEPLOYMENT_TARGET).
+    runs-on: macos-26
     if: ${{ github.event_name != 'workflow_dispatch' || inputs.macos }}
     steps:
       - uses: actions/checkout@v6

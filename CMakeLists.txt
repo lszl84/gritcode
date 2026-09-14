@@ -1,6 +1,14 @@
 cmake_minimum_required(VERSION 3.28 FATAL_ERROR)
 
-project(gritcode VERSION 0.5.6 LANGUAGES C CXX)
+# Minimum macOS version (ignored elsewhere). Must precede project(). Left
+# unset it defaults to the build machine's OS, so building with the macOS 26
+# SDK (needed for the Tahoe look) would lock out macOS 14/15. FORCE only when
+# empty: a cached "" would otherwise win, and an explicit choice still does.
+if(NOT CMAKE_OSX_DEPLOYMENT_TARGET)
+    set(CMAKE_OSX_DEPLOYMENT_TARGET "14.0" CACHE STRING "Minimum macOS version" FORCE)
+endif()
+
+project(gritcode VERSION 0.5.7 LANGUAGES C CXX)
 
 # Human-facing version string (used for packaging, bundle metadata, etc.)
 set(GRITCODE_VERSION "${PROJECT_VERSION}")
