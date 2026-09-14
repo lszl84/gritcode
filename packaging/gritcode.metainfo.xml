@@ -35,7 +35,10 @@
     <category>IDE</category>
   </categories>
 
-  <url type="homepage">https://github.com/lszl84/gritcode</url>
+  <url type="homepage">https://gritcode.ai</url>
+  <url type="vcs-browser">https://github.com/lszl84/gritcode</url>
+  <url type="bugtracker">https://github.com/lszl84/gritcode/issues</url>
+  <url type="donation">https://github.com/sponsors/lszl84</url>
 
   <screenshots>
     <screenshot type="default">
