@@ -294,10 +294,10 @@ struct ModelRoute {
     int contextWindow;
 };
 
-// Index 0 is always OpenCode Free. Indices >= 1 map into remoteModels_, the
-// DeepSeek model list — which is either the live GET /models result or the
-// hardcoded fallback below, never both.
-constexpr int kModelOpenCode = 0;
+// Index 0 is always the free tier (Kilo Gateway). Indices >= 1 map into
+// remoteModels_, the DeepSeek model list — which is either the live GET
+// /models result or the hardcoded fallback below, never both.
+constexpr int kModelKiloFree = 0;
 
 // Hardcoded DeepSeek fallback, used only when GET /models is unavailable
 // (no API key, network error, or unparseable response). Kept in a stable
@@ -310,12 +310,15 @@ const std::vector<std::string>& FallbackDeepseekModels() {
 }
 
 ModelRoute RouteForIndex(int idx, const std::vector<std::string>& remoteModels) {
-    if (idx == kModelOpenCode) {
-        // OpenCode Zen free tier. Models rotate — currently big-pickle
-        // (200K context, 32K output). No API key needed; endpoint is open.
-        return {"https://opencode.ai/zen/v1/chat/completions",
-                "big-pickle", false, Preferences::Provider::DeepSeek,
-                kOutputTokenMax, 200000};
+    if (idx == kModelKiloFree) {
+        // Kilo Gateway free tier: kilo-auto/free auto-routes to whichever
+        // free model is currently available. OpenAI-compatible, no API key,
+        // 256K context, anonymous rate limit 200 requests/hour/IP. Free
+        // models are shared-pool and best-effort, so this is the no-key
+        // default, not a replacement for a DeepSeek key.
+        return {"https://api.kilo.ai/api/gateway/chat/completions",
+                "kilo-auto/free", false, Preferences::Provider::DeepSeek,
+                kOutputTokenMax, 256000};
     }
 
     // DeepSeek models occupy indices >= 1. `remoteModels` is the single
@@ -331,9 +334,9 @@ ModelRoute RouteForIndex(int idx, const std::vector<std::string>& remoteModels) 
     }
 
     // Unknown/stale index — fall back to the no-key free provider.
-    return {"https://opencode.ai/zen/v1/chat/completions",
-            "big-pickle", false, Preferences::Provider::DeepSeek,
-            32000, 200000};
+    return {"https://api.kilo.ai/api/gateway/chat/completions",
+            "kilo-auto/free", false, Preferences::Provider::DeepSeek,
+            32000, 256000};
 }
 
 // "deepseek-v4.1-flash" -> "DeepSeek V4.1 Flash".
@@ -1940,7 +1943,7 @@ void ChatFrame::OnModelChoice(wxCommandEvent& evt) {
 void ChatFrame::RebuildModelChoice() {
     if (!modelChoice_) return;
     modelChoice_->Clear();
-    modelChoice_->Append("OpenCode Free");
+    modelChoice_->Append("Kilo Free");
     // DeepSeek models come from one source only: the live list when the
     // fetch succeeded, the hardcoded fallback otherwise. They are never
     // concatenated, so a renamed model can't show up twice.
@@ -1952,7 +1955,7 @@ void ChatFrame::RebuildModelChoice() {
     // currentModelIndex_ is the *desired* selection and may index a dynamic
     // entry that hasn't arrived yet (or just disappeared). Clamp only for
     // display so the dropdown never renders unselected; routing falls back
-    // to OpenCode Free for an out-of-range index.
+    // to Kilo Free for an out-of-range index.
     int sel = currentModelIndex_;
     int count = (int)modelChoice_->GetCount();
     if (sel < 0 || sel >= count) sel = 0;
@@ -3390,12 +3393,6 @@ void ChatFrame::DoSendActualRequest() {
     spec.body = std::move(body);
     spec.bodyContentType = "application/json";
     spec.headers.push_back({"Accept", "text/event-stream"});
-    // OpenCode's free-tier models gate capacity by User-Agent: the official
-    // TUI sends "opencode/<version>" and other UAs get 429 FreeUsageLimitError.
-    // Match it so the no-key free model works from a custom client.
-    if (!route.needsApiKey && std::string(route.url).find("opencode.ai/zen") != std::string::npos) {
-        spec.headers.push_back({"User-Agent", "opencode/1.18.16"});
-    }
     if (route.needsApiKey) {
         spec.headers.push_back({"Authorization",
                                 "Bearer " + std::string(apiKey.utf8_string())});
@@ -4275,12 +4272,6 @@ void ChatFrame::RunSummaryThenSend(int splitIdx) {
     spec.body = std::move(body);
     spec.bodyContentType = "application/json";
     spec.headers.push_back({"Accept", "text/event-stream"});
-    // OpenCode's free-tier models gate capacity by User-Agent: the official
-    // TUI sends "opencode/<version>" and other UAs get 429 FreeUsageLimitError.
-    // Match it so the no-key free model works from a custom client.
-    if (!route.needsApiKey && std::string(route.url).find("opencode.ai/zen") != std::string::npos) {
-        spec.headers.push_back({"User-Agent", "opencode/1.18.16"});
-    }
     if (route.needsApiKey) {
         spec.headers.push_back({"Authorization",
                                 "Bearer " + std::string(apiKey.utf8_string())});

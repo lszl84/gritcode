@@ -23,7 +23,7 @@
       like OpenCode, Claude Code, and Codex. Built with C++20 and wxWidgets.
     </p>
     <p>
-      Supports DeepSeek V4 (API key) or the free OpenCode Zen tier.
+      Supports DeepSeek V4 (API key) or free models via the Kilo Gateway.
     </p>
   </description>
 

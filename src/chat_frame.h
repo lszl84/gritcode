@@ -101,7 +101,7 @@ private:
     // not required for normal chat.
     MemoryDB memory_;
 
-    // Selected model dropdown index. 0 is OpenCode Free; indices >= 1 map
+    // Selected model dropdown index. 0 is Kilo Free; indices >= 1 map
     // into remoteModels_ (the DeepSeek model list). remoteModels_ is the live
     // GET /models result when available, otherwise empty — and an empty list
     // means the dropdown uses the hardcoded DeepSeek fallback instead. The
@@ -235,7 +235,7 @@ private:
     void OnSessionChoice(wxCommandEvent&);
     void OnModelChoice(wxCommandEvent&);
     void OnModelContextMenu(wxContextMenuEvent&);
-    // Rebuild the model dropdown: OpenCode Free plus the DeepSeek list
+    // Rebuild the model dropdown: Kilo Free plus the DeepSeek list
     // (live remoteModels_ when present, hardcoded fallback otherwise).
     void RebuildModelChoice();
     // Fetch the DeepSeek model catalog (GET /models) on a worker thread and

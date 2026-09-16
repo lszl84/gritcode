@@ -26,7 +26,7 @@ public:
 
     // Resolves the effective model index. If the user has never explicitly
     // picked a model, defaults to DeepSeek Pro (2) when an API key is stored,
-    // otherwise OpenCode Free (0). Once the user changes the dropdown, that
+    // otherwise Kilo Free (0). Once the user changes the dropdown, that
     // choice sticks permanently.
     static int  GetLastModelIndex();
     static void SetLastModelIndex(int idx);

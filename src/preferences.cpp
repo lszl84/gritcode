@@ -75,7 +75,7 @@ int Preferences::GetLastModelIndex() {
     if (!explicitChoice) {
         // User never changed the dropdown — pick the best available model.
         if (HasApiKey(Provider::DeepSeek)) return 2;  // DeepSeek Pro
-        return 0;  // OpenCode Free (no key, only option that works)
+        return 0;  // Kilo Free (no key, only option that works)
     }
 
     long v = 0;

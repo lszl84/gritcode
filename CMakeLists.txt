@@ -336,7 +336,7 @@ else()
  size of Electron-based alternatives like OpenCode, Claude Code,
  and Codex.
  .
- Supports DeepSeek V4 and the free OpenCode Zen tier.")
+ Supports DeepSeek V4 and free models via the Kilo Gateway.")
 
     # --- DEB control extras ---
     # Generate a minimal changelog at configure time.

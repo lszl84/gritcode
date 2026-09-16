@@ -53,7 +53,7 @@ struct MCPCallbacks {
     // Interactive new-session flow goes through the directory dialog instead.
     std::function<nlohmann::json()> newSession;
 
-    // Set the active model by dropdown index (0=OpenCode Free, 1=DeepSeek
+    // Set the active model by dropdown index (0=Kilo Free, 1=DeepSeek
     // Flash, 2=DeepSeek Pro). Persists via wxConfig. Returns {ok, modelIndex}.
     // Test hook for driving the provider switch programmatically.
     std::function<nlohmann::json(int)> setModel;

@@ -4,7 +4,7 @@
 
 **[gritcode.ai](https://gritcode.ai)** · [Download](https://github.com/lszl84/gritcode/releases/latest) · [Features](https://gritcode.ai/features/) · [Compare](https://gritcode.ai/compare/) · [♥ Sponsor](https://gritcode.ai/sponsor/)
 
-Runs [DeepSeek](https://platform.deepseek.com/) V4 Pro and V4.1 Flash with your API key, or the free [OpenCode Zen](https://opencode.ai/zen) tier with no key and no sign-up.
+Runs [DeepSeek](https://platform.deepseek.com/) V4 Pro and V4.1 Flash with your API key, or free models through the [Kilo Gateway](https://kilo.ai/docs/gateway) with no key and no sign-up.
 
 ![Gritcode: importing a .gritsession and replaying its prompts in a new project (2× speed)](assets/screencast-clip.gif)
 
@@ -62,7 +62,7 @@ On other Linux distributions, install the equivalent development packages for wx
 
 ## API keys
 
-Click the ⚙ gear button in the bottom toolbar to open Settings, then paste your DeepSeek API key ([get one here](https://platform.deepseek.com/)). Keys are stored in the OS keyring: the macOS Keychain or the Linux Secret Service. OpenCode Free needs no key.
+Click the ⚙ gear button in the bottom toolbar to open Settings, then paste your DeepSeek API key ([get one here](https://platform.deepseek.com/)). Keys are stored in the OS keyring: the macOS Keychain or the Linux Secret Service. Kilo Free needs no key.
 
 ## Support Gritcode
 
