@@ -30,6 +30,9 @@ const TSLanguage *tree_sitter_css(void);
 const TSLanguage *tree_sitter_javascript(void);
 const TSLanguage *tree_sitter_markdown(void);
 const TSLanguage *tree_sitter_markdown_inline(void);
+const TSLanguage *tree_sitter_c(void);
+const TSLanguage *tree_sitter_cpp(void);
+const TSLanguage *tree_sitter_cmake(void);
 }
 
 namespace syntax {
@@ -279,6 +282,144 @@ Lang Javascript() {
     return l;
 }
 
+Lang C() {
+    Lang l;
+    l.language = tree_sitter_c();
+    static const char *const com[] = {"comment"};
+    static const char *const str[] = {"string_literal", "char_literal",
+                                      "system_lib_string", "concatenated_string"};
+    static const char *const num[] = {"number_literal"};
+    static const char *const kw[] = {
+        "if", "else", "for", "while", "do", "switch", "case", "default",
+        "break", "continue", "return", "goto", "sizeof",
+        "struct", "union", "enum", "typedef", "extern", "static", "const",
+        "volatile", "register", "auto", "inline", "restrict", "signed",
+        "unsigned", "alignas", "alignof", "noreturn", "thread_local", "asm",
+        "primitive_type", "sized_type_specifier", "storage_class_specifier",
+        "type_qualifier", "alignas_qualifier"};
+    static const char *const con[] = {"true", "false", "nullptr", "null", "NULL"};
+    static const char *const typ[] = {"type_identifier", "type_descriptor"};
+    static const char *const dec[] = {
+        "preproc_include", "preproc_def", "preproc_function_def",
+        "preproc_call", "preproc_if", "preproc_ifdef", "preproc_elif",
+        "preproc_elifdef", "preproc_else", "preproc_directive",
+        "preproc_defined", "attribute_specifier", "attribute_declaration"};
+    static const char *const skip[] = {
+        "comment", "string_literal", "char_literal", "system_lib_string",
+        "concatenated_string", "number_literal"};
+    static const char *const names[] = {"identifier"};
+    Add(l.keyword, kw);
+    Add(l.comment, com);
+    Add(l.string, str);
+    Add(l.number, num);
+    Add(l.constant, con);
+    Add(l.type, typ);
+    Add(l.decor, dec);
+    Add(l.skip, skip);
+    Add(l.nameTypes, names);
+    l.nameParent["function_declarator"] = Cat::Func;
+    l.nameParent["preproc_function_def"] = Cat::Func;
+    l.nameParent["type_definition"] = Cat::Type;
+    l.nameParent["struct_specifier"] = Cat::Type;
+    l.nameParent["union_specifier"] = Cat::Type;
+    l.nameParent["enum_specifier"] = Cat::Type;
+    return l;
+}
+
+Lang Cpp() {
+    Lang l;
+    l.language = tree_sitter_cpp();
+    static const char *const com[] = {"comment"};
+    static const char *const str[] = {"string_literal", "char_literal",
+                                      "system_lib_string", "concatenated_string",
+                                      "raw_string_literal"};
+    static const char *const num[] = {"number_literal"};
+    static const char *const kw[] = {
+        "if", "else", "for", "while", "do", "switch", "case", "default",
+        "break", "continue", "return", "goto", "sizeof",
+        "new", "delete", "class", "struct", "union", "enum",
+        "template", "typename", "namespace", "using",
+        "public", "private", "protected", "virtual", "override", "final",
+        "static", "const", "constexpr", "consteval", "constinit", "inline",
+        "explicit", "friend", "mutable", "volatile", "register",
+        "thread_local", "alignas", "alignof", "decltype", "auto", "this",
+        "throw", "try", "catch", "noexcept", "extern", "typedef",
+        "static_cast", "dynamic_cast", "const_cast", "reinterpret_cast",
+        "operator", "co_await", "co_return", "co_yield",
+        "and", "or", "not", "xor", "bitand", "bitor", "compl",
+        "and_eq", "or_eq", "not_eq", "xor_eq",
+        "requires", "concept", "export", "module", "import",
+        "primitive_type", "sized_type_specifier", "storage_class_specifier",
+        "type_qualifier", "access_specifier", "alignas_qualifier",
+        "virtual_specifier", "explicit_function_specifier"};
+    static const char *const con[] = {"true", "false", "nullptr", "null", "NULL"};
+    static const char *const typ[] = {
+        "type_identifier", "namespace_identifier", "type_descriptor",
+        "template_type", "qualified_identifier", "dependent_type",
+        "placeholder_type_specifier"};
+    static const char *const func[] = {"destructor_name", "operator_name"};
+    static const char *const dec[] = {
+        "preproc_include", "preproc_def", "preproc_function_def",
+        "preproc_call", "preproc_if", "preproc_ifdef", "preproc_elif",
+        "preproc_elifdef", "preproc_else", "preproc_directive",
+        "preproc_defined", "attribute_specifier", "attribute_declaration"};
+    static const char *const skip[] = {
+        "comment", "string_literal", "char_literal", "system_lib_string",
+        "concatenated_string", "raw_string_literal", "number_literal"};
+    static const char *const names[] = {"identifier", "field_identifier"};
+    Add(l.keyword, kw);
+    Add(l.comment, com);
+    Add(l.string, str);
+    Add(l.number, num);
+    Add(l.constant, con);
+    Add(l.type, typ);
+    Add(l.func, func);
+    Add(l.decor, dec);
+    Add(l.skip, skip);
+    Add(l.nameTypes, names);
+    l.nameParent["function_declarator"] = Cat::Func;
+    l.nameParent["template_function"] = Cat::Func;
+    l.nameParent["template_method"] = Cat::Func;
+    l.nameParent["preproc_function_def"] = Cat::Func;
+    l.nameParent["class_specifier"] = Cat::Type;
+    l.nameParent["struct_specifier"] = Cat::Type;
+    l.nameParent["union_specifier"] = Cat::Type;
+    l.nameParent["enum_specifier"] = Cat::Type;
+    l.nameParent["namespace_definition"] = Cat::Type;
+    l.nameParent["type_definition"] = Cat::Type;
+    return l;
+}
+
+Lang Cmake() {
+    Lang l;
+    l.language = tree_sitter_cmake();
+    static const char *const com[] = {"line_comment", "bracket_comment"};
+    static const char *const str[] = {"quoted_argument", "bracket_argument",
+                                      "bracket_argument_content"};
+    static const char *const kw[] = {
+        "if", "elseif", "else", "endif",
+        "foreach", "endforeach", "while", "endwhile",
+        "function", "endfunction", "macro", "endmacro",
+        "block", "endblock"};
+    static const char *const dec[] = {
+        "variable_ref", "normal_var", "cache_var", "env_var",
+        "bracket_argument_open", "bracket_argument_close"};
+    static const char *const skip[] = {
+        "line_comment", "bracket_comment", "quoted_argument",
+        "bracket_argument", "bracket_argument_content"};
+    static const char *const names[] = {"identifier"};
+    Add(l.comment, com);
+    Add(l.string, str);
+    Add(l.keyword, kw);
+    Add(l.decor, dec);
+    Add(l.skip, skip);
+    Add(l.nameTypes, names);
+    // normal_command is `name (args)`: its identifier child is the command
+    // name (add_executable, set, message, …).
+    l.nameParent["normal_command"] = Cat::Func;
+    return l;
+}
+
 Lang MarkdownBlock() {
     Lang l;
     l.language = tree_sitter_markdown();
@@ -347,6 +488,23 @@ const Lang &LangFor(std::string_view path) {
     static const Lang css = Css();
     static const Lang js = Javascript();
     static const Lang md = MarkdownBlock();
+    static const Lang c = C();
+    static const Lang cpp = Cpp();
+    static const Lang cmake = Cmake();
+
+    // CMakeLists.txt has a ".txt" extension that would otherwise be
+    // unhighlighted; match it by basename (case-insensitive) first.
+    size_t slash = path.find_last_of("/\\");
+    std::string_view base =
+        slash == std::string_view::npos ? path : path.substr(slash + 1);
+    if (base.size() == 14) {  // "CMakeLists.txt"
+        std::string b(base);
+        std::transform(b.begin(), b.end(), b.begin(),
+                       [](unsigned char c) { return (char)std::tolower(c); });
+        if (b == "cmakelists.txt")
+            return cmake;
+    }
+
     // Lowercased extension match.
     size_t dot = path.find_last_of('.');
     if (dot != std::string_view::npos) {
@@ -363,6 +521,13 @@ const Lang &LangFor(std::string_view path) {
             return js;
         if (ext == ".md" || ext == ".markdown")
             return md;
+        if (ext == ".c" || ext == ".h")
+            return c;
+        if (ext == ".cc" || ext == ".cpp" || ext == ".cxx" || ext == ".hpp" ||
+            ext == ".hh" || ext == ".hxx" || ext == ".ixx" || ext == ".ipp")
+            return cpp;
+        if (ext == ".cmake")
+            return cmake;
     }
     // Unknown language: return a default-constructed Lang with language ==
     // nullptr so callers can skip parsing.

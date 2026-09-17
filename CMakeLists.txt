@@ -84,7 +84,7 @@ else()
 endif()
 
 # ---- tree-sitter (editor syntax highlighting) ----
-# Core runtime plus five grammars. The grammars are compiled into a small
+# Core runtime plus eight grammars. The grammars are compiled into a small
 # static library below; their repos are fetched for the generated sources only.
 set(BUILD_SHARED_LIBS OFF CACHE BOOL "" FORCE)
 # tree-sitter's CMake installs its headers + static lib unconditionally; without
@@ -136,7 +136,28 @@ FetchContent_Declare(
     GIT_TAG v0.3.2
     GIT_SHALLOW ON
 )
-FetchContent_MakeAvailable(ts_python ts_html ts_css ts_javascript ts_markdown)
+FetchContent_Declare(
+    ts_c
+    GIT_REPOSITORY https://github.com/tree-sitter/tree-sitter-c.git
+    GIT_TAG v0.24.2
+    GIT_SHALLOW ON
+    SOURCE_SUBDIR src
+)
+FetchContent_Declare(
+    ts_cpp
+    GIT_REPOSITORY https://github.com/tree-sitter/tree-sitter-cpp.git
+    GIT_TAG v0.23.4
+    GIT_SHALLOW ON
+    SOURCE_SUBDIR src
+)
+FetchContent_Declare(
+    ts_cmake
+    GIT_REPOSITORY https://github.com/uyha/tree-sitter-cmake.git
+    GIT_TAG v0.7.5
+    GIT_SHALLOW ON
+    SOURCE_SUBDIR src
+)
+FetchContent_MakeAvailable(ts_python ts_html ts_css ts_javascript ts_markdown ts_c ts_cpp ts_cmake)
 
 set(SYNTAX_GRAMMAR_SOURCES
     ${ts_python_SOURCE_DIR}/src/parser.c
@@ -151,6 +172,11 @@ set(SYNTAX_GRAMMAR_SOURCES
     ${ts_markdown_SOURCE_DIR}/tree-sitter-markdown/src/scanner.c
     ${ts_markdown_SOURCE_DIR}/tree-sitter-markdown-inline/src/parser.c
     ${ts_markdown_SOURCE_DIR}/tree-sitter-markdown-inline/src/scanner.c
+    ${ts_c_SOURCE_DIR}/src/parser.c
+    ${ts_cpp_SOURCE_DIR}/src/parser.c
+    ${ts_cpp_SOURCE_DIR}/src/scanner.c
+    ${ts_cmake_SOURCE_DIR}/src/parser.c
+    ${ts_cmake_SOURCE_DIR}/src/scanner.c
 )
 add_library(syntax_grammars STATIC ${SYNTAX_GRAMMAR_SOURCES})
 target_include_directories(syntax_grammars PRIVATE
@@ -160,6 +186,9 @@ target_include_directories(syntax_grammars PRIVATE
     ${ts_javascript_SOURCE_DIR}/src
     ${ts_markdown_SOURCE_DIR}/tree-sitter-markdown/src
     ${ts_markdown_SOURCE_DIR}/tree-sitter-markdown-inline/src
+    ${ts_c_SOURCE_DIR}/src
+    ${ts_cpp_SOURCE_DIR}/src
+    ${ts_cmake_SOURCE_DIR}/src
 )
 # Generated parsers intentionally trip warnings we can't fix; silence them.
 target_compile_options(syntax_grammars PRIVATE -w)
