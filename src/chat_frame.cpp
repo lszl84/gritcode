@@ -659,6 +659,7 @@ ChatFrame::ChatFrame()
     auto* outer = new wxBoxSizer(wxVERTICAL);
 
     canvas_ = new ChatCanvas(panel);
+    canvas_->Bind(wxEVT_CANVAS_LINK, &ChatFrame::OnCanvasLink, this);
     outer->Add(canvas_, 1, wxEXPAND);
 
     // Toolbar row below the input:
@@ -2178,6 +2179,13 @@ void ChatFrame::OnSettings(wxCommandEvent&) {
     FetchRemoteModelsAsync();
 }
 
+void ChatFrame::OnCanvasLink(wxCommandEvent& e) {
+    if (e.GetString() == "gritcode://settings") {
+        wxCommandEvent ev;
+        OnSettings(ev);
+    }
+}
+
 void ChatFrame::OnHamburger(wxCommandEvent&) {
     // The chat pane keeps its current width; only the window grows/shrinks.
     int centerW = mainPanel_->GetSize().x;
@@ -2421,6 +2429,11 @@ static bool IsSymlink(const wxString& path) {
 
 void ChatFrame::AddWatchRecursive(const wxString& dir, int depth) {
     if (!fileWatcher_ || depth > 12) return;
+    // The session directory may have been deleted since it was opened (or a
+    // subdir removed between the walk and the watch); wxFileSystemWatcher's
+    // inotify backend logs "Unable to add inotify watch" for a missing path.
+    // Skip it — an empty/deleted tree is handled elsewhere.
+    if (!wxDirExists(dir)) return;
     fileWatcher_->Add(wxFileName(dir));
 
     wxDir d;
@@ -2435,7 +2448,8 @@ void ChatFrame::AddWatchRecursive(const wxString& dir, int depth) {
         const bool skip = !name.empty() &&
             (name[0] == '.' || lower == "node_modules" ||
              lower == "build" || lower == "dist" || lower == "target" ||
-             lower == "__pycache__");
+             lower == "__pycache__" || lower == "venv" ||
+             lower == "site-packages");
         wxString full = dir + wxFILE_SEP_PATH + name;
         if (!skip && !IsSymlink(full))
             AddWatchRecursive(full, depth + 1);
@@ -3803,6 +3817,16 @@ void ChatFrame::OnStreamDone(WebResponse resp) {
             }
         }
 
+        // No-key free model that stopped responding: the transport failed
+        // (timeout, reset, closed mid-stream, unreachable, …). Show a friendly
+        // explanation + a link to Settings instead of a raw curl error, so it
+        // doesn't read as a gritcode failure.
+        ModelRoute route = RouteForIndex(currentModelIndex_, remoteModels_);
+        if (!route.needsApiKey && resp.networkError) {
+            HandleCompletion(wxString(), /*freeModelStall=*/true);
+            return;
+        }
+
         wxString detail;
         if (resp.status > 0) {
             detail = FormatU8("Error: HTTP {}", resp.status);
@@ -3839,14 +3863,16 @@ wxString ChatFrame::ExtractErrorBody() const {
     return wxString::FromUTF8(body);
 }
 
-void ChatFrame::HandleCompletion(const wxString& errorIfFailed) {
+void ChatFrame::HandleCompletion(const wxString& errorIfFailed,
+                                 bool freeModelStall) {
     // Pure-reasoning response (model returned reasoning_content but no content
     // or tool_calls): emit the thinking block here so the user sees what the
     // model produced. No-op if a prior content/tool delta already emitted it.
     EmitPendingThinking();
 
-    if (!errorIfFailed.IsEmpty()) {
-        RenderErrorBlock(errorIfFailed);
+    if (!errorIfFailed.IsEmpty() || freeModelStall) {
+        if (freeModelStall) RenderFreeModelStallNotice();
+        else RenderErrorBlock(errorIfFailed);
         // Roll back the failed turn from history_: drop any tool messages plus
         // the trailing user message that triggered this turn. Without this,
         // every retry would carry a growing tail of orphan user messages and
@@ -4102,6 +4128,32 @@ void ChatFrame::RenderErrorBlock(const wxString& msg) {
     b.visibleText = msg;
     InlineRun r; r.text = msg; r.italic = true;
     b.runs.push_back(r);
+    canvas_->AddBlock(std::move(b));
+}
+
+void ChatFrame::RenderFreeModelStallNotice() {
+    wxString text =
+        "The free model stopped responding. Free models can lose their "
+        "connection from time to time. For a reliable experience, set up "
+        "DeepSeek, or just retry. ";
+    wxString linkText = "Open Settings";
+
+    Block b;
+    b.type = BlockType::Paragraph;
+    b.rawText = text + linkText;
+    b.visibleText = text + linkText;
+
+    InlineRun r1;
+    r1.text = text;
+    r1.italic = true;
+    b.runs.push_back(r1);
+
+    InlineRun r2;
+    r2.text = linkText;
+    r2.bold = true;
+    r2.link = "gritcode://settings";
+    b.runs.push_back(r2);
+
     canvas_->AddBlock(std::move(b));
 }
 

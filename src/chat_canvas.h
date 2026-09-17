@@ -27,6 +27,11 @@ struct Palette {
     wxColour linkColour;       // hyperlink text colour (blue, underlined)
 };
 
+// Posted when a link with a gritcode:// scheme is clicked (e.g.
+// gritcode://settings). The URL is carried in the event's string. Regular
+// http(s) links still open in the default browser.
+wxDECLARE_EVENT(wxEVT_CANVAS_LINK, wxCommandEvent);
+
 // Custom-painted scrolling canvas that owns a vector<Block> and renders it
 // markdown-style. Blocks are immutable once added; selection state is tracked
 // as (blockIdx, charOffset-in-visibleText) anchor + caret pairs.

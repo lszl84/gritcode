@@ -245,6 +245,7 @@ private:
     void FetchRemoteModelsAsync();
     void OnRemoteModelsFetched(std::vector<std::string> models);
     void OnSettings(wxCommandEvent&);
+    void OnCanvasLink(wxCommandEvent& e);
     void OnPlay(wxCommandEvent&);
     void OnExport(wxCommandEvent&);
     void OnHamburger(wxCommandEvent&);
@@ -456,8 +457,11 @@ private:
     bool ForceCompactForOverflow();
 
     // After State_Completed: if any tool_calls were accumulated, dispatch them
-    // and continue; otherwise finalize the turn.
-    void HandleCompletion(const wxString& errorIfFailed);
+    // and continue; otherwise finalize the turn. freeModelStall renders the
+    // friendly "free model stopped responding" notice instead of a generic
+    // error (same history rollback + finalize path).
+    void HandleCompletion(const wxString& errorIfFailed,
+                          bool freeModelStall = false);
     // wasCancelledOrError=true (any failure path) lands us in idle-queue
     // mode if the queue is non-empty so the user decides whether to
     // Continue. Default false (natural completion) auto-dispatches.
@@ -467,6 +471,9 @@ private:
                          const std::string& argsJson,
                          const std::string& result);
     void RenderErrorBlock(const wxString& msg);
+    // Inline notice for when the no-key free model stalls: explains it's the
+    // free tier, recommends DeepSeek, and links to Settings.
+    void RenderFreeModelStallNotice();
     // Append a thinking block to the canvas. Always starts collapsed.
     // Empty text is a no-op (a model can advertise reasoning_content but
     // send nothing).

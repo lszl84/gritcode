@@ -17,6 +17,8 @@
 #include "mac_style.h"
 #endif
 
+wxDEFINE_EVENT(wxEVT_CANVAS_LINK, wxCommandEvent);
+
 namespace {
 
 constexpr int kSideMargin    = 24;
@@ -2317,10 +2319,18 @@ void ChatCanvas::OnLeftDown(wxMouseEvent& e) {
         return;
     }
 
-    // Link click: open in browser, don't start a selection.
+    // Link click: open in browser, don't start a selection. gritcode:// links
+    // are internal actions (e.g. open Settings) — route them to the app.
     wxString linkUrl = LinkUrlAt(hp);
     if (!linkUrl.IsEmpty()) {
-        wxLaunchDefaultBrowser(linkUrl);
+        if (linkUrl.StartsWith("gritcode://")) {
+            wxCommandEvent ev(wxEVT_CANVAS_LINK, GetId());
+            ev.SetString(linkUrl);
+            ev.SetEventObject(this);
+            wxPostEvent(this, ev);
+        } else {
+            wxLaunchDefaultBrowser(linkUrl);
+        }
         return;
     }
 

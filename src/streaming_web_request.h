@@ -18,6 +18,10 @@ struct WebResponse {
     std::string contentType;  // lowercased
     std::string body;
     std::string error;
+    // True when the request failed at the transport level (timeout, reset,
+    // closed mid-stream, unreachable, …) rather than with an HTTP error.
+    // Distinct from `error == "cancelled"`.
+    bool networkError = false;
 };
 
 struct WebRequestSpec {

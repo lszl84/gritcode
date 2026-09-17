@@ -132,9 +132,10 @@ WebResponse RequestSync(WebRequestSpec spec, WebCancelToken* token) {
         resp.ok = (status >= 200 && status < 400);
         if (!resp.ok) resp.error = "HTTP " + std::to_string(status);
     } else {
-        resp.error = (token && token->cancelled.load())
-            ? std::string("cancelled")
-            : std::string(curl_easy_strerror(rc));
+        bool cancelled = token && token->cancelled.load();
+        resp.error = cancelled ? std::string("cancelled")
+                               : std::string(curl_easy_strerror(rc));
+        if (!cancelled) resp.networkError = true;
     }
 
     if (hdrs) curl_slist_free_all(hdrs);
@@ -229,9 +230,10 @@ StreamingWebRequest::StreamingWebRequest(wxEvtHandler* target,
                 resp.ok = (status >= 200 && status < 400);
                 if (!resp.ok) resp.error = "HTTP " + std::to_string(status);
             } else {
-                resp.error = impl->cancelled.load()
-                    ? std::string("cancelled")
-                    : std::string(curl_easy_strerror(rc));
+                bool cancelled = impl->cancelled.load();
+                resp.error = cancelled ? std::string("cancelled")
+                                       : std::string(curl_easy_strerror(rc));
+                if (!cancelled) resp.networkError = true;
             }
 
             if (hdrs) curl_slist_free_all(hdrs);
