@@ -37,6 +37,7 @@
 #include <wx/filefn.h>
 #include <wx/utils.h>
 #include <wx/textdlg.h>
+#include <wx/tokenzr.h>
 #include <algorithm>
 #include <cctype>
 #include <map>
@@ -80,6 +81,7 @@ constexpr int ID_TREE_NEW_FILE      = wxID_HIGHEST + 17;
 constexpr int ID_TREE_RENAME        = wxID_HIGHEST + 18;
 constexpr int ID_TREE_SHOW_IN_FILES = wxID_HIGHEST + 19;
 constexpr int ID_TREE_NEW_FOLDER    = wxID_HIGHEST + 20;
+constexpr int ID_TREE_REFRESH       = wxID_HIGHEST + 21;
 constexpr int ID_EDITOR_SAVE        = wxID_HIGHEST + 21;
 constexpr int ID_EDITOR_SAVE_AS     = wxID_HIGHEST + 22;
 constexpr int ID_EDITOR_RELOAD      = wxID_HIGHEST + 23;
@@ -826,6 +828,10 @@ ChatFrame::ChatFrame()
     highlightTimer_ = new wxTimer(this);
     Bind(wxEVT_TIMER, &ChatFrame::OnHighlightTimer, this, highlightTimer_->GetId());
 
+    treeRefreshTimer_ = new wxTimer(this);
+    Bind(wxEVT_TIMER, &ChatFrame::OnTreeRefreshTimer, this,
+         treeRefreshTimer_->GetId());
+
     // Left/right padding matches the other panes; the tree and editor sit
     // flush against each other with no sash between them.
     editorSizer->Add(treePane, 0, wxEXPAND | wxLEFT, FromDIP(kEdgePad));
@@ -970,6 +976,13 @@ ChatFrame::ChatFrame()
     ChdirToCwd(activeCwd_);
     RefreshSessionChoice();
     PopulateEditorTree();
+    // Some watcher backends need a running event loop before they initialise,
+    // so defer setup until after OnInit returns. Harmless where it isn't
+    // needed — it just starts one loop iteration later.
+    CallAfter([this]() {
+        if (destroying_.load()) return;
+        SetupFsWatcher();
+    });
 
     // Large sessions show a centered placeholder first and render the canvas
     // after that placeholder has actually painted (the canvas invokes the
@@ -997,10 +1010,12 @@ ChatFrame::ChatFrame()
     fileTree_->Bind(wxEVT_TREE_ITEM_EXPANDING, &ChatFrame::OnEditorTreeExpanding, this);
     fileTree_->Bind(wxEVT_TREE_SEL_CHANGED, &ChatFrame::OnEditorTreeSelect, this);
     fileTree_->Bind(wxEVT_CONTEXT_MENU, &ChatFrame::OnEditorTreeContextMenu, this);
+    Bind(wxEVT_FSWATCHER, &ChatFrame::OnFsWatcherEvent, this);
     Bind(wxEVT_MENU, &ChatFrame::OnTreeNewFile, this, ID_TREE_NEW_FILE);
     Bind(wxEVT_MENU, &ChatFrame::OnTreeNewFolder, this, ID_TREE_NEW_FOLDER);
     Bind(wxEVT_MENU, &ChatFrame::OnTreeRename, this, ID_TREE_RENAME);
     Bind(wxEVT_MENU, &ChatFrame::OnTreeShowInFiles, this, ID_TREE_SHOW_IN_FILES);
+    Bind(wxEVT_MENU, &ChatFrame::OnTreeRefresh, this, ID_TREE_REFRESH);
     Bind(wxEVT_MENU, &ChatFrame::OnEditorSave, this, ID_EDITOR_SAVE);
     Bind(wxEVT_MENU, &ChatFrame::OnEditorSaveAs, this, ID_EDITOR_SAVE_AS);
     Bind(wxEVT_MENU, &ChatFrame::OnEditorReload, this, ID_EDITOR_RELOAD);
@@ -1458,6 +1473,8 @@ ChatFrame::~ChatFrame() {
     destroying_.store(true);
     mcp_.Stop();
     request_.Cancel();
+    delete fileWatcher_;  // stop filesystem watches (own their thread)
+    fileWatcher_ = nullptr;
     // ~StreamingWebRequest joins the worker thread, so by the time we return
     // no more callbacks can be posted.
 
@@ -1748,6 +1765,7 @@ void ChatFrame::CreateNewSession() {
     RestoreCanvasMaybeDeferred();
     RefreshSessionChoice();
     PopulateEditorTree();
+    SetupFsWatcher();
 }
 
 bool ChatFrame::SwitchToCwd(const std::string& cwd) {
@@ -1774,6 +1792,7 @@ bool ChatFrame::SwitchToCwd(const std::string& cwd) {
     RestoreCanvasMaybeDeferred();
     RefreshSessionChoice();
     PopulateEditorTree();
+    SetupFsWatcher();
     return true;
 }
 
@@ -2183,6 +2202,10 @@ void ChatFrame::OnEditorToggle(wxCommandEvent&) {
         SyncPanelSizing(centerW);
     } else {
         editorPanel_->Show();
+        // The agent (or an external tool) may have created/deleted files since
+        // the tree was last populated — re-read disk before the pane appears.
+        ReloadTreeKeepExpanded();
+        CheckEditorFileChangedOnDisk();
         // Grow the window first so the inner splitter can be split with the
         // chat pane at its exact current width. Splitting first would force a
         // clamped transient sash, and with default gravity the chat pane
@@ -2279,6 +2302,173 @@ void ChatFrame::PopulateTreeDir(wxTreeItemId parent, const wxString& path) {
     }
 }
 
+void ChatFrame::ReloadTreeKeepExpanded() {
+    if (!fileTree_) return;
+
+    // Snapshot the expanded directories and current selection, rebuild from
+    // disk, then restore both (where the paths still exist).
+    std::vector<wxString> expanded;
+    CollectExpandedPaths(fileTree_->GetRootItem(), expanded);
+    wxString selPath = GetSelectedTreePath();
+
+    PopulateEditorTree();
+
+    std::set<wxString> populated;
+    if (!activeCwd_.empty()) populated.insert(wxString::FromUTF8(activeCwd_));
+    for (const auto& p : expanded) ExpandPathTo(p, populated);
+
+    if (!selPath.empty()) {
+        wxTreeItemId it = FindTreeItemByPath(fileTree_->GetRootItem(), selPath);
+        if (it.IsOk()) {
+            // Selecting a file here must not behave like a user click (open
+            // it / prompt to save). Suppress the SEL_CHANGED handler.
+            treeSelectionRestoring_ = true;
+            fileTree_->SelectItem(it);
+            treeSelectionRestoring_ = false;
+        }
+    }
+}
+
+void ChatFrame::CollectExpandedPaths(wxTreeItemId parent,
+                                     std::vector<wxString>& out) {
+    wxTreeItemIdValue cookie;
+    for (wxTreeItemId c = fileTree_->GetFirstChild(parent, cookie);
+         c.IsOk(); c = fileTree_->GetNextChild(parent, cookie)) {
+        if (fileTree_->IsExpanded(c)) {
+            auto* d = dynamic_cast<FileTreeItemData*>(fileTree_->GetItemData(c));
+            if (d) out.push_back(d->path);
+            CollectExpandedPaths(c, out);
+        }
+    }
+}
+
+wxString ChatFrame::GetSelectedTreePath() const {
+    if (!fileTree_) return wxString();
+    wxTreeItemId sel = fileTree_->GetSelection();
+    auto* d = sel.IsOk()
+        ? dynamic_cast<FileTreeItemData*>(fileTree_->GetItemData(sel)) : nullptr;
+    return d ? d->path : wxString();
+}
+
+void ChatFrame::ExpandPathTo(const wxString& path, std::set<wxString>& populated) {
+    if (!fileTree_ || activeCwd_.empty() || path.empty()) return;
+    wxString root = wxString::FromUTF8(activeCwd_);
+    if (path == root || !path.StartsWith(root)) return;
+
+    wxTreeItemId cur = fileTree_->GetRootItem();
+    if (!cur.IsOk()) return;
+
+    wxString rel = path.Mid(root.size());
+    wxStringTokenizer tok(rel, wxFILE_SEP_PATH);
+    while (tok.HasMoreTokens()) {
+        wxString seg = tok.GetNextToken();
+        if (seg.empty()) continue;
+
+        // Load + expand `cur` once, before searching for the next component.
+        // `populated` keeps a second ExpandPathTo (for a sibling branch) from
+        // re-running PopulateTreeDir and collapsing a sibling we just expanded.
+        auto* d = dynamic_cast<FileTreeItemData*>(fileTree_->GetItemData(cur));
+        if (d && d->isDir && !populated.count(d->path)) {
+            PopulateTreeDir(cur, d->path);
+            populated.insert(d->path);
+        }
+        // The hidden root is already "expanded" (its children are always
+        // visible); expanding it explicitly is harmless but pointless.
+        if (d && d->isDir && cur != fileTree_->GetRootItem())
+            fileTree_->Expand(cur);
+
+        wxTreeItemIdValue cookie;
+        wxTreeItemId next;
+        for (wxTreeItemId c = fileTree_->GetFirstChild(cur, cookie);
+             c.IsOk(); c = fileTree_->GetNextChild(cur, cookie)) {
+            if (fileTree_->GetItemText(c) == seg) { next = c; break; }
+        }
+        if (!next.IsOk()) return;  // path vanished on disk
+        cur = next;
+    }
+
+    // `cur` is the final directory (expanded paths are directories): load and
+    // expand it too.
+    auto* d = dynamic_cast<FileTreeItemData*>(fileTree_->GetItemData(cur));
+    if (d && d->isDir && !populated.count(d->path)) {
+        PopulateTreeDir(cur, d->path);
+        populated.insert(d->path);
+    }
+    if (d && d->isDir) fileTree_->Expand(cur);
+}
+
+void ChatFrame::SetupFsWatcher() {
+    delete fileWatcher_;
+    fileWatcher_ = new wxFileSystemWatcher();
+    fileWatcher_->SetOwner(this);  // events are queued on `this`
+    RescanFsWatcher();
+}
+
+void ChatFrame::RescanFsWatcher() {
+    if (!fileWatcher_) return;
+    fileWatcher_->RemoveAll();
+    if (!activeCwd_.empty())
+        AddWatchRecursive(wxString::FromUTF8(activeCwd_), 0);
+}
+
+// wxDir classifies a symlink to a directory as a directory, and the watcher
+// canonicalises paths before watching — so a symlinked dir (venv/lib64 -> lib)
+// would re-add an already-watched path and trip a backend assertion. Detect
+// symlinks through wxFileName so this stays backend-agnostic.
+static bool IsSymlink(const wxString& path) {
+    return wxFileName(path).Exists(wxFILE_EXISTS_SYMLINK);
+}
+
+void ChatFrame::AddWatchRecursive(const wxString& dir, int depth) {
+    if (!fileWatcher_ || depth > 12) return;
+    fileWatcher_->Add(wxFileName(dir));
+
+    wxDir d;
+    if (!d.Open(dir)) return;
+    wxString name;
+    bool cont = d.GetFirst(&name, wxEmptyString, wxDIR_DIRS);
+    while (cont) {
+        // Skip dot-directories (.git, .idea, …) and build-output dirs: they
+        // churn constantly and can blow the OS watch budget on large trees.
+        // Skip symlinked dirs too (they alias an already-watched path).
+        const wxString lower = name.Lower();
+        const bool skip = !name.empty() &&
+            (name[0] == '.' || lower == "node_modules" ||
+             lower == "build" || lower == "dist" || lower == "target" ||
+             lower == "__pycache__");
+        wxString full = dir + wxFILE_SEP_PATH + name;
+        if (!skip && !IsSymlink(full))
+            AddWatchRecursive(full, depth + 1);
+        cont = d.GetNext(&name);
+    }
+}
+
+void ChatFrame::OnFsWatcherEvent(wxFileSystemWatcherEvent&) {
+    // Coalesce bursts (an agent writing several files at once) into one reload.
+    if (treeRefreshTimer_) treeRefreshTimer_->Start(300, true);
+}
+
+void ChatFrame::OnTreeRefreshTimer(wxTimerEvent&) {
+    // Modal dialogs (save prompt, "changed on disk", rename, …) run a nested
+    // event loop that still delivers watcher/timer events, and they disable
+    // this frame. Defer rather than rebuild the tree (DeleteAllItems)
+    // underneath a handler that is still mid-flight; retry once the dialog
+    // closes and IsEnabled() flips back.
+    if (!IsEnabled()) {
+        if (treeRefreshTimer_) treeRefreshTimer_->Start(500, true);
+        return;
+    }
+
+    ReloadTreeKeepExpanded();
+    // Directories created since the last scan aren't watched yet.
+    RescanFsWatcher();
+    CheckEditorFileChangedOnDisk();
+}
+
+void ChatFrame::OnTreeRefresh(wxCommandEvent&) {
+    ReloadTreeKeepExpanded();
+}
+
 void ChatFrame::OnEditorTreeExpanding(wxTreeEvent& e) {
     auto* data = dynamic_cast<FileTreeItemData*>(fileTree_->GetItemData(e.GetItem()));
     if (data && data->isDir) {
@@ -2288,21 +2478,31 @@ void ChatFrame::OnEditorTreeExpanding(wxTreeEvent& e) {
 }
 
 void ChatFrame::OnEditorTreeSelect(wxTreeEvent& e) {
-    auto* data = dynamic_cast<FileTreeItemData*>(fileTree_->GetItemData(e.GetItem()));
-    if (data && !data->isDir) {
-        if (data->path != editorFilePath_) {
-            // Switching to a different file: protect unsaved changes first.
-            if (!MaybeSaveEditor()) {
-                // Cancel: put the selection back on the open file (if it is
-                // still visible in the tree), otherwise clear it.
-                wxTreeItemId prev = FindTreeItemByPath(fileTree_->GetRootItem(),
-                                                       editorFilePath_);
-                if (prev.IsOk()) fileTree_->SelectItem(prev);
-                else fileTree_->UnselectAll();
-                return;
-            }
-            LoadFileIntoEditor(data->path);
+    if (treeSelectionRestoring_) { e.Skip(); return; }
+
+    // Copy out of the item data up front. MaybeSaveEditor() shows a modal
+    // dialog whose nested event loop can trigger a background tree reload
+    // (DeleteAllItems), which would free `data`; keep only value copies alive.
+    wxString path;
+    bool isDir = true;
+    if (auto* data =
+            dynamic_cast<FileTreeItemData*>(fileTree_->GetItemData(e.GetItem()))) {
+        path = data->path;
+        isDir = data->isDir;
+    }
+
+    if (!isDir && !path.empty() && path != editorFilePath_) {
+        // Switching to a different file: protect unsaved changes first.
+        if (!MaybeSaveEditor()) {
+            // Cancel: put the selection back on the open file (if it is
+            // still visible in the tree), otherwise clear it.
+            wxTreeItemId prev = FindTreeItemByPath(fileTree_->GetRootItem(),
+                                                   editorFilePath_);
+            if (prev.IsOk()) fileTree_->SelectItem(prev);
+            else fileTree_->UnselectAll();
+            return;
         }
+        LoadFileIntoEditor(path);
     }
     e.Skip();
 }
@@ -2358,6 +2558,8 @@ void ChatFrame::ShowTreeContextMenu(wxTreeItemId item) {
     menu.AppendSeparator();
     wxMenuItem* renameItem = menu.Append(ID_TREE_RENAME, "Rename");
     wxMenuItem* showItem = menu.Append(ID_TREE_SHOW_IN_FILES, "Show in Files");
+    menu.AppendSeparator();
+    menu.Append(ID_TREE_REFRESH, "Refresh");
     if (!item.IsOk()) {
         renameItem->Enable(false);
         showItem->Enable(false);
@@ -2533,6 +2735,7 @@ void ChatFrame::LoadFileIntoEditor(const wxString& path) {
     // Default to editable; binary/too-large placeholders switch to read-only
     // below. Reset here so a failed open can't leave the editor read-only.
     codeEdit_->SetEditable(true);
+    suppressReloadPrompt_ = false;  // new file: re-arm the change prompt
 
     wxFile f(path, wxFile::read);
     if (!f.IsOpened()) return;
@@ -2574,6 +2777,58 @@ void ChatFrame::LoadFileIntoEditor(const wxString& path) {
     editorDirty_ = false;
     UpdateWindowTitle();
     syntax::Highlight(codeEdit_, path, std::string_view(buf.data(), n));
+    RecordEditorFileStamp();
+}
+
+void ChatFrame::RecordEditorFileStamp() {
+    lastFileMtime_ = wxDateTime();
+    lastFileSize_ = 0;
+    if (editorFilePath_.empty()) return;
+    wxFileName fn(editorFilePath_);
+    if (!fn.Exists()) return;
+    lastFileMtime_ = fn.GetModificationTime();
+    lastFileSize_ = fn.GetSize();
+}
+
+void ChatFrame::CheckEditorFileChangedOnDisk() {
+    if (editorFilePath_.empty()) return;
+    // Read-only placeholders (binary / too-large) aren't editable and carry
+    // no meaningful stamp, so there's nothing to reload into them.
+    if (!codeEdit_->IsEditable()) return;
+
+    wxFileName fn(editorFilePath_);
+    if (!fn.Exists()) return;  // deleted on disk: keep the buffer for Save As
+
+    wxDateTime mtime = fn.GetModificationTime();
+    wxULongLong size = fn.GetSize();
+
+    bool changed = mtime.IsValid() && lastFileMtime_.IsValid() &&
+                   (mtime != lastFileMtime_ || size != lastFileSize_);
+    if (!changed) return;
+
+    if (editorDirty_) {
+        // Ask once per conflict. The flag is set before ShowModal so the
+        // dialog's nested event loop (which keeps delivering watcher/timer
+        // events) can't re-enter here and stack another prompt on top.
+        if (suppressReloadPrompt_) return;
+        suppressReloadPrompt_ = true;
+
+        wxMessageDialog dlg(this,
+            "\"" + editorFilePath_ + "\" has changed on disk.\n\n"
+            "Reload and discard your unsaved changes?",
+            "File Changed on Disk", wxYES_NO | wxNO_DEFAULT);
+        dlg.SetYesNoLabels("Reload", "Keep My Changes");
+        if (dlg.ShowModal() != wxID_YES) {
+            // User keeps their edits: adopt the new stamp and stay suppressed
+            // until they save/reload/switch file, so later writes to the same
+            // file don't nag again.
+            RecordEditorFileStamp();
+            return;
+        }
+    }
+
+    // Clean (no unsaved edits): reload silently to reflect the disk version.
+    LoadFileIntoEditor(editorFilePath_);
 }
 
 bool ChatFrame::WriteEditorFile(const wxString& path) {
@@ -2607,6 +2862,8 @@ bool ChatFrame::SaveEditorFile() {
     }
     editorDirty_ = false;
     UpdateWindowTitle();
+    RecordEditorFileStamp();
+    suppressReloadPrompt_ = false;  // resolved: re-arm the change prompt
     return true;
 }
 
@@ -2634,6 +2891,8 @@ bool ChatFrame::SaveEditorFileAs() {
     editorFilePath_ = path;
     editorDirty_ = false;
     UpdateWindowTitle();
+    RecordEditorFileStamp();
+    suppressReloadPrompt_ = false;  // resolved: re-arm the change prompt
     return true;
 }
 
@@ -2658,6 +2917,9 @@ void ChatFrame::ClearEditorState() {
     syntax::ClearStyles(codeEdit_);
     editorFilePath_.clear();
     editorDirty_ = false;
+    suppressReloadPrompt_ = false;
+    lastFileMtime_ = wxDateTime();
+    lastFileSize_ = 0;
     UpdateWindowTitle();
 }
 

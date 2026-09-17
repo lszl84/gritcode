@@ -10,6 +10,7 @@
 #include <wx/wrapsizer.h>
 #include <wx/thread.h>
 #include <wx/timer.h>
+#include <wx/fswatcher.h>
 #include <chrono>
 #include <nlohmann/json.hpp>
 #include "chat_canvas.h"
@@ -21,6 +22,7 @@
 #include "tools.h"
 #include <atomic>
 #include <memory>
+#include <set>
 #include <string>
 #include <thread>
 #include <vector>
@@ -257,6 +259,19 @@ private:
     // Project file tree in the right editor panel.
     void PopulateEditorTree();
     void PopulateTreeDir(wxTreeItemId parent, const wxString& path);
+    // Reload the tree from disk, restoring expanded directories and the
+    // selection where those paths still exist.
+    void ReloadTreeKeepExpanded();
+    void CollectExpandedPaths(wxTreeItemId parent, std::vector<wxString>& out);
+    wxString GetSelectedTreePath() const;
+    void ExpandPathTo(const wxString& path, std::set<wxString>& populated);
+    // Watch activeCwd for filesystem changes and refresh the tree (debounced).
+    void SetupFsWatcher();
+    void RescanFsWatcher();
+    void AddWatchRecursive(const wxString& dir, int depth);
+    void OnFsWatcherEvent(wxFileSystemWatcherEvent& e);
+    void OnTreeRefreshTimer(wxTimerEvent& e);
+    void OnTreeRefresh(wxCommandEvent& e);
     void OnEditorTreeExpanding(wxTreeEvent& e);
     void OnEditorTreeSelect(wxTreeEvent& e);
     void OnEditorTreeContextMenu(wxContextMenuEvent& e);
@@ -268,6 +283,12 @@ private:
     void OnTreeShowInFiles(wxCommandEvent& e);
     void ShowFileInManager(const wxString& path);
     void LoadFileIntoEditor(const wxString& path);
+    // Record the open file's mtime+size so a later stat can tell whether it
+    // changed on disk (agent/external edit) independently of our own saves.
+    void RecordEditorFileStamp();
+    // If the open file changed on disk: prompt when there are unsaved edits,
+    // otherwise silently reload.
+    void CheckEditorFileChangedOnDisk();
     bool SaveEditorFile();
     bool SaveEditorFileAs();
     bool WriteEditorFile(const wxString& path);
@@ -331,7 +352,13 @@ private:
     wxTextCtrl* codeEdit_ = nullptr;                     // editable file content
     wxString editorFilePath_;                            // file open in codeEdit_
     bool editorDirty_ = false;                           // unsaved changes in editor
+    bool suppressReloadPrompt_ = false;                  // show "changed on disk" once
+    wxDateTime lastFileMtime_;                           // on-disk stamp (change detect)
+    wxULongLong lastFileSize_;                           // on-disk size (change detect)
+    bool treeSelectionRestoring_ = false;                // suppress SEL_CHANGED during reload
     wxTimer* highlightTimer_ = nullptr;                  // debounced syntax highlight
+    wxFileSystemWatcher* fileWatcher_ = nullptr;         // watches activeCwd for changes
+    wxTimer* treeRefreshTimer_ = nullptr;                // debounces watcher bursts
     wxTreeItemId treeCtxItem_;                           // right-clicked tree item
     wxString treeCtxPath_;                               // right-clicked item path
     bool treeCtxIsDir_ = true;                           // right-clicked item is a dir
