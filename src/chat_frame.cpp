@@ -379,6 +379,121 @@ std::string DefaultCwd() {
     return ".";
 }
 
+// ---- AGENTS.md project instructions (OpenCode-compatible) ----
+
+// Directory holding gritcode's global AGENTS.md (next to gritcode.conf),
+// mirroring OpenCode's ~/.config/<app>/AGENTS.md convention.
+std::string GlobalAgentsDir() {
+    if (const char* xdg = std::getenv("XDG_CONFIG_HOME")) {
+        if (xdg[0] != '\0') return std::string(xdg) + "/gritcode";
+    }
+    if (const char* home = std::getenv("HOME")) {
+        return std::string(home) + "/.config/gritcode";
+    }
+    return std::string();
+}
+
+// Walk up from `cwd` to the nearest directory holding `.git` (a dir for a
+// clone, a file for a worktree). Empty when not inside a repository.
+std::string FindGitRoot(const std::string& cwd) {
+    std::string cur = cwd;
+    while (true) {
+        if (wxDirExists(cur + "/.git") || wxFileExists(cur + "/.git"))
+            return cur;
+        const size_t pos = cur.find_last_of("/\\");
+        if (pos == std::string::npos) break;
+        const std::string parent = cur.substr(0, pos);
+        if (parent.empty() || parent == cur) break;
+        cur = parent;
+    }
+    return std::string();
+}
+
+bool ReadTextFile(const std::string& path, std::string& out) {
+    std::ifstream in(path, std::ios::binary);
+    if (!in) return false;
+    std::ostringstream ss;
+    ss << in.rdbuf();
+    out = ss.str();
+    return true;
+}
+
+// Build the AGENTS.md instruction text for a session rooted at `cwd`: the
+// global file first, then project files from `cwd` up to the git root
+// (closest first), mirroring OpenCode's discovery order. Empty when none
+// exist. Each file is labelled with its path so the model knows the source.
+std::string LoadAgentsInstructions(const std::string& cwd) {
+    std::vector<std::string> paths;
+
+    const std::string global = GlobalAgentsDir();
+    if (!global.empty()) paths.push_back(global + "/AGENTS.md");
+
+    const std::string root = FindGitRoot(cwd);
+    std::string cur = cwd;
+    while (true) {
+        paths.push_back(cur + "/AGENTS.md");
+        if (!root.empty() && cur == root) break;
+        if (root.empty()) break;  // not in a repo: only the session dir
+        const size_t pos = cur.find_last_of("/\\");
+        if (pos == std::string::npos) break;
+        const std::string parent = cur.substr(0, pos);
+        if (parent.empty() || parent == cur) break;
+        cur = parent;
+    }
+
+    std::string out;
+    for (const auto& p : paths) {
+        if (!wxFileExists(p)) continue;
+        std::string content;
+        if (!ReadTextFile(p, content)) continue;
+        if (content.empty()) continue;
+        if (!out.empty()) out += "\n\n";
+        out += "Instructions from: " + p + "\n" + content;
+    }
+    return out;
+}
+
+// The static base of the system prompt (platform info + tool guidance).
+// AGENTS.md instructions are appended to this by both SeedSystemPrompt and
+// RefreshSystemPromptAgents so the same base is used for fresh and restored
+// sessions alike.
+std::string BaseSystemPrompt() {
+    std::string platformInfo;
+#ifdef _WIN32
+    platformInfo = "You are running on Windows. The shell tool uses cmd /c - "
+                   "use Windows commands (dir, type, findstr, del, etc.). "
+                   "Path separators are backslashes.";
+#elif defined(__APPLE__)
+    platformInfo = "You are running on macOS. The shell tool uses bash. "
+                   "Use Unix commands. Path separators are forward slashes.";
+#else
+    platformInfo = "You are running on Linux. The shell tool uses bash. "
+                   "Use Unix commands. Path separators are forward slashes.";
+#endif
+
+    return
+        "You are a helpful AI coding assistant with access to local file, "
+        "shell, and web tools. Use them when the user's request requires "
+        "reading files, running shell commands, or fetching web pages. "
+        "Prefer concrete actions over speculation. Use markdown for "
+        "formatting and fenced code blocks for code.\n\n"
+        + platformInfo + "\n\n"
+        "Play button: the ▶ button runs a single stored shell command "
+        "directly from the project root - it does NOT invoke the AI. "
+        "When clicked with no stored command, you'll be asked to "
+        "configure it. Test your command via bash first, then store "
+        "it with run_project set.\n\n"
+        "Cross-project memory: use grit_history_search whenever the user "
+        "references any prior work (\"last time\", \"once again\", \"we "
+        "had\", \"how did we\", \"in <project>\"). It searches the "
+        "transcripts of every past gritcode session across all "
+        "projects and returns short snippets with session_id + "
+        "turn_index. Follow up with grit_history_fetch(session_id, "
+        "turn_index) to read full turns. Start with ONE broad keyword "
+        "query - if it returns no relevant hits, stop and answer from "
+        "what you have rather than firing speculative variants.";
+}
+
 // Format an absolute path for display in the dropdown. Replaces $HOME with
 // "~" and drops trailing slashes — matches the typical shell/IDE convention.
 wxString DisplayPath(const std::string& cwd) {
@@ -972,6 +1087,8 @@ ChatFrame::ChatFrame()
         SeedSystemPrompt();
         { PERF_SCOPE("PersistActive:Save"); store_.Save(activeCwd_, history_); }
         store_.SetLastActiveCwd(activeCwd_);
+    } else {
+        RefreshSystemPromptAgents();
     }
     } // RestoreLastSession
     ChdirToCwd(activeCwd_);
@@ -1252,6 +1369,7 @@ ChatFrame::ChatFrame()
             if (store_.Load(newCwd, hist)) {
                 activeCwd_ = newCwd;
                 history_ = std::move(hist);
+                RefreshSystemPromptAgents();
             } else {
                 activeCwd_ = newCwd;
                 history_.clear();
@@ -1754,6 +1872,7 @@ void ChatFrame::CreateNewSession() {
     if (store_.Load(activeCwd_, hist)) {
         // Existing session for this folder — restore it.
         history_ = std::move(hist);
+        RefreshSystemPromptAgents();
     } else {
         // Brand new folder: seed a fresh system prompt.
         history_.clear();
@@ -1786,6 +1905,8 @@ bool ChatFrame::SwitchToCwd(const std::string& cwd) {
         history_.clear();
         SeedSystemPrompt();
         store_.Save(activeCwd_, history_);
+    } else {
+        RefreshSystemPromptAgents();
     }
     historyCompactBaseCount_ = 0;  // fresh compaction gate for the new session
     store_.SetLastActiveCwd(activeCwd_);
@@ -1825,43 +1946,24 @@ void ChatFrame::PersistActive() {
 }
 
 void ChatFrame::SeedSystemPrompt() {
-    std::string platformInfo;
-#ifdef _WIN32
-    platformInfo = "You are running on Windows. The shell tool uses cmd /c - "
-                   "use Windows commands (dir, type, findstr, del, etc.). "
-                   "Path separators are backslashes.";
-#elif defined(__APPLE__)
-    platformInfo = "You are running on macOS. The shell tool uses bash. "
-                   "Use Unix commands. Path separators are forward slashes.";
-#else
-    platformInfo = "You are running on Linux. The shell tool uses bash. "
-                   "Use Unix commands. Path separators are forward slashes.";
-#endif
+    std::string content = BaseSystemPrompt();
+    std::string agents = LoadAgentsInstructions(activeCwd_);
+    if (!agents.empty()) content += "\n\n" + agents;
+    history_.push_back({{"role", "system"}, {"content", std::move(content)}});
+}
 
-    history_.push_back({
-        {"role", "system"},
-        {"content",
-         "You are a helpful AI coding assistant with access to local file, "
-         "shell, and web tools. Use them when the user's request requires "
-         "reading files, running shell commands, or fetching web pages. "
-         "Prefer concrete actions over speculation. Use markdown for "
-         "formatting and fenced code blocks for code.\n\n"
-         + platformInfo + "\n\n"
-         "Play button: the ▶ button runs a single stored shell command "
-         "directly from the project root - it does NOT invoke the AI. "
-         "When clicked with no stored command, you'll be asked to "
-         "configure it. Test your command via bash first, then store "
-         "it with run_project set.\n\n"
-         "Cross-project memory: use grit_history_search whenever the user "
-         "references any prior work (\"last time\", \"once again\", \"we "
-         "had\", \"how did we\", \"in <project>\"). It searches the "
-         "transcripts of every past gritcode session across all "
-         "projects and returns short snippets with session_id + "
-         "turn_index. Follow up with grit_history_fetch(session_id, "
-         "turn_index) to read full turns. Start with ONE broad keyword "
-         "query - if it returns no relevant hits, stop and answer from "
-         "what you have rather than firing speculative variants."}
-    });
+void ChatFrame::RefreshSystemPromptAgents() {
+    // Rebuild history_[0]'s content from the static base + current AGENTS.md.
+    // This re-injects project instructions into an EXISTING session whose
+    // system message was seeded before AGENTS.md existed (or changed).
+    if (history_.empty()) return;
+    auto& m = history_[0];
+    if (!m.is_object() || m.value("role", std::string{}) != "system") return;
+    std::string agents = LoadAgentsInstructions(activeCwd_);
+    lastAgentsContent_ = agents;
+    std::string content = BaseSystemPrompt();
+    if (!agents.empty()) content += "\n\n" + agents;
+    m["content"] = std::move(content);
 }
 
 void ChatFrame::RestoreCanvasFromHistory() {
@@ -2477,6 +2579,11 @@ void ChatFrame::OnTreeRefreshTimer(wxTimerEvent&) {
     // Directories created since the last scan aren't watched yet.
     RescanFsWatcher();
     CheckEditorFileChangedOnDisk();
+
+    // AGENTS.md may have been added or edited since the session loaded —
+    // re-inject it into the system prompt only when its content changed.
+    std::string agents = LoadAgentsInstructions(activeCwd_);
+    if (agents != lastAgentsContent_) RefreshSystemPromptAgents();
 }
 
 void ChatFrame::OnTreeRefresh(wxCommandEvent&) {

@@ -95,6 +95,7 @@ private:
     SessionStore store_;
     std::vector<std::string> sessionCwds_;
     std::string activeCwd_;
+    std::string lastAgentsContent_;   // AGENTS.md text currently in history_[0]
 
     // Cross-project memory: FTS5 index over every saved session. Opened at
     // construction; written after every PersistActive(); queried by the
@@ -329,6 +330,9 @@ private:
 
     // Push the default system prompt into history_. Called on fresh sessions.
     void SeedSystemPrompt();
+    // Re-inject AGENTS.md instructions into history_[0] for an existing
+    // (restored or switched-to) session whose system prompt predates them.
+    void RefreshSystemPromptAgents();
 
     // Re-render SVG icons with the current system foreground color. Called
     // once at construction and again on EVT_SYS_COLOUR_CHANGED so the icons
