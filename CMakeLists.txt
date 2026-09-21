@@ -378,6 +378,9 @@ if(WIN32)
     if(MSVC AND DEFINED ENV{VCToolsRedistDir})
         file(GLOB _crt_dlls "$ENV{VCToolsRedistDir}/x64/Microsoft.VC*.CRT/*.dll")
         list(FILTER _crt_dlls EXCLUDE REGEX "DebugCRT")
+        # GLOB returns backslash paths on Windows; install(FILES) generates
+        # broken cmake_install.cmake from unescaped backslashes.
+        file(TO_CMAKE_PATH "${_crt_dlls}" _crt_dlls)
         if(_crt_dlls)
             message(STATUS "Bundling MSVC runtime DLLs: ${_crt_dlls}")
             install(FILES ${_crt_dlls} DESTINATION ${CMAKE_INSTALL_BINDIR})
