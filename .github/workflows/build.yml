@@ -152,6 +152,8 @@ jobs:
 
       - name: Build package
         run: |
+          # Container git runs as root against a host-owned mount.
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
           VERSION=$(sed -n 's/^project(gritcode VERSION \([0-9][0-9.]*\).*/\1/p' CMakeLists.txt)
           # Package the current checkout into the tarball the PKGBUILD expects,
           # so the build works on PRs (no tag required) as well as releases.
