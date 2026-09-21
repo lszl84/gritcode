@@ -6,6 +6,8 @@ pkgdesc="Native desktop AI coding assistant"
 arch=('x86_64')
 url="https://gritcode.ai"
 license=('GPL-3.0-only')
+# makepkg auto-splits debug symbols into a -debug package by default; disable it.
+options=(!debug)
 depends=('wxwidgets-gtk3' 'gtk3' 'curl' 'sqlite' 'libsecret' 'hicolor-icon-theme')
 makedepends=('cmake' 'ninja' 'clang' 'git')
 
