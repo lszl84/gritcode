@@ -420,6 +420,13 @@ elseif(WIN32)
     set(CPACK_NSIS_INSTALL_ROOT "$PROGRAMFILES64")
     set(CPACK_NSIS_MUI_ICON "${CMAKE_CURRENT_SOURCE_DIR}/packaging/gritcode.ico")
     set(CPACK_NSIS_MUI_UNIICON "${CMAKE_CURRENT_SOURCE_DIR}/packaging/gritcode.ico")
+    # Wizard welcome/finish image. NSIS stretches it to the (DPI-scaled) image
+    # control, so a 2x source (328x628 vs the recommended 164x314) stays crisp
+    # on HiDPI displays instead of being upscaled from a low-res bitmap.
+    set(CPACK_NSIS_MUI_WELCOMEFINISHPAGE_BITMAP
+        "${CMAKE_CURRENT_SOURCE_DIR}/packaging/nsis-welcome.bmp")
+    set(CPACK_NSIS_MUI_UNWELCOMEFINISHPAGE_BITMAP
+        "${CMAKE_CURRENT_SOURCE_DIR}/packaging/nsis-welcome.bmp")
     set(CPACK_NSIS_ENABLE_UNINSTALL_BEFORE_INSTALL ON)
     set(CPACK_NSIS_URL_INFO_ABOUT "${CPACK_PACKAGE_HOMEPAGE_URL}")
     set(CPACK_NSIS_CONTACT "${CPACK_PACKAGE_CONTACT}")

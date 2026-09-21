@@ -184,9 +184,10 @@ jobs:
         run: choco install nsis ninja -y --no-progress
 
       # Ninja needs cl.exe on PATH; this sets up the VS developer environment
-      # without pinning a specific Visual Studio version.
+      # without pinning a specific Visual Studio version. setup-msvc-dev is a
+      # maintained fork of ilammy/msvc-dev-cmd that runs on Node 24.
       - name: Set up MSVC
-        uses: ilammy/msvc-dev-cmd@v1
+        uses: TheMrMilchmann/setup-msvc-dev@v4
         with:
           arch: x64
 
