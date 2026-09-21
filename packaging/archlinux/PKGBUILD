@@ -1,6 +1,6 @@
 # Maintainer: Luke <luke@devmindscape.com>
 pkgname=gritcode
-pkgver=0.5.13
+pkgver=0.5.14
 pkgrel=1
 pkgdesc="Native desktop AI coding assistant"
 arch=('x86_64')
