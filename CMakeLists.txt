@@ -371,6 +371,21 @@ if(WIN32)
     install(FILES packaging/cacert.pem
         DESTINATION ${CMAKE_INSTALL_BINDIR}
     )
+    # Bundle the MSVC runtime (vcruntime140.dll, vcruntime140_1.dll,
+    # msvcp140.dll) app-locally: the exe is built with /MD and silently fails
+    # to load on machines without the VC++ redistributable. VCToolsRedistDir
+    # is set by the VS developer environment in CI before cmake configure.
+    if(MSVC AND DEFINED ENV{VCToolsRedistDir})
+        file(GLOB _crt_dlls "$ENV{VCToolsRedistDir}/x64/Microsoft.VC*.CRT/*.dll")
+        list(FILTER _crt_dlls EXCLUDE REGEX "DebugCRT")
+        if(_crt_dlls)
+            message(STATUS "Bundling MSVC runtime DLLs: ${_crt_dlls}")
+            install(FILES ${_crt_dlls} DESTINATION ${CMAKE_INSTALL_BINDIR})
+        else()
+            message(STATUS "VCToolsRedistDir set but no CRT DLLs found there")
+        endif()
+    endif()
+
     # curl/sqlite3 come from vcpkg as DLLs — copy them (and their transitive
     # deps) next to the exe. VCPKG_INSTALLED_DIR / VCPKG_TARGET_TRIPLET are set
     # by the vcpkg toolchain file.
