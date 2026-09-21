@@ -8,6 +8,7 @@
 
 #include <nlohmann/json.hpp>
 #include <cstdio>
+#include <cstdlib>
 #ifndef NDEBUG
 #include <typeinfo>
 #ifndef _WIN32
@@ -127,7 +128,7 @@ public:
 
 wxIMPLEMENT_APP_NO_MAIN(App);
 
-int main(int argc, char* argv[]) {
+static int RunApp(int argc, char* argv[]) {
     // Intercept service-mode flags before wx initializes a GUI. Both modes
     // are headless (no window, no MCP TCP server) and exit on their own.
     for (int i = 1; i < argc; i++) {
@@ -151,3 +152,15 @@ int main(int argc, char* argv[]) {
 
     return wxEntry(argc, argv);
 }
+
+#ifndef _WIN32
+int main(int argc, char* argv[]) {
+    return RunApp(argc, argv);
+}
+#else
+// WIN32 (GUI) subsystem: the CRT's entry point is WinMain, not main.
+// __argc/__argv are populated by the CRT before the entry point runs.
+int WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR, int) {
+    return RunApp(__argc, __argv);
+}
+#endif

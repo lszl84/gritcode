@@ -168,9 +168,11 @@ std::string ToolEditFile(const nlohmann::json& args) {
 
 #include <windows.h>
 
-std::string ToolBash(const nlohmann::json& args, ToolCancelToken* token) {
-    std::string cmd = GetStringArg(args, "command");
-    if (cmd.empty()) return "Error: missing 'command' argument";
+// Shared Windows process runner. timeoutSeconds == 0 disables the timeout
+// (used by ToolBashDirect for long-running Play-button builds / dev servers).
+static std::string RunCommandWin(const std::string& cmd, ToolCancelToken* token,
+                                 int timeoutSeconds) {
+    if (cmd.empty()) return "Error: empty command";
     if (token && token->cancelled.load()) return "[cancelled]";
 
     // Wrap in cmd /c so we get shell builtins (dir, cd, set, etc.).
@@ -214,7 +216,8 @@ std::string ToolBash(const nlohmann::json& args, ToolCancelToken* token) {
         if (out.size() > kMaxOutput) { out.resize(kMaxOutput); truncated = true; }
     };
 
-    auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(30);
+    auto deadline = std::chrono::steady_clock::now() +
+                    std::chrono::seconds(timeoutSeconds);
     bool timedOut = false;
 
     for (;;) {
@@ -237,8 +240,8 @@ std::string ToolBash(const nlohmann::json& args, ToolCancelToken* token) {
             break;
         }
 
-        // Check timeout.
-        if (std::chrono::steady_clock::now() >= deadline) {
+        // Check timeout (disabled when timeoutSeconds == 0).
+        if (timeoutSeconds > 0 && std::chrono::steady_clock::now() >= deadline) {
             TerminateProcess(pi.hProcess, 1);
             timedOut = true;
             break;
@@ -266,6 +269,18 @@ std::string ToolBash(const nlohmann::json& args, ToolCancelToken* token) {
     if (timedOut) out += "\n[timed out after 30s]";
 
     return out;
+}
+
+std::string ToolBash(const nlohmann::json& args, ToolCancelToken* token) {
+    std::string cmd = GetStringArg(args, "command");
+    if (cmd.empty()) return "Error: missing 'command' argument";
+    return RunCommandWin(cmd, token, 30);
+}
+
+// No-timeout variant used by the Play button: long-running builds / dev
+// servers must not be killed after 30 s.
+std::string ToolBashDirect(const std::string& cmd, ToolCancelToken* token) {
+    return RunCommandWin(cmd, token, 0);
 }
 
 #else  // !_WIN32

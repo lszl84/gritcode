@@ -2200,6 +2200,11 @@ void ChatFrame::OnPlay(wxCommandEvent&) {
             // commands like "cmake --build build && ./build/gritcode" which
             // only work from the project root. The wrapping cd ensures the
             // shell is in the right place before executing.
+#ifdef _WIN32
+            // cmd.exe understands neither single quotes nor a bare `cd` across
+            // drives, so use `cd /d "..."`.
+            std::string wrapped = "cd /d \"" + cwd + "\" && " + cmd;
+#else
             // POSIX-safe single-quote escaping for the cwd path.
             std::string qcwd;
             qcwd += '\'';
@@ -2209,6 +2214,7 @@ void ChatFrame::OnPlay(wxCommandEvent&) {
             }
             qcwd += '\'';
             std::string wrapped = "cd " + qcwd + " && " + cmd;
+#endif
             std::string result = ToolBashDirect(wrapped.c_str(), token.get());
             CallAfter([this, result, cmd]() {
                 if (destroying_.load()) return;
