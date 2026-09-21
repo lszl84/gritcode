@@ -22,10 +22,10 @@
     },
     {
       "name": "windows-release",
-      "generator": "Visual Studio 17 2022",
-      "architecture": "x64",
+      "generator": "Ninja",
       "binaryDir": "${sourceDir}/build-win",
       "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release",
         "CMAKE_TOOLCHAIN_FILE": "C:/vcpkg/scripts/buildsystems/vcpkg.cmake",
         "VCPKG_TARGET_TRIPLET": "x64-windows"
       }
@@ -42,8 +42,7 @@
     },
     {
       "name": "windows-release",
-      "configurePreset": "windows-release",
-      "configuration": "Release"
+      "configurePreset": "windows-release"
     }
   ]
 }

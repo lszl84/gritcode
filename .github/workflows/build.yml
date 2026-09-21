@@ -180,8 +180,15 @@ jobs:
     steps:
       - uses: actions/checkout@v6
 
-      - name: Install NSIS
-        run: choco install nsis -y --no-progress
+      - name: Install NSIS and Ninja
+        run: choco install nsis ninja -y --no-progress
+
+      # Ninja needs cl.exe on PATH; this sets up the VS developer environment
+      # without pinning a specific Visual Studio version.
+      - name: Set up MSVC
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
 
       - name: Install vcpkg deps
         shell: pwsh
