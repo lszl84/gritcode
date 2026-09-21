@@ -19,6 +19,10 @@ on:
         description: 'Build Arch Linux (.pkg.tar.zst)'
         type: boolean
         default: true
+      windows:
+        description: 'Build Windows (installer .exe)'
+        type: boolean
+        default: true
 
 jobs:
   linux:
@@ -169,9 +173,40 @@ jobs:
           name: archlinux-pkg
           path: packaging/archlinux/*.pkg.tar.zst
 
+  windows:
+    name: Windows
+    runs-on: windows-latest
+    if: ${{ github.event_name != 'workflow_dispatch' || inputs.windows }}
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install NSIS
+        run: choco install nsis -y --no-progress
+
+      - name: Install vcpkg deps
+        shell: pwsh
+        run: |
+          $vcpkg = "$env:VCPKG_INSTALLATION_ROOT\vcpkg.exe"
+          & $vcpkg install curl sqlite3 --triplet x64-windows
+
+      - name: Configure
+        run: cmake --preset windows-release
+
+      - name: Build
+        run: cmake --build --preset windows-release
+
+      - name: Package
+        run: cmake --build --preset windows-release --target package
+
+      - name: Upload installer
+        uses: actions/upload-artifact@v7
+        with:
+          name: windows-installer
+          path: build-win/gritcode-*.exe
+
   release:
     name: Publish GitHub Release
-    needs: [linux, macos, archlinux]
+    needs: [linux, macos, archlinux, windows]
     if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-24.04
     permissions:

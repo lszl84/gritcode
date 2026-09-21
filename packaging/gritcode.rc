@@ -1,0 +1,8 @@
+// Windows resource file: embeds the application icon into gritcode.exe and
+// pulls in wxWidgets' manifest (common controls v6 / visual styles).
+//
+// The .ico is resolved relative to this file; CMake passes
+// packaging/ to the resource compiler as an include directory.
+#include <wx/msw/wx.rc>
+
+IDI_GRITCODE_ICON ICON "gritcode.ico"

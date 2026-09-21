@@ -33,6 +33,8 @@ FetchContent_MakeAvailable(nlohmann_json)
 # ---- wxWidgets ----
 # macOS: always build static from source — portable .app with no Homebrew dep.
 # Linux: try system package first, fall back to FetchContent.
+# Windows: no system package — the FetchContent fallback builds the MSW port
+# static (vcpkg's wxwidgets port is not required).
 if(APPLE)
     message(STATUS "macOS: building wxWidgets from source (static)")
     set(CMAKE_POLICY_VERSION_MINIMUM 3.5 CACHE STRING "" FORCE)
@@ -73,8 +75,9 @@ endif()
 find_package(CURL REQUIRED)
 
 # SQLite FTS5 backs the cross-project memory index (memory.cpp).
-# macOS ships SQLite in the SDK (use find_package). Linux uses pkg-config.
-if(APPLE)
+# macOS ships SQLite in the SDK and Windows gets it from vcpkg — both provide a
+# CMake config (find_package). Linux uses pkg-config.
+if(APPLE OR WIN32)
     find_package(SQLite3 REQUIRED)
     set(SQLITE_LIB SQLite::SQLite3)
 else()
@@ -191,7 +194,11 @@ target_include_directories(syntax_grammars PRIVATE
     ${ts_cmake_SOURCE_DIR}/src
 )
 # Generated parsers intentionally trip warnings we can't fix; silence them.
-target_compile_options(syntax_grammars PRIVATE -w)
+if(MSVC)
+    target_compile_options(syntax_grammars PRIVATE /w)
+else()
+    target_compile_options(syntax_grammars PRIVATE -w)
+endif()
 set_target_properties(syntax_grammars PROPERTIES
     C_STANDARD 11
     POSITION_INDEPENDENT_CODE ON
@@ -227,6 +234,11 @@ if(APPLE)
         PROPERTIES COMPILE_OPTIONS "-fobjc-arc")
 endif()
 
+# Windows resource file: embeds the application icon into the .exe.
+if(WIN32)
+    set(GRITCODE_RC ${CMAKE_CURRENT_SOURCE_DIR}/packaging/gritcode.rc)
+endif()
+
 if(APPLE)
     # Copy each asset SVG into Contents/Resources/icons inside the .app bundle.
     # wxStandardPaths::GetResourcesDir() resolves to that path on macOS, so the
@@ -260,6 +272,12 @@ if(APPLE)
         MACOSX_BUNDLE_COPYRIGHT         "Copyright (c) Gritcode contributors"
         MACOSX_BUNDLE_ICON_FILE         "gritcode.icns"
     )
+elseif(WIN32)
+    # WIN32 => GUI subsystem (no console window). The .rc embeds the app icon
+    # and wxWidgets' manifest (common controls v6 / visual styles).
+    add_executable(gritcode WIN32 ${SRCS} ${GRITCODE_RC})
+    # Let the resource compiler find gritcode.ico referenced from gritcode.rc.
+    target_include_directories(gritcode PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/packaging)
 else()
     add_executable(gritcode ${SRCS})
 endif()
@@ -291,7 +309,11 @@ if(UNIX AND NOT APPLE)
     target_link_libraries(gritcode PRIVATE ${LIBSECRET_LIBRARIES})
 endif()
 
-target_compile_options(gritcode PRIVATE -Wall -Wextra -Wno-unused-parameter)
+if(MSVC)
+    target_compile_options(gritcode PRIVATE /W3 /utf-8 /EHsc)
+else()
+    target_compile_options(gritcode PRIVATE -Wall -Wextra -Wno-unused-parameter)
+endif()
 
 # Source-tree asset path baked in for dev builds. At runtime the loader prefers
 # wxStandardPaths::GetResourcesDir() (which derives <prefix>/share/gritcode
@@ -335,6 +357,38 @@ if(UNIX AND NOT APPLE)
     # index.theme, and installing our own would clash with it.
 endif()
 
+if(WIN32)
+    # Assets live next to the executable: wxStandardPaths::GetResourcesDir()
+    # returns the exe's directory, and the loader looks for <exe>/icons/*.svg.
+    install(DIRECTORY assets/icons
+        DESTINATION ${CMAKE_INSTALL_BINDIR}/icons
+        FILES_MATCHING PATTERN "*.svg"
+    )
+    # curl has no system CA store on Windows; the app reads cacert.pem from
+    # beside the executable (src/streaming_web_request.cpp, src/chat_frame.cpp).
+    install(FILES packaging/cacert.pem
+        DESTINATION ${CMAKE_INSTALL_BINDIR}
+    )
+    # curl/sqlite3 come from vcpkg as DLLs — copy them (and their transitive
+    # deps) next to the exe. VCPKG_INSTALLED_DIR / VCPKG_TARGET_TRIPLET are set
+    # by the vcpkg toolchain file.
+    if(VCPKG_INSTALLED_DIR AND VCPKG_TARGET_TRIPLET)
+        install(CODE "
+            file(GET_RUNTIME_DEPENDENCIES
+                EXECUTABLES \"$<TARGET_FILE:gritcode>\"
+                RESOLVED_DEPENDENCIES_VAR _grit_deps
+                PRE_EXCLUDE_REGEXES \"api-ms-\" \"ext-ms-\"
+                POST_EXCLUDE_REGEXES \".*[Ss]ystem32.*\"
+                DIRECTORIES \"${VCPKG_INSTALLED_DIR}/${VCPKG_TARGET_TRIPLET}/bin\"
+            )
+            foreach(_grit_dep IN LISTS _grit_deps)
+                file(INSTALL DESTINATION \"\${CMAKE_INSTALL_PREFIX}/${CMAKE_INSTALL_BINDIR}\"
+                     TYPE SHARED_LIBRARY FILES \"\${_grit_dep}\")
+            endforeach()
+        ")
+    endif()
+endif()
+
 # ---- CPack ----
 set(CPACK_PACKAGE_NAME "gritcode")
 set(CPACK_PACKAGE_VERSION "${GRITCODE_VERSION}")
@@ -349,6 +403,21 @@ set(CPACK_STRIP_FILES ON)
 if(APPLE)
     set(CPACK_GENERATOR "DragNDrop")
     set(CPACK_DMG_VOLUME_NAME "gritcode")
+elseif(WIN32)
+    # Windows: NSIS installer (.exe). Simpler and lighter than WiX/MSI.
+    set(CPACK_GENERATOR "NSIS")
+    # No `strip` tool on MSVC; symbols are handled by the linker.
+    set(CPACK_STRIP_FILES OFF)
+    set(CPACK_PACKAGE_FILE_NAME "gritcode-${GRITCODE_VERSION}-windows-x64")
+    set(CPACK_NSIS_PACKAGE_NAME "gritcode")
+    set(CPACK_NSIS_DISPLAY_NAME "gritcode")
+    set(CPACK_NSIS_INSTALL_ROOT "$PROGRAMFILES64")
+    set(CPACK_NSIS_MUI_ICON "${CMAKE_CURRENT_SOURCE_DIR}/packaging/gritcode.ico")
+    set(CPACK_NSIS_MUI_UNIICON "${CMAKE_CURRENT_SOURCE_DIR}/packaging/gritcode.ico")
+    set(CPACK_NSIS_ENABLE_UNINSTALL_BEFORE_INSTALL ON)
+    set(CPACK_NSIS_URL_INFO_ABOUT "${CPACK_PACKAGE_HOMEPAGE_URL}")
+    set(CPACK_NSIS_CONTACT "${CPACK_PACKAGE_CONTACT}")
+    set(CPACK_PACKAGE_INSTALL_REGISTRY_KEY "gritcode")
 else()
     # Linux: DEB only.
     set(CPACK_GENERATOR "DEB")
