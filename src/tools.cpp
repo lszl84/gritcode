@@ -277,12 +277,6 @@ std::string ToolBash(const nlohmann::json& args, ToolCancelToken* token) {
     return RunCommandWin(cmd, token, 30);
 }
 
-// No-timeout variant used by the Play button: long-running builds / dev
-// servers must not be killed after 30 s.
-std::string ToolBashDirect(const std::string& cmd, ToolCancelToken* token) {
-    return RunCommandWin(cmd, token, 0);
-}
-
 #else  // !_WIN32
 // fork+exec instead of popen so we can put the child in its own process group
 // and SIGTERM the whole group on Escape. popen() doesn't expose the child PID
@@ -824,6 +818,14 @@ nlohmann::json StrParam(const char* desc) {
 }
 
 }  // namespace
+
+#ifdef _WIN32
+// Defined at global scope (see the POSIX variant below) so chat_frame.cpp can
+// link to it. No timeout: the Play button runs long-lived builds / dev servers.
+std::string ToolBashDirect(const std::string& cmd, ToolCancelToken* token) {
+    return RunCommandWin(cmd, token, 0);
+}
+#endif
 
 #ifndef _WIN32
 // No-timeout variant of ToolBash for long-running builds from the Play button.
