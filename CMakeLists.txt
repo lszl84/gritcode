@@ -408,6 +408,10 @@ if(APPLE)
 elseif(WIN32)
     # Windows: NSIS installer (.exe). Simpler and lighter than WiX/MSI.
     set(CPACK_GENERATOR "NSIS")
+    # Declare the installer DPI-aware (adds <dpiAware>true</dpiAware> to its
+    # manifest). Without this Windows bitmap-scales the whole wizard on
+    # displays above 100%, making it blurry/pixelated.
+    set(CPACK_NSIS_MANIFEST_DPI_AWARE ON)
     # No `strip` tool on MSVC; symbols are handled by the linker.
     set(CPACK_STRIP_FILES OFF)
     set(CPACK_PACKAGE_FILE_NAME "gritcode-${GRITCODE_VERSION}-windows-x64")
