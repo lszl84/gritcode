@@ -234,9 +234,11 @@ if(APPLE)
         PROPERTIES COMPILE_OPTIONS "-fobjc-arc")
 endif()
 
-# Windows resource file: embeds the application icon into the .exe.
+# Windows resource file (icon + wx standard resources) and the app manifest
+# (per-monitor-v2 DPI awareness), merged by the linker into the .exe.
 if(WIN32)
     set(GRITCODE_RC ${CMAKE_CURRENT_SOURCE_DIR}/packaging/gritcode.rc)
+    set(GRITCODE_MANIFEST ${CMAKE_CURRENT_SOURCE_DIR}/packaging/gritcode.manifest)
 endif()
 
 if(APPLE)
@@ -273,9 +275,10 @@ if(APPLE)
         MACOSX_BUNDLE_ICON_FILE         "gritcode.icns"
     )
 elseif(WIN32)
-    # WIN32 => GUI subsystem (no console window). The .rc embeds the app icon
-    # and wxWidgets' manifest (common controls v6 / visual styles).
-    add_executable(gritcode WIN32 ${SRCS} ${GRITCODE_RC})
+    # WIN32 => GUI subsystem (no console window). The .rc embeds the app icon;
+    # the .manifest declares per-monitor-v2 DPI awareness (merged by the
+    # linker with its default common-controls-v6 manifest).
+    add_executable(gritcode WIN32 ${SRCS} ${GRITCODE_RC} ${GRITCODE_MANIFEST})
     # Let the resource compiler find gritcode.ico referenced from gritcode.rc.
     target_include_directories(gritcode PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/packaging)
 else()

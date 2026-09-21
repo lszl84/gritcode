@@ -1,23 +1,11 @@
 // Windows resource file: embeds the application icon into gritcode.exe and
-// pulls in wxWidgets' manifest. wx.rc only emits its manifest when
-// wxUSE_RC_MANIFEST is truthy — with MSVC's rc.exe (unlike windres) it is
-// NOT auto-defined by wx/msw/rcdefs.h, so define it here, along with the
-// architecture constant rcdefs.h asks for. wxUSE_DPI_AWARE_MANIFEST 2
-// selects the per-monitor-v2 manifest (crisp on HiDPI; without DPI
-// awareness the app is bitmap-scaled by DWM). The manifest also carries
-// the common controls v6 dependency.
+// pulls in wxWidgets' standard resources (cursors, window menu). The app
+// manifest (DPI awareness) is a separate gritcode.manifest source: with
+// MSVC's rc.exe, embedding a manifest in the .rc collides with the linker's
+// own manifest resource (CVT1100 duplicate resource, LNK1123).
 //
 // The .ico is resolved relative to this file; CMake passes
 // packaging/ to the resource compiler as an include directory.
-#ifndef wxUSE_RC_MANIFEST
-#define wxUSE_RC_MANIFEST 1
-#endif
-#ifndef WX_CPU_AMD64
-#define WX_CPU_AMD64
-#endif
-#ifndef wxUSE_DPI_AWARE_MANIFEST
-#define wxUSE_DPI_AWARE_MANIFEST 2
-#endif
 #include <wx/msw/wx.rc>
 
 IDI_GRITCODE_ICON ICON "gritcode.ico"
