@@ -360,8 +360,10 @@ endif()
 if(WIN32)
     # Assets live next to the executable: wxStandardPaths::GetResourcesDir()
     # returns the exe's directory, and the loader looks for <exe>/icons/*.svg.
+    # (DESTINATION is bin/, not bin/icons — install(DIRECTORY) appends the
+    # source's last component, so this yields bin/icons/*.svg.)
     install(DIRECTORY assets/icons
-        DESTINATION ${CMAKE_INSTALL_BINDIR}/icons
+        DESTINATION ${CMAKE_INSTALL_BINDIR}
         FILES_MATCHING PATTERN "*.svg"
     )
     # curl has no system CA store on Windows; the app reads cacert.pem from
