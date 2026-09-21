@@ -1,0 +1,31 @@
+# Maintainer: Luke <luke@devmindscape.com>
+pkgname=gritcode
+pkgver=0.5.13
+pkgrel=1
+pkgdesc="Native desktop AI coding assistant"
+arch=('x86_64')
+url="https://gritcode.ai"
+license=('GPL-3.0-only')
+depends=('wxwidgets-gtk3' 'gtk3' 'curl' 'sqlite' 'libsecret' 'hicolor-icon-theme')
+makedepends=('cmake' 'ninja' 'clang' 'git')
+
+# CI builds from a tarball of the current checkout; makepkg expects it at
+# $srcdir/gritcode-$pkgver/. For an AUR submission, point this at the release
+# tarball instead and fill in a real checksum with `updpkgsums`:
+#   source=("$pkgname-$pkgver.tar.gz::$url/archive/refs/tags/v$pkgver.tar.gz")
+source=("$pkgname-$pkgver.tar.gz")
+sha256sums=('SKIP')
+
+build() {
+  cd "$pkgname-$pkgver"
+  cmake -B build -G Ninja \
+    -DCMAKE_BUILD_TYPE=Release \
+    -DCMAKE_INSTALL_PREFIX=/usr \
+    -DCMAKE_INSTALL_LIBDIR=lib
+  cmake --build build
+}
+
+package() {
+  cd "$pkgname-$pkgver"
+  DESTDIR="$pkgdir" cmake --install build
+}

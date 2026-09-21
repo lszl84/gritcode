@@ -15,6 +15,10 @@ on:
         description: 'Build macOS (.dmg)'
         type: boolean
         default: true
+      archlinux:
+        description: 'Build Arch Linux (.pkg.tar.zst)'
+        type: boolean
+        default: true
 
 jobs:
   linux:
@@ -128,9 +132,44 @@ jobs:
           name: macos-dmg
           path: build/gritcode-*.dmg
 
+  archlinux:
+    name: Arch Linux
+    # No native Arch runner exists; build inside the official Arch container.
+    runs-on: ubuntu-24.04
+    container: archlinux:base-devel
+    if: ${{ github.event_name != 'workflow_dispatch' || inputs.archlinux }}
+    steps:
+      # actions/* are Node actions and run inside the container, so node + git
+      # must exist there before checkout. pacman -Syu first (rolling image).
+      - name: Install action prerequisites
+        run: pacman -Syu --noconfirm --needed git nodejs
+
+      - uses: actions/checkout@v6
+
+      - name: Install build deps
+        run: pacman -S --noconfirm --needed cmake ninja clang wxwidgets-gtk3 gtk3 curl sqlite libsecret hicolor-icon-theme
+
+      - name: Build package
+        run: |
+          VERSION=$(sed -n 's/^project(gritcode VERSION \([0-9][0-9.]*\).*/\1/p' CMakeLists.txt)
+          # Package the current checkout into the tarball the PKGBUILD expects,
+          # so the build works on PRs (no tag required) as well as releases.
+          git archive --format=tar.gz --prefix="gritcode-${VERSION}/" \
+            -o "packaging/archlinux/gritcode-${VERSION}.tar.gz" HEAD
+          # makepkg refuses to run as root; the container runs as root by default.
+          useradd -m builder
+          chown -R builder:builder "$GITHUB_WORKSPACE"
+          su builder -c "cd '$GITHUB_WORKSPACE/packaging/archlinux' && makepkg -f --noconfirm"
+
+      - name: Upload package
+        uses: actions/upload-artifact@v7
+        with:
+          name: archlinux-pkg
+          path: packaging/archlinux/*.pkg.tar.zst
+
   release:
     name: Publish GitHub Release
-    needs: [linux, macos]
+    needs: [linux, macos, archlinux]
     if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-24.04
     permissions:
