@@ -203,6 +203,28 @@ jobs:
       - name: Build
         run: cmake --build --preset windows-release
 
+      # Launch the built exe briefly: a WIN32-subsystem app that dies at
+      # startup is otherwise silent. The app logs its startup path to
+      # %TEMP%\gritcode-startup.log.
+      - name: Smoke run
+        shell: pwsh
+        run: |
+          $p = Start-Process -FilePath "build-win\gritcode.exe" -PassThru
+          Start-Sleep -Seconds 8
+          $log = Join-Path $env:TEMP "gritcode-startup.log"
+          if (Test-Path $log) {
+            Write-Output "=== gritcode-startup.log ==="
+            Get-Content $log
+          } else {
+            Write-Output "(no startup log written)"
+          }
+          if ($p.HasExited) {
+            Write-Output "SMOKE FAIL: gritcode.exe exited with code $($p.ExitCode)"
+            exit 1
+          }
+          Write-Output "SMOKE OK: still running after 8s"
+          Stop-Process -Id $p.Id -Force
+
       - name: Package
         run: cmake --build --preset windows-release --target package
 

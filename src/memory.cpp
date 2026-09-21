@@ -9,25 +9,30 @@ namespace fs = std::filesystem;
 
 MemoryDB::~MemoryDB() { Close(); }
 
-std::string MemoryDB::DefaultPath() {
+// Data root: %APPDATA%\gritcode on Windows (the same dir wxFileConfig uses via
+// wxStandardPaths::GetUserDataDir()), XDG on Linux, ~/.local/share on macOS.
+static std::string DataRoot() {
+#ifdef _WIN32
+    const char* appdata = std::getenv("APPDATA");
+    if (appdata && *appdata) return std::string(appdata) + "\\gritcode";
+    const char* profile = std::getenv("USERPROFILE");
+    if (profile && *profile) return std::string(profile) + "\\.gritcode";
+    return "gritcode";
+#else
     const char* xdg = std::getenv("XDG_DATA_HOME");
-    std::string base;
-    if (xdg && *xdg) {
-        base = std::string(xdg) + "/gritcode";
-    } else {
-        const char* home = std::getenv("HOME");
-        if (!home) home = "/tmp";
-        base = std::string(home) + "/.local/share/gritcode";
-    }
-    return base + "/memory.db";
+    if (xdg && *xdg) return std::string(xdg) + "/gritcode";
+    const char* home = std::getenv("HOME");
+    if (!home) home = "/tmp";
+    return std::string(home) + "/.local/share/gritcode";
+#endif
+}
+
+std::string MemoryDB::DefaultPath() {
+    return DataRoot() + "/memory.db";
 }
 
 std::string MemoryDB::SessionsDir() {
-    const char* xdg = std::getenv("XDG_DATA_HOME");
-    if (xdg && *xdg) return std::string(xdg) + "/gritcode/sessions";
-    const char* home = std::getenv("HOME");
-    if (!home) home = "/tmp";
-    return std::string(home) + "/.local/share/gritcode/sessions";
+    return DataRoot() + "/sessions";
 }
 
 bool MemoryDB::Open(const std::string& path) {

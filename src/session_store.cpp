@@ -13,6 +13,16 @@ namespace fs = std::filesystem;
 
 namespace {
 std::string DataRoot() {
+#ifdef _WIN32
+    // Windows: %APPDATA%\gritcode (matches wxFileConfig's GetUserDataDir()).
+    if (const char* appdata = std::getenv("APPDATA")) {
+        if (appdata[0] != '\0') return std::string(appdata) + "\\gritcode";
+    }
+    if (const char* profile = std::getenv("USERPROFILE")) {
+        return std::string(profile) + "\\.gritcode";
+    }
+    return "gritcode";
+#else
     if (const char* xdg = std::getenv("XDG_DATA_HOME")) {
         if (xdg[0] != '\0') return std::string(xdg) + "/gritcode";
     }
@@ -20,6 +30,7 @@ std::string DataRoot() {
         return std::string(home) + "/.local/share/gritcode";
     }
     return ".gritcode";  // fallback (shouldn't happen on Linux/macOS)
+#endif
 }
 
 void AtomicWrite(const std::string& path, const std::string& content) {

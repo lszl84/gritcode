@@ -19,6 +19,47 @@
 #include <filesystem>
 #include <fstream>
 
+#ifdef _WIN32
+#include <windows.h>
+#include <wx/msw/private.h>
+
+namespace {
+// Startup diagnostics. WIN32-subsystem apps have no console, so an early
+// failure is invisible: log the startup path and any crash to
+// %TEMP%\gritcode-startup.log.
+FILE* StartupLogFile() {
+    static FILE* f = []() -> FILE* {
+        char path[MAX_PATH];
+        DWORD n = GetTempPathA(MAX_PATH, path);
+        if (n == 0 || n >= MAX_PATH) return nullptr;
+        std::strncat(path, "gritcode-startup.log", MAX_PATH - n - 1);
+        return std::fopen(path, "a");
+    }();
+    return f;
+}
+
+void StartupLog(const char* msg) {
+    FILE* f = StartupLogFile();
+    if (f) {
+        std::fprintf(f, "[%lu] %s\n", (unsigned long)GetTickCount(), msg);
+        std::fflush(f);
+    }
+}
+
+// Unhandled native exceptions (access violations etc.) — the wx-side handler
+// is NDEBUG-gated, so this one covers Release builds too.
+LONG WINAPI SehCrashFilter(EXCEPTION_POINTERS* ep) {
+    char buf[160];
+    std::snprintf(buf, sizeof(buf),
+                  "CRASH: SEH exception code 0x%08lX at %p",
+                  ep->ExceptionRecord->ExceptionCode,
+                  ep->ExceptionRecord->ExceptionAddress);
+    StartupLog(buf);
+    return EXCEPTION_EXECUTE_HANDLER;
+}
+}  // namespace
+#endif  // _WIN32
+
 namespace fs = std::filesystem;
 using json = nlohmann::json;
 
@@ -81,6 +122,9 @@ class App : public wxApp {
 public:
     bool OnInit() override {
         PERF_SCOPE("OnInit");
+#ifdef _WIN32
+        StartupLog("OnInit: enter");
+#endif
         SetAppName("gritcode");
         // Register JPEG/PNG/GIF/etc. decoders so image attachments load.
         wxInitAllImageHandlers();
@@ -90,15 +134,27 @@ public:
         SetAppearance(Appearance::System);
 #endif
         Preferences::Init();
+#ifdef _WIN32
+        StartupLog("OnInit: Preferences::Init done");
+#endif
 
         // Pull PATH and friends from the user's login shell so tool subprocesses
         // see the same env they'd see in a terminal — matters when launched
         // from a .desktop file or DE menu where rc-files never ran.
         { PERF_SCOPE("ImportShellEnv"); ImportShellEnv(); }
+#ifdef _WIN32
+        StartupLog("OnInit: ImportShellEnv done");
+#endif
 
         ChatFrame* frame;
         { PERF_SCOPE("new ChatFrame"); frame = new ChatFrame(); }
+#ifdef _WIN32
+        StartupLog("OnInit: ChatFrame constructed");
+#endif
         frame->Show(true);
+#ifdef _WIN32
+        StartupLog("OnInit: frame shown, entering main loop");
+#endif
         return true;
     }
 
@@ -160,7 +216,16 @@ int main(int argc, char* argv[]) {
 #else
 // WIN32 (GUI) subsystem: the CRT's entry point is WinMain, not main.
 // __argc/__argv are populated by the CRT before the entry point runs.
-int WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR, int) {
-    return RunApp(__argc, __argv);
+int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int) {
+    SetUnhandledExceptionFilter(SehCrashFilter);
+    StartupLog("WinMain: entering");
+    // wxApp::Initialize() self-heals a null instance handle, but set it
+    // explicitly anyway — some early paths (resources, DPI) read it first.
+    wxSetInstance(hInstance);
+    int rc = RunApp(__argc, __argv);
+    char buf[64];
+    std::snprintf(buf, sizeof(buf), "WinMain: wxEntry returned rc=%d", rc);
+    StartupLog(buf);
+    return rc;
 }
 #endif
