@@ -1362,7 +1362,12 @@ void ChatCanvas::OnPaint(wxPaintEvent&) {
         int dotsClientY = dotsCanvasY - viewY;
         dotsRect_ = wxRect(xLeft, dotsCanvasY, 16 * 3 + 8, 16);
         dotsRectValid_ = true;
-        PaintThinkingDots(dc, xLeft, dotsClientY);
+        // Draw through the same DC as the content: on Windows the content
+        // goes through a Direct2D wxGCDC whose batch flushes after this
+        // point — dots drawn on the raw GDI DC get overwritten by it (and
+        // GDI ignores alpha, killing the fade). Through the GCDC they batch
+        // in the right order and alpha-blend properly.
+        PaintThinkingDots(*paintDC, xLeft, dotsClientY);
     } else {
         dotsRectValid_ = false;
     }
