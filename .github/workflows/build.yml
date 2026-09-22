@@ -176,7 +176,10 @@ jobs:
   windows:
     name: Windows
     runs-on: windows-latest
-    if: ${{ github.event_name != 'workflow_dispatch' || inputs.windows }}
+    # Windows builds are developed on the 'windows' branch only — disabled on
+    # main (which also keeps main's tag releases Windows-free). The windows
+    # branch carries an enabled copy of this job.
+    if: ${{ github.ref_name == 'windows' && (github.event_name != 'workflow_dispatch' || inputs.windows) }}
     steps:
       - uses: actions/checkout@v6
 
@@ -236,7 +239,9 @@ jobs:
 
   release:
     name: Publish GitHub Release
-    needs: [linux, macos, archlinux, windows]
+    # Windows is not built from main (job is branch-gated); a skipped needed
+    # job would skip this one too.
+    needs: [linux, macos, archlinux]
     if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-24.04
     permissions:
