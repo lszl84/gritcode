@@ -82,6 +82,10 @@ private:
     // dropdowns and a gear button on the right.
     wxChoice* sessionChoice_ = nullptr;
     wxChoice* modelChoice_ = nullptr;
+    // GTK popup workaround: selection stashed while a combo popup is open so
+    // GTK shows the list from the top instead of scrolling to the selection.
+    int sessionChoiceSaved_ = wxNOT_FOUND;
+    int modelChoiceSaved_ = wxNOT_FOUND;
     wxBitmapButton* playBtn_ = nullptr;
     wxBitmapButton* settingsBtn_ = nullptr;
     wxBitmapButton* exportBtn_ = nullptr;

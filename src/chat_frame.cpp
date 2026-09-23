@@ -38,6 +38,9 @@
 #include <wx/utils.h>
 #include <wx/textdlg.h>
 #include <wx/tokenzr.h>
+#ifdef __WXGTK__
+#include <gtk/gtk.h>
+#endif
 #include <algorithm>
 #include <cctype>
 #include <map>
@@ -106,6 +109,37 @@ public:
     wxString path;
     bool isDir;
 };
+
+#ifdef __WXGTK__
+namespace {
+// GTK scrolls a combo popup so the selected item sits under the cursor, which
+// leaves a large blank area above the list (and scroll arrows) when the
+// selection isn't the first item. Clear the active item while the popup is
+// open so the list opens scrolled to the top, and restore it when it closes.
+// The programmatic active change is done with the "changed" signal blocked so
+// it doesn't fire a spurious wxEVT_CHOICE.
+void SetComboActiveSilent(GtkWidget* w, int active) {
+    const guint id = g_signal_lookup("changed", GTK_TYPE_COMBO_BOX);
+    g_signal_handlers_block_matched(w, G_SIGNAL_MATCH_ID, id, 0,
+                                    nullptr, nullptr, nullptr);
+    gtk_combo_box_set_active(GTK_COMBO_BOX(w), active);
+    g_signal_handlers_unblock_matched(w, G_SIGNAL_MATCH_ID, id, 0,
+                                      nullptr, nullptr, nullptr);
+}
+
+void OnComboPopup(GtkWidget* w, gpointer data) {
+    int* saved = static_cast<int*>(data);
+    *saved = gtk_combo_box_get_active(GTK_COMBO_BOX(w));
+    SetComboActiveSilent(w, -1);
+}
+
+void OnComboPopdown(GtkWidget* w, gpointer data) {
+    int* saved = static_cast<int*>(data);
+    if (gtk_combo_box_get_active(GTK_COMBO_BOX(w)) == -1 && *saved >= 0)
+        SetComboActiveSilent(w, *saved);
+}
+}  // namespace
+#endif  // __WXGTK__
 
 // ---- Context management (compaction.md) ----
 // Tail retention: keep the most recent ~15K tokens of conversation verbatim;
@@ -1146,6 +1180,18 @@ ChatFrame::ChatFrame()
     sessionChoice_->Bind(wxEVT_CHOICE, &ChatFrame::OnSessionChoice, this);
     modelChoice_->Bind(wxEVT_CHOICE, &ChatFrame::OnModelChoice, this);
     modelChoice_->Bind(wxEVT_CONTEXT_MENU, &ChatFrame::OnModelContextMenu, this);
+#ifdef __WXGTK__
+    // Keep the dropdowns native (wxChoice) but stop GTK from scrolling the
+    // popup to the selected item (blank space above the list).
+    if (GtkWidget* w = static_cast<GtkWidget*>(sessionChoice_->GetHandle())) {
+        g_signal_connect(w, "popup", G_CALLBACK(OnComboPopup), &sessionChoiceSaved_);
+        g_signal_connect(w, "popdown", G_CALLBACK(OnComboPopdown), &sessionChoiceSaved_);
+    }
+    if (GtkWidget* w = static_cast<GtkWidget*>(modelChoice_->GetHandle())) {
+        g_signal_connect(w, "popup", G_CALLBACK(OnComboPopup), &modelChoiceSaved_);
+        g_signal_connect(w, "popdown", G_CALLBACK(OnComboPopdown), &modelChoiceSaved_);
+    }
+#endif
     Bind(wxEVT_MENU,
          [this](wxCommandEvent&) { FetchRemoteModelsAsync(); },
          ID_MODEL_REFRESH);
