@@ -274,6 +274,7 @@ private:
     void OnFsWatcherEvent(wxFileSystemWatcherEvent& e);
     void OnTreeRefreshTimer(wxTimerEvent& e);
     void OnTreeRefresh(wxCommandEvent& e);
+    void OnTreeToggleHidden(wxCommandEvent& e);
     void OnEditorTreeExpanding(wxTreeEvent& e);
     void OnEditorTreeSelect(wxTreeEvent& e);
     void OnEditorTreeContextMenu(wxContextMenuEvent& e);
@@ -367,6 +368,7 @@ private:
     wxTreeItemId treeCtxItem_;                           // right-clicked tree item
     wxString treeCtxPath_;                               // right-clicked item path
     bool treeCtxIsDir_ = true;                           // right-clicked item is a dir
+    bool showHidden_ = false;                            // show dotfiles in the file tree
     int editorPaneW_ = 0;                                // editor width (user-adjustable)
     int imgFolder_ = -1;                                 // tree icon indices
     int imgFile_ = -1;

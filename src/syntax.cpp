@@ -1,11 +1,12 @@
 // Simple tree-sitter based syntax highlighting for the editor pane.
 //
-// The heavy lifting is done by the tree-sitter runtime plus five vendored
-// grammars (Python, HTML, CSS, JavaScript, Markdown). We walk the parse tree,
-// classify each interesting node into a small colour palette, and apply the
-// resulting ranges with wxTextCtrl::SetStyle. Markdown is special: it ships as
-// two grammars (block + inline), so block nodes labelled `inline` are re-parsed
-// with the inline grammar restricted to that node's range.
+// The heavy lifting is done by the tree-sitter runtime plus nine vendored
+// grammars (Python, HTML, CSS, JavaScript, Markdown, C, C++, CMake, YAML). We
+// walk the parse tree, classify each interesting node into a small colour
+// palette, and apply the resulting ranges with wxTextCtrl::SetStyle. Markdown
+// is special: it ships as two grammars (block + inline), so block nodes
+// labelled `inline` are re-parsed with the inline grammar restricted to that
+// node's range.
 
 #include "syntax.h"
 
@@ -33,6 +34,7 @@ const TSLanguage *tree_sitter_markdown_inline(void);
 const TSLanguage *tree_sitter_c(void);
 const TSLanguage *tree_sitter_cpp(void);
 const TSLanguage *tree_sitter_cmake(void);
+const TSLanguage *tree_sitter_yaml(void);
 }
 
 namespace syntax {
@@ -125,6 +127,9 @@ struct Lang {
     std::unordered_map<std::string, Cat> nameParent;
     // Identifier names painted as constants (builtins, `self`, …).
     std::unordered_set<std::string> builtins;
+    // Node types that are mapping keys: painted as Prop when they are the
+    // parent's `key` field (e.g. YAML plain_scalar under block_mapping_pair).
+    std::unordered_set<std::string> keyFieldTypes;
 };
 
 template <size_t N>
@@ -420,6 +425,36 @@ Lang Cmake() {
     return l;
 }
 
+Lang Yaml() {
+    Lang l;
+    l.language = tree_sitter_yaml();
+    static const char *const com[] = {"comment"};
+    static const char *const str[] = {"double_quote_scalar", "single_quote_scalar",
+                                      "string_scalar", "block_scalar"};
+    static const char *const num[] = {"integer_scalar", "float_scalar",
+                                      "timestamp_scalar"};
+    static const char *const con[] = {"boolean_scalar", "null_scalar",
+                                      "alias_name", "anchor_name"};
+    static const char *const dec[] = {"yaml_directive", "tag_directive",
+                                      "reserved_directive", "tag", "tag_handle",
+                                      "tag_prefix", "directive_name",
+                                      "yaml_version"};
+    static const char *const skip[] = {
+        "comment", "double_quote_scalar", "single_quote_scalar",
+        "string_scalar", "block_scalar", "integer_scalar", "float_scalar",
+        "boolean_scalar", "null_scalar", "timestamp_scalar",
+        "alias_name", "anchor_name"};
+    static const char *const keys[] = {"plain_scalar"};
+    Add(l.comment, com);
+    Add(l.string, str);
+    Add(l.number, num);
+    Add(l.constant, con);
+    Add(l.decor, dec);
+    Add(l.skip, skip);
+    Add(l.keyFieldTypes, keys);
+    return l;
+}
+
 Lang MarkdownBlock() {
     Lang l;
     l.language = tree_sitter_markdown();
@@ -491,6 +526,7 @@ const Lang &LangFor(std::string_view path) {
     static const Lang c = C();
     static const Lang cpp = Cpp();
     static const Lang cmake = Cmake();
+    static const Lang yaml = Yaml();
 
     // CMakeLists.txt has a ".txt" extension that would otherwise be
     // unhighlighted; match it by basename (case-insensitive) first.
@@ -528,6 +564,8 @@ const Lang &LangFor(std::string_view path) {
             return cpp;
         if (ext == ".cmake")
             return cmake;
+        if (ext == ".yml" || ext == ".yaml")
+            return yaml;
     }
     // Unknown language: return a default-constructed Lang with language ==
     // nullptr so callers can skip parsing.
@@ -576,6 +614,15 @@ Cat Classify(const Lang &l, const std::string &t, TSNode node,
         if (e > s && e <= text.size() &&
             l.builtins.count(std::string(text.substr(s, e - s))))
             return Cat::Const;
+        return Cat::None;
+    }
+    if (l.keyFieldTypes.count(t)) {
+        TSNode p = ts_node_parent(node);
+        if (!ts_node_is_null(p)) {
+            TSNode key = ts_node_child_by_field_name(p, "key", 1);
+            if (!ts_node_is_null(key) && ts_node_eq(key, node))
+                return Cat::Prop;
+        }
         return Cat::None;
     }
     return BaseCategory(l, t);

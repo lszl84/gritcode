@@ -82,6 +82,7 @@ constexpr int ID_TREE_RENAME        = wxID_HIGHEST + 18;
 constexpr int ID_TREE_SHOW_IN_FILES = wxID_HIGHEST + 19;
 constexpr int ID_TREE_NEW_FOLDER    = wxID_HIGHEST + 20;
 constexpr int ID_TREE_REFRESH       = wxID_HIGHEST + 21;
+constexpr int ID_TREE_TOGGLE_HIDDEN = wxID_HIGHEST + 27;
 constexpr int ID_EDITOR_SAVE        = wxID_HIGHEST + 21;
 constexpr int ID_EDITOR_SAVE_AS     = wxID_HIGHEST + 22;
 constexpr int ID_EDITOR_RELOAD      = wxID_HIGHEST + 23;
@@ -1134,6 +1135,7 @@ ChatFrame::ChatFrame()
     Bind(wxEVT_MENU, &ChatFrame::OnTreeRename, this, ID_TREE_RENAME);
     Bind(wxEVT_MENU, &ChatFrame::OnTreeShowInFiles, this, ID_TREE_SHOW_IN_FILES);
     Bind(wxEVT_MENU, &ChatFrame::OnTreeRefresh, this, ID_TREE_REFRESH);
+    Bind(wxEVT_MENU, &ChatFrame::OnTreeToggleHidden, this, ID_TREE_TOGGLE_HIDDEN);
     Bind(wxEVT_MENU, &ChatFrame::OnEditorSave, this, ID_EDITOR_SAVE);
     Bind(wxEVT_MENU, &ChatFrame::OnEditorSaveAs, this, ID_EDITOR_SAVE_AS);
     Bind(wxEVT_MENU, &ChatFrame::OnEditorReload, this, ID_EDITOR_RELOAD);
@@ -2398,7 +2400,8 @@ void ChatFrame::PopulateTreeDir(wxTreeItemId parent, const wxString& path) {
     wxString name;
     bool cont = dir.GetFirst(&name, wxEmptyString, wxDIR_DIRS | wxDIR_FILES);
     while (cont && entries.size() < 500) {
-        if (!name.empty() && name[0] != wxT('.')) {
+        // Skip dotfiles unless "Show Hidden Files" is ticked.
+        if (!name.empty() && (showHidden_ || name[0] != wxT('.'))) {
             wxString full = path + wxFILE_SEP_PATH + name;
             entries.push_back({name, wxDirExists(full)});
         }
@@ -2596,6 +2599,11 @@ void ChatFrame::OnTreeRefresh(wxCommandEvent&) {
     ReloadTreeKeepExpanded();
 }
 
+void ChatFrame::OnTreeToggleHidden(wxCommandEvent&) {
+    showHidden_ = !showHidden_;
+    ReloadTreeKeepExpanded();
+}
+
 void ChatFrame::OnEditorTreeExpanding(wxTreeEvent& e) {
     auto* data = dynamic_cast<FileTreeItemData*>(fileTree_->GetItemData(e.GetItem()));
     if (data && data->isDir) {
@@ -2685,6 +2693,9 @@ void ChatFrame::ShowTreeContextMenu(wxTreeItemId item) {
     menu.AppendSeparator();
     wxMenuItem* renameItem = menu.Append(ID_TREE_RENAME, "Rename");
     wxMenuItem* showItem = menu.Append(ID_TREE_SHOW_IN_FILES, "Show in Files");
+    menu.AppendSeparator();
+    menu.AppendCheckItem(ID_TREE_TOGGLE_HIDDEN, "Show Hidden Files")
+        ->Check(showHidden_);
     menu.AppendSeparator();
     menu.Append(ID_TREE_REFRESH, "Refresh");
     if (!item.IsOk()) {
