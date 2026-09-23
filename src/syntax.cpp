@@ -1,7 +1,8 @@
 // Simple tree-sitter based syntax highlighting for the editor pane.
 //
-// The heavy lifting is done by the tree-sitter runtime plus nine vendored
-// grammars (Python, HTML, CSS, JavaScript, Markdown, C, C++, CMake, YAML). We
+// The heavy lifting is done by the tree-sitter runtime plus ten vendored
+// grammars (Python, HTML, CSS, JavaScript, Markdown, C, C++, CMake, YAML,
+// dotenv). We
 // walk the parse tree, classify each interesting node into a small colour
 // palette, and apply the resulting ranges with wxTextCtrl::SetStyle. Markdown
 // is special: it ships as two grammars (block + inline), so block nodes
@@ -35,6 +36,7 @@ const TSLanguage *tree_sitter_c(void);
 const TSLanguage *tree_sitter_cpp(void);
 const TSLanguage *tree_sitter_cmake(void);
 const TSLanguage *tree_sitter_yaml(void);
+const TSLanguage *tree_sitter_dotenv(void);
 }
 
 namespace syntax {
@@ -455,6 +457,31 @@ Lang Yaml() {
     return l;
 }
 
+Lang Dotenv() {
+    Lang l;
+    l.language = tree_sitter_dotenv();
+    static const char *const com[] = {"comment"};
+    // `string` is intentionally NOT in skip: strings may embed ${VARIABLE}
+    // interpolations, which we want painted as Prop on top of the string.
+    static const char *const str[] = {"string", "string_content"};
+    static const char *const num[] = {"number", "integer", "decimal", "float",
+                                      "hexadecimal"};
+    static const char *const con[] = {"boolean"};
+    static const char *const kw[] = {"export"};
+    static const char *const prop[] = {"variable", "identifier"};
+    static const char *const skip[] = {"comment", "number", "integer",
+                                       "decimal", "float", "hexadecimal",
+                                       "boolean"};
+    Add(l.comment, com);
+    Add(l.string, str);
+    Add(l.number, num);
+    Add(l.constant, con);
+    Add(l.keyword, kw);
+    Add(l.prop, prop);
+    Add(l.skip, skip);
+    return l;
+}
+
 Lang MarkdownBlock() {
     Lang l;
     l.language = tree_sitter_markdown();
@@ -527,6 +554,7 @@ const Lang &LangFor(std::string_view path) {
     static const Lang cpp = Cpp();
     static const Lang cmake = Cmake();
     static const Lang yaml = Yaml();
+    static const Lang dotenv = Dotenv();
 
     // CMakeLists.txt has a ".txt" extension that would otherwise be
     // unhighlighted; match it by basename (case-insensitive) first.
@@ -540,6 +568,11 @@ const Lang &LangFor(std::string_view path) {
         if (b == "cmakelists.txt")
             return cmake;
     }
+
+    // .env / .env.example / .env.local etc. — dotfile names with no usable
+    // extension, so match by basename.
+    if (base == ".env" || base.starts_with(".env."))
+        return dotenv;
 
     // Lowercased extension match.
     size_t dot = path.find_last_of('.');
