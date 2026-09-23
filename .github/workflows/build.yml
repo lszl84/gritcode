@@ -158,6 +158,10 @@ jobs:
           # Container git runs as root against a host-owned mount.
           git config --global --add safe.directory "$GITHUB_WORKSPACE"
           VERSION=$(sed -n 's/^project(gritcode VERSION \([0-9][0-9.]*\).*/\1/p' CMakeLists.txt)
+          # Keep the PKGBUILD's pkgver in sync with CMakeLists.txt so a version
+          # bump can't get the two out of step (which makes makepkg look for
+          # the wrong tarball).
+          sed -i "s/^pkgver=.*/pkgver=${VERSION}/" packaging/archlinux/PKGBUILD
           # Package the current checkout into the tarball the PKGBUILD expects,
           # so the build works on PRs (no tag required) as well as releases.
           git archive --format=tar.gz --prefix="gritcode-${VERSION}/" \
