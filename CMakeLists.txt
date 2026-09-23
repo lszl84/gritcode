@@ -160,11 +160,16 @@ FetchContent_Declare(
     GIT_SHALLOW ON
     SOURCE_SUBDIR src
 )
+# src/ has no CMakeLists.txt, so SOURCE_SUBDIR src makes this download-only:
+# the grammar's own CMake (which tries to regenerate parser.c via the
+# tree-sitter CLI, not installed in CI) is never run. We compile its sources
+# directly into syntax_grammars.
 FetchContent_Declare(
     ts_yaml
     GIT_REPOSITORY https://github.com/tree-sitter-grammars/tree-sitter-yaml.git
     GIT_TAG v0.7.2
     GIT_SHALLOW ON
+    SOURCE_SUBDIR src
 )
 # src/ has no CMakeLists.txt, so SOURCE_SUBDIR src makes this download-only:
 # the grammar's own CMake (which defines a `ts-test` target that clashes with
