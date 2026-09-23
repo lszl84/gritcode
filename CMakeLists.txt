@@ -241,6 +241,7 @@ set(SRCS
     src/tools.cpp
     src/mcp_server.cpp
     src/mcp_stdio.cpp
+    src/headless.cpp
     src/memory.cpp
     src/session_store.cpp
     src/image_store.cpp

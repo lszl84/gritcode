@@ -4,6 +4,7 @@
 #include "preferences.h"
 #include "memory.h"
 #include "mcp_stdio.h"
+#include "headless.h"
 #include "perf_log.h"
 
 #include <nlohmann/json.hpp>
@@ -18,6 +19,8 @@
 #include <cstring>
 #include <filesystem>
 #include <fstream>
+#include <iostream>
+#include <sstream>
 
 #ifdef _WIN32
 #include <windows.h>
@@ -194,6 +197,24 @@ static int RunApp(int argc, char* argv[]) {
         if (std::strcmp(argv[i], "--reindex") == 0) {
             return RunReindex();
         }
+        if (std::strcmp(argv[i], "--headless") == 0) {
+            // Benchmarking agent: one prompt -> DeepSeek Flash (key from
+            // DEEPSEEK_API_KEY), tools on, grit-history tools off. Prompt
+            // comes from `--prompt <text>` or, when omitted, from stdin.
+            std::string prompt;
+            if (i + 2 < argc && std::strcmp(argv[i + 1], "--prompt") == 0) {
+                prompt = argv[i + 2];
+            } else {
+                std::ostringstream ss;
+                ss << std::cin.rdbuf();
+                prompt = ss.str();
+            }
+            if (prompt.empty()) {
+                std::fprintf(stderr, "headless: no prompt given\n");
+                return 1;
+            }
+            return RunHeadless(prompt);
+        }
         if (std::strcmp(argv[i], "--help") == 0 ||
             std::strcmp(argv[i], "-h") == 0) {
             std::printf(
@@ -201,6 +222,10 @@ static int RunApp(int argc, char* argv[]) {
                 "Options:\n"
                 "  --reindex      Rebuild the memory index from session history on disk\n"
                 "  --mcp-stdio    Run as a stdio MCP server exposing grit_history_search/fetch\n"
+                "  --headless     Run one prompt through the agent headlessly\n"
+                "                 (prompt from stdin, or --headless --prompt \"...\")\n"
+                "                 Uses DEEPSEEK_API_KEY and the Flash model;\n"
+                "                 grit history tools are disabled\n"
                 "  --help, -h     Show this help\n");
             return 0;
         }
