@@ -1127,6 +1127,7 @@ ChatFrame::ChatFrame()
     Bind(wxEVT_BUTTON, &ChatFrame::OnHamburger, this, ID_HAMBURGER);
     Bind(wxEVT_BUTTON, &ChatFrame::OnEditorToggle, this, ID_EDITOR);
     fileTree_->Bind(wxEVT_TREE_ITEM_EXPANDING, &ChatFrame::OnEditorTreeExpanding, this);
+    fileTree_->Bind(wxEVT_TREE_ITEM_COLLAPSED, &ChatFrame::OnEditorTreeCollapsed, this);
     fileTree_->Bind(wxEVT_TREE_SEL_CHANGED, &ChatFrame::OnEditorTreeSelect, this);
     fileTree_->Bind(wxEVT_CONTEXT_MENU, &ChatFrame::OnEditorTreeContextMenu, this);
     Bind(wxEVT_FSWATCHER, &ChatFrame::OnFsWatcherEvent, this);
@@ -2527,13 +2528,6 @@ void ChatFrame::SetupFsWatcher() {
     RescanFsWatcher();
 }
 
-void ChatFrame::RescanFsWatcher() {
-    if (!fileWatcher_) return;
-    fileWatcher_->RemoveAll();
-    if (!activeCwd_.empty())
-        AddWatchRecursive(wxString::FromUTF8(activeCwd_), 0);
-}
-
 // wxDir classifies a symlink to a directory as a directory, and the watcher
 // canonicalises paths before watching — so a symlinked dir (venv/lib64 -> lib)
 // would re-add an already-watched path and trip a backend assertion. Detect
@@ -2542,33 +2536,38 @@ static bool IsSymlink(const wxString& path) {
     return wxFileName(path).Exists(wxFILE_EXISTS_SYMLINK);
 }
 
-void ChatFrame::AddWatchRecursive(const wxString& dir, int depth) {
-    if (!fileWatcher_ || depth > 12) return;
-    // The session directory may have been deleted since it was opened (or a
-    // subdir removed between the walk and the watch); wxFileSystemWatcher's
-    // inotify backend logs "Unable to add inotify watch" for a missing path.
-    // Skip it — an empty/deleted tree is handled elsewhere.
-    if (!wxDirExists(dir)) return;
-    fileWatcher_->Add(wxFileName(dir));
+void ChatFrame::CollectExpandedDirs(wxTreeItemId parent, int depth,
+                                    std::vector<wxString>& out) {
+    constexpr int kMaxWatchDepth = 4;
+    if (depth > kMaxWatchDepth) return;
+    wxTreeItemIdValue cookie;
+    for (wxTreeItemId c = fileTree_->GetFirstChild(parent, cookie);
+         c.IsOk(); c = fileTree_->GetNextChild(parent, cookie)) {
+        if (!fileTree_->IsExpanded(c)) continue;
+        auto* d = dynamic_cast<FileTreeItemData*>(fileTree_->GetItemData(c));
+        if (!d || !d->isDir || IsSymlink(d->path)) continue;
+        out.push_back(d->path);
+        CollectExpandedDirs(c, depth + 1, out);
+    }
+}
 
-    wxDir d;
-    if (!d.Open(dir)) return;
-    wxString name;
-    bool cont = d.GetFirst(&name, wxEmptyString, wxDIR_DIRS);
-    while (cont) {
-        // Skip dot-directories (.git, .idea, …) and build-output dirs: they
-        // churn constantly and can blow the OS watch budget on large trees.
-        // Skip symlinked dirs too (they alias an already-watched path).
-        const wxString lower = name.Lower();
-        const bool skip = !name.empty() &&
-            (name[0] == '.' || lower == "node_modules" ||
-             lower == "build" || lower == "dist" || lower == "target" ||
-             lower == "__pycache__" || lower == "venv" ||
-             lower == "site-packages");
-        wxString full = dir + wxFILE_SEP_PATH + name;
-        if (!skip && !IsSymlink(full))
-            AddWatchRecursive(full, depth + 1);
-        cont = d.GetNext(&name);
+void ChatFrame::RescanFsWatcher() {
+    if (!fileWatcher_) return;
+    fileWatcher_->RemoveAll();
+    if (activeCwd_.empty()) return;
+
+    // Watch only what's visible in the file tree: the session root plus every
+    // expanded directory, capped at 4 levels deep. Deeper expansions need a
+    // manual Refresh. This keeps the watch count proportional to what's open,
+    // not the size of the project.
+    std::vector<wxString> dirs;
+    dirs.push_back(wxString::FromUTF8(activeCwd_));
+    if (fileTree_ && fileTree_->GetRootItem().IsOk())
+        CollectExpandedDirs(fileTree_->GetRootItem(), 1, dirs);
+
+    for (const auto& dir : dirs) {
+        if (!wxDirExists(dir)) continue;
+        fileWatcher_->Add(wxFileName(dir));
     }
 }
 
@@ -2612,7 +2611,13 @@ void ChatFrame::OnEditorTreeExpanding(wxTreeEvent& e) {
     auto* data = dynamic_cast<FileTreeItemData*>(fileTree_->GetItemData(e.GetItem()));
     if (data && data->isDir) {
         PopulateTreeDir(e.GetItem(), data->path);
+        RescanFsWatcher();  // start watching the newly expanded dir
     }
+    e.Skip();
+}
+
+void ChatFrame::OnEditorTreeCollapsed(wxTreeEvent& e) {
+    RescanFsWatcher();  // stop watching the just-collapsed subtree
     e.Skip();
 }
 

@@ -270,12 +270,14 @@ private:
     // Watch activeCwd for filesystem changes and refresh the tree (debounced).
     void SetupFsWatcher();
     void RescanFsWatcher();
-    void AddWatchRecursive(const wxString& dir, int depth);
+    void CollectExpandedDirs(wxTreeItemId parent, int depth,
+                             std::vector<wxString>& out);
     void OnFsWatcherEvent(wxFileSystemWatcherEvent& e);
     void OnTreeRefreshTimer(wxTimerEvent& e);
     void OnTreeRefresh(wxCommandEvent& e);
     void OnTreeToggleHidden(wxCommandEvent& e);
     void OnEditorTreeExpanding(wxTreeEvent& e);
+    void OnEditorTreeCollapsed(wxTreeEvent& e);
     void OnEditorTreeSelect(wxTreeEvent& e);
     void OnEditorTreeContextMenu(wxContextMenuEvent& e);
     void ShowTreeContextMenu(wxTreeItemId item);
