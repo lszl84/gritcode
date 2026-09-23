@@ -2398,7 +2398,11 @@ void ChatFrame::PopulateTreeDir(wxTreeItemId parent, const wxString& path) {
     };
     std::vector<Entry> entries;
     wxString name;
-    bool cont = dir.GetFirst(&name, wxEmptyString, wxDIR_DIRS | wxDIR_FILES);
+    // wxDir excludes dot-entries (hidden files AND folders) unless
+    // wxDIR_HIDDEN is passed — so enable it when the toggle is on.
+    int flags = wxDIR_DIRS | wxDIR_FILES;
+    if (showHidden_) flags |= wxDIR_HIDDEN;
+    bool cont = dir.GetFirst(&name, wxEmptyString, flags);
     while (cont && entries.size() < 500) {
         // Skip dotfiles unless "Show Hidden Files" is ticked.
         if (!name.empty() && (showHidden_ || name[0] != wxT('.'))) {
