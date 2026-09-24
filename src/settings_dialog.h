@@ -4,6 +4,11 @@
 #include <wx/checkbox.h>
 #include <wx/choice.h>
 #include <wx/stattext.h>
+#include <memory>
+#include <string>
+
+class wxHyperlinkCtrl;
+struct ClaudeProbeState;
 
 // Modal dialog for editing API keys. Reads the current DeepSeek key from
 // wxSecretStore (falling back to the plaintext config file if the system
@@ -20,16 +25,26 @@
 class SettingsDialog : public wxDialog {
 public:
     SettingsDialog(wxWindow* parent);
+    ~SettingsDialog() override;
 
 private:
     wxTextCtrl*   keyCtrl_ = nullptr;
     wxCheckBox*   showCb_  = nullptr;
     wxCheckBox*   gritHistoryCb_ = nullptr;
     wxChoice*     effortChoice_  = nullptr;
+    wxChoice*     claudeEffortChoice_ = nullptr;
+    wxStaticText* claudeStatus_ = nullptr;
+    wxHyperlinkCtrl* claudeInstallLink_ = nullptr;
+    // Shared with the background Claude Code lookup (see StartClaudeProbe).
+    std::shared_ptr<ClaudeProbeState> claudeProbe_;
     wxStaticText* hint_    = nullptr;
 
     bool keyringWasBroken_ = false;  // snapshot at dialog-open time
 
     void OnSave(wxCommandEvent&);
     void OnToggleShow(wxCommandEvent&);
+    // Look up the claude executable and its version off the GUI thread, then
+    // fill in claudeStatus_ (or show the install link) via OnClaudeProbed.
+    void StartClaudeProbe();
+    void OnClaudeProbed(const std::string& exe, const std::string& version);
 };

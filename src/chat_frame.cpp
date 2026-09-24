@@ -38,6 +38,7 @@
 #include <wx/utils.h>
 #include <wx/textdlg.h>
 #include <wx/tokenzr.h>
+#include <wx/base64.h>
 #include <algorithm>
 #include <cctype>
 #include <map>
@@ -295,12 +296,32 @@ struct ModelRoute {
     // model from the published context window; conservative values are
     // fine — compaction triggers earlier rather than later.
     int contextWindow;
+    // Runs through the user's Claude Code CLI instead of an HTTP endpoint;
+    // url/needsApiKey/maxTokens don't apply.
+    bool claudeCli = false;
 };
 
-// Index 0 is always the free tier (Kilo Gateway). Indices >= 1 map into
-// remoteModels_, the DeepSeek model list — which is either the live GET
-// /models result or the hardcoded fallback below, never both.
+// A model index names a model independently of the dropdown layout, and is
+// what gets persisted: 0 is always the free tier (Kilo Gateway), 1.. map into
+// the DeepSeek list (remoteModels_) — which is either the live GET /models
+// result or the hardcoded fallback below, never both — and
+// kClaudeIndexBase.. are the Claude entries. The dropdown shows Claude after
+// DeepSeek, so a Claude entry's row depends on how many DeepSeek models are
+// listed; ModelRowForIndex / ModelIndexForRow convert.
 constexpr int kModelKiloFree = 0;
+constexpr int kClaudeIndexBase = 100;
+
+// Claude models, run through the user's own Claude Code CLI.
+struct ClaudeModelEntry {
+    const char* id;
+    const char* label;
+};
+const ClaudeModelEntry kClaudeModels[] = {
+    {"claude-opus-5-5", "Claude (Opus 5.5)"},
+    {"claude-sonnet-5", "Claude (Sonnet 5)"},
+};
+constexpr int kClaudeModelCount =
+    (int)(sizeof(kClaudeModels) / sizeof(kClaudeModels[0]));
 
 // Hardcoded DeepSeek fallback, used only when GET /models is unavailable
 // (no API key, network error, or unparseable response). Kept in a stable
@@ -310,6 +331,29 @@ const std::vector<std::string>& FallbackDeepseekModels() {
     static const std::vector<std::string> models = {
         "deepseek-flash", "deepseek-v4-pro"};
     return models;
+}
+
+// The DeepSeek ids the dropdown shows: the live list when the fetch
+// succeeded, the fallback otherwise.
+const std::vector<std::string>& DeepseekModels(
+    const std::vector<std::string>& remoteModels) {
+    return remoteModels.empty() ? FallbackDeepseekModels() : remoteModels;
+}
+
+// Dropdown row for a model index, or -1 when that model isn't listed (a
+// DeepSeek index past the end of the current list).
+int ModelRowForIndex(int idx, const std::vector<std::string>& remoteModels) {
+    const int dsCount = (int)DeepseekModels(remoteModels).size();
+    if (idx >= kClaudeIndexBase && idx < kClaudeIndexBase + kClaudeModelCount)
+        return 1 + dsCount + (idx - kClaudeIndexBase);
+    if (idx >= 0 && idx <= dsCount) return idx;
+    return -1;
+}
+
+int ModelIndexForRow(int row, const std::vector<std::string>& remoteModels) {
+    const int dsCount = (int)DeepseekModels(remoteModels).size();
+    if (row <= dsCount) return row;
+    return kClaudeIndexBase + (row - 1 - dsCount);
 }
 
 ModelRoute RouteForIndex(int idx, const std::vector<std::string>& remoteModels) {
@@ -324,11 +368,17 @@ ModelRoute RouteForIndex(int idx, const std::vector<std::string>& remoteModels) 
                 kOutputTokenMax, 256000};
     }
 
+    if (idx >= kClaudeIndexBase && idx < kClaudeIndexBase + kClaudeModelCount) {
+        // Claude Code manages its own context window and output limits.
+        return {"", kClaudeModels[idx - kClaudeIndexBase].id, false,
+                Preferences::Provider::DeepSeek, kOutputTokenMax, 1000000,
+                /*claudeCli=*/true};
+    }
+
     // DeepSeek models occupy indices >= 1. `remoteModels` is the single
     // source of truth for DeepSeek ids: the live list when the fetch
     // succeeded, the fallback above otherwise.
-    const std::vector<std::string>& models =
-        remoteModels.empty() ? FallbackDeepseekModels() : remoteModels;
+    const std::vector<std::string>& models = DeepseekModels(remoteModels);
     size_t i = (size_t)(idx - 1);
     if (i < models.size()) {
         return {"https://api.deepseek.com/chat/completions",
@@ -358,6 +408,213 @@ wxString RemoteModelLabel(const std::string& id) {
         }
     }
     return wxString::FromUTF8("DeepSeek " + s);
+}
+
+// Route for an OpenAI-style completion (the first request of a turn or a
+// tool-loop continuation). Switching the dropdown to Claude mid tool loop
+// can't hand that loop to Claude Code, so it finishes on the model the turn
+// started with.
+ModelRoute CompletionRoute(int currentIdx, int turnIdx,
+                           const std::vector<std::string>& remoteModels) {
+    ModelRoute route = RouteForIndex(currentIdx, remoteModels);
+    if (route.claudeCli) route = RouteForIndex(turnIdx, remoteModels);
+    if (route.claudeCli) route = RouteForIndex(kModelKiloFree, remoteModels);
+    return route;
+}
+
+// String field of a history/event object, or empty when missing or not a
+// string. Imported sessions and CLI events are untrusted shapes; value()
+// would throw on a type mismatch.
+std::string StringField(const nlohmann::json& m, const char* key) {
+    if (!m.is_object()) return std::string();
+    auto it = m.find(key);
+    if (it == m.end() || !it->is_string()) return std::string();
+    return it->get<std::string>();
+}
+
+bool IsClaudeModelId(const std::string& id) {
+    return id.rfind("claude-", 0) == 0;
+}
+
+// Dropdown-style label for a model id recorded in history ("model" field).
+wxString ModelLabelForId(const std::string& id) {
+    if (id == "kilo-auto/free") return "Kilo Free";
+    for (const auto& c : kClaudeModels) {
+        if (id == c.id) return c.label;
+    }
+    if (IsClaudeModelId(id)) return wxString::FromUTF8("Claude (" + id + ")");
+    if (id.rfind("deepseek-", 0) == 0) return RemoteModelLabel(id);
+    return wxString::FromUTF8(id);
+}
+
+bool IsUserTurn(const nlohmann::json& m) {
+    return m.is_object() && StringField(m, "role") == "user"
+           && !m.value("isSummary", false);
+}
+
+// Replays user turns in order and says when one went to a different model
+// than the turn before, from the "model" each user message records. Turns
+// saved before gritcode recorded models have none, so the first tagged turn
+// after them names its model instead of claiming a switch.
+class ModelSwitchTracker {
+public:
+    // Notice to show before this user message, or empty. With announceFirst
+    // the very first turn also names its model (used by the import viewer).
+    wxString Next(const nlohmann::json& userMsg, bool announceFirst) {
+        const std::string model = StringField(userMsg, "model");
+        wxString notice;
+        if (!model.empty() && model != last_) {
+            if (!last_.empty())
+                notice = "Switched to " + ModelLabelForId(model);
+            else if (sawTurn_ || announceFirst)
+                notice = "Model: " + ModelLabelForId(model);
+        }
+        if (!model.empty()) last_ = model;
+        sawTurn_ = true;
+        return notice;
+    }
+
+private:
+    std::string last_;
+    bool sawTurn_ = false;
+};
+
+// Italic one-line paragraph used for errors and status notices.
+Block NoticeBlock(const wxString& msg) {
+    Block b;
+    b.type = BlockType::Paragraph;
+    b.rawText = msg;
+    b.visibleText = msg;
+    InlineRun r; r.text = msg; r.italic = true;
+    b.runs.push_back(r);
+    return b;
+}
+
+std::string Truncated(const std::string& s, size_t max) {
+    if (s.size() <= max) return s;
+    return s.substr(0, max) + "\n[truncated]";
+}
+
+// Other models can't take Claude Code's tool calls as tool calls: those tools
+// aren't in their request, and some APIs reject calls to undeclared tools. So
+// each run of Claude assistant/tool messages is folded into one plain
+// assistant message describing what Claude did.
+nlohmann::json FlattenClaudeTurns(nlohmann::json messages) {
+    nlohmann::json out = nlohmann::json::array();
+    std::string merged;
+    bool inRun = false;
+    auto add = [&merged](const std::string& s) {
+        if (s.empty()) return;
+        if (!merged.empty()) merged += "\n\n";
+        merged += s;
+    };
+    auto flush = [&]() {
+        if (!inRun) return;
+        out.push_back({{"role", "assistant"}, {"content", merged}});
+        merged.clear();
+        inRun = false;
+    };
+    for (auto& m : messages) {
+        const std::string role = StringField(m, "role");
+        const bool fromClaude = (role == "assistant" || role == "tool")
+                                && IsClaudeModelId(StringField(m, "model"));
+        if (!fromClaude) {
+            flush();
+            out.push_back(std::move(m));
+            continue;
+        }
+        inRun = true;
+        if (role == "tool") {
+            add("[Tool result: " + Truncated(StringField(m, "content"), 1000) + "]");
+            continue;
+        }
+        add(StringField(m, "content"));
+        if (m.contains("tool_calls") && m["tool_calls"].is_array()) {
+            for (const auto& tc : m["tool_calls"]) {
+                if (!tc.is_object() || !tc.contains("function")) continue;
+                add("[Claude Code tool call: " + StringField(tc["function"], "name")
+                    + " " + Truncated(StringField(tc["function"], "arguments"), 500)
+                    + "]");
+            }
+        }
+    }
+    flush();
+    return out;
+}
+
+// Plain-text transcript of h[from, to), used to hand a conversation to Claude
+// Code when it didn't take part in it: the session started on another model,
+// or other models answered since Claude's last turn. With skipClaude,
+// Claude's own messages are left out (its session already has them). Keeps
+// the most recent part when long.
+std::string HandoverTranscript(const std::vector<nlohmann::json>& h,
+                               size_t from, size_t to, bool skipClaude) {
+    constexpr size_t kMaxChars = 120'000;
+    std::string out;
+    for (size_t i = from; i < to && i < h.size(); ++i) {
+        const auto& m = h[i];
+        if (!m.is_object() || m.value("compacted", false)) continue;
+        const std::string role = StringField(m, "role");
+        const std::string model = StringField(m, "model");
+        if (role == "system") continue;
+        if (skipClaude && IsClaudeModelId(model)) continue;
+        if (m.value("isSummary", false)) {
+            out += "--- summary of earlier conversation ---\n"
+                   + StringField(m, "content") + "\n\n";
+            continue;
+        }
+        if (role == "tool") {
+            out += "[tool result " + StringField(m, "name") + "]\n"
+                   + Truncated(StringField(m, "content"), 2000) + "\n\n";
+            continue;
+        }
+        out += "--- " + role;
+        if (role == "assistant" && !model.empty())
+            out += " (" + ModelLabelForId(model).utf8_string() + ")";
+        out += " ---\n";
+        const std::string content = StringField(m, "content");
+        if (!content.empty()) out += content + "\n";
+        if (m.contains("images") && m["images"].is_array()) {
+            for (const auto& img : m["images"]) {
+                std::string path = ImageStore::PathFor(
+                    StringField(img, "sha256"), StringField(img, "mime"));
+                if (!path.empty()) out += "[attached image: " + path + "]\n";
+            }
+        }
+        if (m.contains("tool_calls") && m["tool_calls"].is_array()) {
+            for (const auto& tc : m["tool_calls"]) {
+                if (!tc.is_object() || !tc.contains("function")) continue;
+                out += "[tool call " + StringField(tc["function"], "name") + " "
+                       + Truncated(StringField(tc["function"], "arguments"), 1000)
+                       + "]\n";
+            }
+        }
+        out += "\n";
+    }
+    if (out.size() > kMaxChars) {
+        out = "[... earlier transcript truncated ...]\n\n"
+              + out.substr(out.size() - kMaxChars);
+    }
+    return out;
+}
+
+// Text of a Claude Code tool_result `content`: a string, or an array of
+// content blocks (text, images).
+std::string ClaudeToolResultText(const nlohmann::json& content) {
+    if (content.is_string()) return content.get<std::string>();
+    if (!content.is_array()) return content.is_null() ? std::string() : content.dump();
+    std::string out;
+    for (const auto& b : content) {
+        const std::string type = StringField(b, "type");
+        std::string part;
+        if (type == "text") part = StringField(b, "text");
+        else if (type == "image") part = "[image]";
+        else if (b.is_string()) part = b.get<std::string>();
+        if (part.empty()) continue;
+        if (!out.empty()) out += "\n";
+        out += part;
+    }
+    return out;
 }
 
 // chdir() into the session's directory so tool subprocesses (bash,
@@ -707,6 +964,13 @@ bool ImportFromZip(const std::string& path, nlohmann::json& outJ,
     return true;
 }
 
+// Session export format. "version" 1 is plain JSON, 2 is a zip with image
+// blobs. New per-message fields (e.g. "model") are additive: older gritcode
+// ignores fields it doesn't know, so they don't bump the version. Bump past
+// kMaxSessionVersion only for a change older readers would misread; they
+// then refuse the file and ask the user to update.
+constexpr int kMaxSessionVersion = 2;
+
 bool ImportSessionFile(const std::string& path, nlohmann::json& outJ,
                        std::string& err) {
     std::ifstream f(path, std::ios::binary);
@@ -716,15 +980,24 @@ bool ImportSessionFile(const std::string& path, nlohmann::json& outJ,
     f.close();
     bool isZip = (magic[0] == 'P' && magic[1] == 'K'
                   && magic[2] == 3 && magic[3] == 4);
-    if (isZip) return ImportFromZip(path, outJ, err);
-
-    std::ifstream fj(path);
-    try { fj >> outJ; }
-    catch (...) {
-        err = "Couldn't read this file as a gritcode session.\n\n"
-              "If you're sure it's a valid session file, it may have been "
-              "created by a newer gritcode version - try updating to the "
-              "latest version.";
+    if (isZip) {
+        if (!ImportFromZip(path, outJ, err)) return false;
+    } else {
+        std::ifstream fj(path);
+        try { fj >> outJ; }
+        catch (...) {
+            err = "Couldn't read this file as a gritcode session.\n\n"
+                  "If you're sure it's a valid session file, it may have been "
+                  "created by a newer gritcode version - try updating to the "
+                  "latest version.";
+            return false;
+        }
+    }
+    auto v = outJ.is_object() ? outJ.find("version") : outJ.end();
+    if (outJ.is_object() && v != outJ.end() && v->is_number_integer()
+        && v->get<int>() > kMaxSessionVersion) {
+        err = "This session was exported by a newer version of gritcode.\n\n"
+              "Update gritcode to the latest version to open it.";
         return false;
     }
     return true;
@@ -1224,7 +1497,10 @@ ChatFrame::ChatFrame()
         });
     };
     cb.cancelRequest = [this]() {
-        CallAfter([this]() { request_.Cancel(); });
+        CallAfter([this]() {
+            request_.Cancel();
+            claudeProc_.Cancel();
+        });
     };
     cb.getBlocks = [this, guiSync]() {
         return guiSync([this]() { return BuildBlocksSnapshot(); });
@@ -1256,12 +1532,13 @@ ChatFrame::ChatFrame()
     };
     cb.setModel = [this, guiSync](int idx) -> nlohmann::json {
         return guiSync([this, idx]() -> nlohmann::json {
+            // `idx` is a dropdown row, as a user would pick it.
             if (idx < 0 || idx >= (int)modelChoice_->GetCount())
                 return {{"ok", false}, {"reason", "out of range"}};
-            currentModelIndex_ = idx;
+            currentModelIndex_ = ModelIndexForRow(idx, remoteModels_);
             modelChoice_->SetSelection(idx);
-            Preferences::SetLastModelIndex(idx);
-            return {{"ok", true}, {"modelIndex", idx}};
+            Preferences::SetLastModelIndex(currentModelIndex_);
+            return {{"ok", true}, {"modelIndex", currentModelIndex_}};
         });
     };
     cb.getPreferences = [guiSync]() -> nlohmann::json {
@@ -1595,6 +1872,9 @@ ChatFrame::~ChatFrame() {
     destroying_.store(true);
     mcp_.Stop();
     request_.Cancel();
+    // Kills a running Claude Code turn and joins its worker, so no callback
+    // can land on a half-destroyed frame.
+    claudeProc_ = ClaudeAgentProcess();
     delete fileWatcher_;  // stop filesystem watches (own their thread)
     fileWatcher_ = nullptr;
     // ~StreamingWebRequest joins the worker thread, so by the time we return
@@ -1705,6 +1985,7 @@ nlohmann::json ChatFrame::BuildConversationSnapshot() const {
         if (m.contains("name")) e["name"] = m["name"];
         if (m.contains("reasoning_content"))
             e["reasoning_content"] = m["reasoning_content"];
+        if (m.contains("model")) e["model"] = m["model"];
         out.push_back(std::move(e));
     }
     return out;
@@ -1715,12 +1996,12 @@ void ChatFrame::OnClose(wxCloseEvent& evt) {
     // running. Closing during a tool batch must veto + cancel just like
     // closing during an in-flight HTTP request — otherwise the worker would
     // outlive the frame and post wxQueueEvent to a dangling `this`.
-    if (request_.IsActive() || currentToolToken_) {
+    if (request_.IsActive() || currentToolToken_ || claudeProc_.IsActive()) {
         quitRequested_ = true;
         Hide();
         RequestCancel();
-        // OnStreamDone / OnToolBatchDone both check quitRequested_ and re-fire
-        // Close() once their phase finishes.
+        // OnStreamDone / OnToolBatchDone / OnClaudeDone check quitRequested_
+        // and re-fire Close() once their phase finishes.
         evt.Veto();
     } else {
         if (!MaybeSaveEditor()) {
@@ -1764,6 +2045,8 @@ void ChatFrame::OnCharHook(wxKeyEvent& e) {
 void ChatFrame::RequestCancel() {
     // Idempotent on a finished request — Cancel just sets an atomic.
     request_.Cancel();
+    // A Claude turn gets SIGINT, so Claude Code ends it cleanly.
+    claudeProc_.Cancel();
     // Signal the tool worker. Setting `cancelled` makes the worker bail out
     // between tools and the bash poll loop bail mid-tool. Sending SIGTERM to
     // the active pgid kills the bash subtree without waiting for the worker
@@ -1972,6 +2255,7 @@ void ChatFrame::RefreshSystemPromptAgents() {
 void ChatFrame::RestoreCanvasFromHistory() {
     PERF_SCOPE("RestoreCanvasFromHistory");
     canvas_->BeginBatch();
+    ModelSwitchTracker modelTracker;
     // Walk the message list and re-emit blocks. Tool call/result pairs are
     // stitched back together: an assistant message's tool_calls are matched
     // against the immediately-following "tool" messages by tool_call_id.
@@ -1985,6 +2269,10 @@ void ChatFrame::RestoreCanvasFromHistory() {
 
         if (role == "user") {
             if (!m.contains("content") || !m["content"].is_string()) continue;
+            if (IsUserTurn(m)) {
+                wxString notice = modelTracker.Next(m, /*announceFirst=*/false);
+                if (!notice.IsEmpty()) canvas_->AddBlock(NoticeBlock(notice));
+            }
             wxString text = wxString::FromUTF8(m["content"].get<std::string>());
             Block ub;
             ub.type = BlockType::UserPrompt;
@@ -2061,8 +2349,8 @@ void ChatFrame::RestoreCanvasFromHistory() {
 void ChatFrame::OnModelChoice(wxCommandEvent& evt) {
     int sel = evt.GetSelection();
     if (sel < 0) return;
-    currentModelIndex_ = sel;
-    Preferences::SetLastModelIndex(sel);
+    currentModelIndex_ = ModelIndexForRow(sel, remoteModels_);
+    Preferences::SetLastModelIndex(currentModelIndex_);
 }
 
 void ChatFrame::RebuildModelChoice() {
@@ -2072,18 +2360,16 @@ void ChatFrame::RebuildModelChoice() {
     // DeepSeek models come from one source only: the live list when the
     // fetch succeeded, the hardcoded fallback otherwise. They are never
     // concatenated, so a renamed model can't show up twice.
-    const auto& ds = remoteModels_.empty() ? FallbackDeepseekModels()
-                                           : remoteModels_;
-    for (const auto& id : ds)
+    for (const auto& id : DeepseekModels(remoteModels_))
         modelChoice_->Append(RemoteModelLabel(id));
+    for (const auto& c : kClaudeModels) modelChoice_->Append(c.label);
 
-    // currentModelIndex_ is the *desired* selection and may index a dynamic
+    // currentModelIndex_ is the *desired* selection and may name a dynamic
     // entry that hasn't arrived yet (or just disappeared). Clamp only for
     // display so the dropdown never renders unselected; routing falls back
     // to Kilo Free for an out-of-range index.
-    int sel = currentModelIndex_;
-    int count = (int)modelChoice_->GetCount();
-    if (sel < 0 || sel >= count) sel = 0;
+    int sel = ModelRowForIndex(currentModelIndex_, remoteModels_);
+    if (sel < 0 || sel >= (int)modelChoice_->GetCount()) sel = 0;
     modelChoice_->SetSelection(sel);
 }
 
@@ -3288,12 +3574,20 @@ void ChatFrame::ShowImportDialog() {
     MdStream importStream([this](Block b) {
         importCanvas_->AddBlock(std::move(b));
     });
+    // Say which model the session started on and where it changed. Files
+    // exported before gritcode recorded models carry no "model" and show no
+    // notices.
+    ModelSwitchTracker modelTracker;
 
     for (const auto& m : importedMessages_) {
         std::string role = m.value("role", std::string{});
         if (role == "system") continue;
 
         if (role == "user") {
+            if (IsUserTurn(m)) {
+                wxString notice = modelTracker.Next(m, /*announceFirst=*/true);
+                if (!notice.IsEmpty()) importCanvas_->AddBlock(NoticeBlock(notice));
+            }
             std::string content = m.value("content", std::string{});
             Block ub;
             ub.type = BlockType::UserPrompt;
@@ -3405,6 +3699,10 @@ void ChatFrame::OnSend(wxCommandEvent&) {
 void ChatFrame::StartTurn(const wxString& userText,
                         std::vector<PendingImage> images) {
     overflowRetried_ = false;
+    turnModelIndex_ = currentModelIndex_;
+    const ModelRoute route = RouteForIndex(currentModelIndex_, remoteModels_);
+    const std::string modelId = route.model;
+    RenderModelSwitchNotice(modelId);
     // Render the user prompt block (skipped for image-only messages).
     if (!userText.IsEmpty()) {
         Block ub;
@@ -3420,9 +3718,12 @@ void ChatFrame::StartTurn(const wxString& userText,
         EmitImageBlock(pi.hash, pi.mime, pi.name);
     }
 
+    // "model" records where the turn was sent, so a restored or exported
+    // session can show where the model changed.
     nlohmann::json userMsg = {
         {"role", "user"},
         {"content", userText.ToStdString(wxConvUTF8)},
+        {"model", modelId},
     };
     if (!images.empty()) {
         nlohmann::json arr = nlohmann::json::array();
@@ -3440,6 +3741,12 @@ void ChatFrame::StartTurn(const wxString& userText,
     UpdateQueueUI();  // Send becomes "Add", chip row stays visible if non-empty.
     toolIter_ = 0;
 
+    if (route.claudeCli) {
+        claudeModel_ = modelId;
+        claudeRetriedFresh_ = false;
+        StartClaudeTurn();
+        return;
+    }
     StartCompletion();
 }
 
@@ -3605,7 +3912,9 @@ void ChatFrame::DoSendActualRequest() {
         canvas_->AddBlock(std::move(b));
     });
 
-    ModelRoute route = RouteForIndex(currentModelIndex_, remoteModels_);
+    ModelRoute route =
+        CompletionRoute(currentModelIndex_, turnModelIndex_, remoteModels_);
+    requestModel_ = route.model;
 
     // Build an outbound copy of history with the active cwd appended to the
     // system prompt. Done per-request rather than baked into stored history
@@ -3634,6 +3943,15 @@ void ChatFrame::DoSendActualRequest() {
         }
         if (!extra.empty())
             messages[0]["content"] = base + extra;
+    }
+
+    // Claude Code turns become plain assistant text for this model, and the
+    // gritcode-only bookkeeping fields stay off the wire.
+    messages = FlattenClaudeTurns(std::move(messages));
+    for (auto& m : messages) {
+        if (!m.is_object()) continue;
+        m.erase("model");
+        m.erase("claudeSessionId");
     }
 
     // Defensive: drop consecutive same-role user/assistant messages. Both
@@ -3954,7 +4272,8 @@ void ChatFrame::OnStreamDone(WebResponse resp) {
         // (timeout, reset, closed mid-stream, unreachable, …). Show a friendly
         // explanation + a link to Settings instead of a raw curl error, so it
         // doesn't read as a gritcode failure.
-        ModelRoute route = RouteForIndex(currentModelIndex_, remoteModels_);
+        ModelRoute route =
+            CompletionRoute(currentModelIndex_, turnModelIndex_, remoteModels_);
         if (!route.needsApiKey && resp.networkError) {
             HandleCompletion(wxString(), /*freeModelStall=*/true);
             return;
@@ -4041,7 +4360,8 @@ void ChatFrame::HandleCompletion(const wxString& errorIfFailed,
         // Plain assistant message — record and finish.
         if (!activeAssistantText_.empty() || !activeReasoning_.empty()) {
             nlohmann::json msg = {{"role", "assistant"},
-                                  {"content", activeAssistantText_}};
+                                  {"content", activeAssistantText_},
+                                  {"model", requestModel_}};
             if (!activeReasoning_.empty())
                 msg["reasoning_content"] = activeReasoning_;
             history_.push_back(std::move(msg));
@@ -4053,7 +4373,8 @@ void ChatFrame::HandleCompletion(const wxString& errorIfFailed,
     // Record the assistant message that triggered the tool calls. The model
     // may have produced both content and tool_calls in one turn, so include
     // both. content can be null per OpenAI spec when only tool_calls exist.
-    nlohmann::json assistantMsg = {{"role", "assistant"}};
+    nlohmann::json assistantMsg = {{"role", "assistant"},
+                                   {"model", requestModel_}};
     if (activeAssistantText_.empty())
         assistantMsg["content"] = nullptr;
     else
@@ -4255,13 +4576,7 @@ void ChatFrame::RenderToolBlock(const std::string& name,
 }
 
 void ChatFrame::RenderErrorBlock(const wxString& msg) {
-    Block b;
-    b.type = BlockType::Paragraph;
-    b.rawText = msg;
-    b.visibleText = msg;
-    InlineRun r; r.text = msg; r.italic = true;
-    b.runs.push_back(r);
-    canvas_->AddBlock(std::move(b));
+    canvas_->AddBlock(NoticeBlock(msg));
 }
 
 void ChatFrame::RenderFreeModelStallNotice() {
@@ -4526,7 +4841,8 @@ bool ChatFrame::MaybeCompactThenSend() {
     // so compaction fires ~7x less often.
     nlohmann::json view = BuildModelView();
     int viewTokens = EstimatePromptTokens(view);
-    ModelRoute route = RouteForIndex(currentModelIndex_, remoteModels_);
+    ModelRoute route =
+        CompletionRoute(currentModelIndex_, turnModelIndex_, remoteModels_);
     int usable = route.contextWindow - kBufferTokens;
     if (viewTokens < usable) return false;
 
@@ -4632,7 +4948,8 @@ void ChatFrame::RunSummaryThenSend(int splitIdx) {
 
     // Cap the summary-call input so the summary request itself doesn't
     // overflow. Budget = context window − response budget − prompt overhead.
-    ModelRoute route = RouteForIndex(currentModelIndex_, remoteModels_);
+    ModelRoute route =
+        CompletionRoute(currentModelIndex_, turnModelIndex_, remoteModels_);
     size_t maxChars = (size_t)(route.contextWindow - 6000) * 4;
     if (maxChars < 40000) maxChars = 40000;
     if (headText.size() > maxChars) {
@@ -4879,4 +5196,512 @@ void ChatFrame::ApplyCompaction(bool success, const std::string& summary,
     std::fprintf(stderr, "[ApplyCompaction] exception: %s\n", e.what());
     throw;
   }
+}
+
+// ---------------------------------------------------------------------------
+// Claude turns
+//
+// A Claude turn runs the user's own Claude Code CLI:
+//   claude -p --input-format stream-json --output-format stream-json ...
+// with the user message (text + images) as one JSON line on stdin. Claude
+// Code runs its own agent loop and tools; gritcode renders its events:
+//   - stream_event text/thinking deltas stream into the canvas,
+//   - "assistant" events carry the finished blocks (text, tool_use), which
+//     are recorded in history_ as OpenAI-style assistant messages,
+//   - "user" events carry tool_results, rendered as tool blocks and recorded
+//     as role=tool messages,
+//   - "result" ends the turn (is_error for failures).
+// Every recorded message is tagged with "model"; assistant messages also get
+// "claudeSessionId", and the next Claude turn resumes that session with
+// --resume. Whatever other models said in between is handed over as a
+// transcript in front of the user's message.
+// ---------------------------------------------------------------------------
+
+namespace {
+
+// Largest image sent inline (base64 grows it by a third; the API takes up to
+// 5 MB per image). Bigger ones are passed by path for Claude's Read tool.
+constexpr size_t kClaudeInlineImageMaxBytes = 3'750'000;
+// Cap on a tool result kept in gritcode's copy of the history. Claude Code
+// keeps the full output in its own session; ours is for display, search and
+// handing context to other models.
+constexpr size_t kClaudeToolResultMaxChars = 30'000;
+
+}  // namespace
+
+void ChatFrame::RenderModelSwitchNotice(const std::string& modelId) {
+    ModelSwitchTracker tracker;
+    for (const auto& m : history_) {
+        if (IsUserTurn(m)) tracker.Next(m, false);
+    }
+    wxString notice = tracker.Next(nlohmann::json{{"model", modelId}}, false);
+    if (!notice.IsEmpty()) RenderErrorBlock(notice);
+}
+
+void ChatFrame::StartClaudeTurn(bool fresh) {
+    claudeTurnHistoryStart_ = history_.size();
+
+    const std::string exe = FindClaudeExecutable();
+    if (exe.empty()) {
+        wxString text = "Claude Code isn't installed. Install it, sign in by "
+                        "running claude in a terminal, then try again. ";
+        wxString linkText = "Install Claude Code";
+        Block b = NoticeBlock(text);
+        InlineRun link;
+        link.text = linkText;
+        link.bold = true;
+        link.link = "https://code.claude.com/docs/en/setup";
+        b.runs.push_back(link);
+        b.rawText += linkText;
+        b.visibleText += linkText;
+        canvas_->AddBlock(std::move(b));
+        if (!history_.empty() && IsUserTurn(history_.back())) history_.pop_back();
+        FinalizeTurn(true);
+        return;
+    }
+
+    // Resume the latest Claude Code session in this gritcode session. What
+    // other models said after it (or the whole conversation, when there is
+    // no Claude session yet) goes in front of the message as a transcript.
+    const size_t userIdx = history_.size() - 1;
+    std::string resumeId;
+    size_t since = 0;
+    if (!fresh) {
+        for (size_t i = userIdx; i-- > 0;) {
+            std::string sid = StringField(history_[i], "claudeSessionId");
+            if (!sid.empty()) {
+                resumeId = sid;
+                since = i + 1;
+                break;
+            }
+        }
+    }
+    std::string text;
+    {
+        std::string t = HandoverTranscript(history_, since, userIdx,
+                                           /*skipClaude=*/!resumeId.empty());
+        if (!t.empty()) {
+            text = resumeId.empty()
+                ? "[This conversation started in gritcode with another model. "
+                  "Transcript so far, for context:]\n\n"
+                : "[Since your last reply, this gritcode conversation "
+                  "continued with another model. What happened since, for "
+                  "context:]\n\n";
+            text += t + "[End of transcript. The user's new message follows.]\n\n";
+        }
+    }
+
+    const auto& userMsg = history_[userIdx];
+    text += StringField(userMsg, "content");
+    nlohmann::json content = nlohmann::json::array();
+    if (userMsg.contains("images") && userMsg["images"].is_array()) {
+        for (const auto& img : userMsg["images"]) {
+            const std::string hash = StringField(img, "sha256");
+            std::string mime = StringField(img, "mime");
+            if (mime.empty()) mime = "image/png";
+            std::string bytes = ImageStore::Load(hash, mime);
+            if (bytes.empty()) continue;
+            if (bytes.size() > kClaudeInlineImageMaxBytes) {
+                text += "\n\n[Attached image too large to send inline: "
+                        + ImageStore::PathFor(hash, mime)
+                        + " - view it with the Read tool.]";
+                continue;
+            }
+            content.push_back({
+                {"type", "image"},
+                {"source", {{"type", "base64"},
+                            {"media_type", mime},
+                            {"data", wxBase64Encode(bytes.data(), bytes.size())
+                                         .ToStdString()}}},
+            });
+        }
+    }
+    if (!text.empty()) content.push_back({{"type", "text"}, {"text", text}});
+    nlohmann::json line = {
+        {"type", "user"},
+        {"message", {{"role", "user"}, {"content", std::move(content)}}},
+    };
+
+    // Project instructions: Claude Code reads CLAUDE.md itself but not
+    // gritcode's AGENTS.md. A file keeps a large AGENTS.md clear of argv
+    // limits and Windows command-line quoting.
+    std::string append =
+        "You are running inside gritcode, a desktop coding app. The user reads "
+        "your replies, rendered as markdown, and your tool calls in gritcode's "
+        "chat window.";
+    const std::string agents = LoadAgentsInstructions(activeCwd_);
+    if (!agents.empty()) append += "\n\n" + agents;
+    claudePromptFile_.clear();
+    wxString tmp = wxFileName::CreateTempFileName("gritclaude");
+    if (!tmp.empty()) {
+        std::ofstream f(tmp.ToStdString(wxConvUTF8), std::ios::binary | std::ios::trunc);
+        f << append;
+        if (f) claudePromptFile_ = tmp.ToStdString(wxConvUTF8);
+        else wxRemoveFile(tmp);
+    }
+
+    ClaudeRunSpec spec;
+    spec.executable = exe;
+    spec.cwd = activeCwd_;
+    spec.args = {
+        "-p",
+        "--input-format", "stream-json",
+        "--output-format", "stream-json",
+        "--verbose",
+        "--include-partial-messages",
+        "--model", claudeModel_,
+        // gritcode's own agent runs its tools without confirmation, and a
+        // headless run has nobody to answer a prompt: Claude gets the same.
+        "--permission-mode", "bypassPermissions",
+    };
+    const wxString effort = Preferences::GetClaudeEffort();
+    if (!effort.IsEmpty()) {
+        spec.args.push_back("--effort");
+        spec.args.push_back(effort.utf8_string());
+    }
+    if (!resumeId.empty()) {
+        spec.args.push_back("--resume");
+        spec.args.push_back(resumeId);
+    }
+    if (!claudePromptFile_.empty()) {
+        spec.args.push_back("--append-system-prompt-file");
+        spec.args.push_back(claudePromptFile_);
+    }
+    spec.stdinPayload = line.dump(-1, ' ', false,
+                                  nlohmann::json::error_handler_t::replace)
+                        + "\n";
+
+    // Reset per-run stream state.
+    claudeBuf_.clear();
+    claudeSessionId_.clear();
+    claudeResumed_ = !resumeId.empty();
+    claudeResultSeen_ = false;
+    claudeIsError_ = false;
+    claudeErrorText_.clear();
+    claudeMsgId_.clear();
+    claudeStreamMsgId_.clear();
+    claudePendingMsg_ = nullptr;
+    claudeStreamedMsgIds_.clear();
+    claudeToolUses_.clear();
+    activeAssistantText_.clear();
+    activeReasoning_.clear();
+    thinkingEmitted_ = false;
+    liveThinkingIdx_ = -1;
+    mdStream_ = std::make_unique<MdStream>([this](Block b) {
+        canvas_->AddBlock(std::move(b));
+    });
+
+    LogDebug("=== CLAUDE model=" + claudeModel_
+             + (resumeId.empty() ? std::string(" (new session)")
+                                 : " resume=" + resumeId)
+             + " stdin_bytes=" + std::to_string(spec.stdinPayload.size())
+             + " ===");
+
+    ChdirToCwd(activeCwd_);
+    claudeProc_ = ClaudeAgentProcess(
+        this, std::move(spec),
+        [this](std::string_view chunk) { OnClaudeData(chunk); },
+        [this](ClaudeProcessResult res) { OnClaudeDone(std::move(res)); });
+}
+
+void ChatFrame::OnClaudeData(std::string_view chunk) {
+    claudeBuf_.append(chunk.data(), chunk.size());
+    size_t start = 0;
+    size_t nl;
+    while ((nl = claudeBuf_.find('\n', start)) != std::string::npos) {
+        std::string_view line(claudeBuf_.data() + start, nl - start);
+        start = nl + 1;
+        if (!line.empty() && line.back() == '\r') line.remove_suffix(1);
+        if (line.empty() || line.front() != '{') continue;
+        try {
+            HandleClaudeEvent(nlohmann::json::parse(line));
+        } catch (const std::exception& e) {
+            LogDebug(std::string("claude: skipped event: ") + e.what());
+        }
+    }
+    claudeBuf_.erase(0, start);
+}
+
+void ChatFrame::HandleClaudeEvent(const nlohmann::json& ev) {
+    if (!ev.is_object()) return;
+    const std::string type = StringField(ev, "type");
+
+    if (type == "system") {
+        if (StringField(ev, "subtype") == "init") {
+            claudeSessionId_ = StringField(ev, "session_id");
+            LogDebug("claude: session " + claudeSessionId_ + " model "
+                     + StringField(ev, "model"));
+        }
+        return;
+    }
+    if (type == "result") {
+        claudeResultSeen_ = true;
+        auto isErr = ev.find("is_error");
+        claudeIsError_ = isErr != ev.end() && isErr->is_boolean() && isErr->get<bool>();
+        if (claudeSessionId_.empty()) claudeSessionId_ = StringField(ev, "session_id");
+        if (claudeIsError_) {
+            std::string msg;
+            auto errs = ev.find("errors");
+            if (errs != ev.end() && errs->is_array()) {
+                for (const auto& e : *errs) {
+                    if (!e.is_string()) continue;
+                    if (!msg.empty()) msg += "\n";
+                    msg += e.get<std::string>();
+                }
+            }
+            if (msg.empty()) msg = StringField(ev, "result");
+            if (msg.empty()) msg = StringField(ev, "subtype");
+            claudeErrorText_ = msg;
+        }
+        return;
+    }
+
+    // Subagent traffic (parent_tool_use_id set) stays inside the Agent tool's
+    // own result; only the main conversation is rendered and recorded.
+    auto parent = ev.find("parent_tool_use_id");
+    if (parent != ev.end() && !parent->is_null()) return;
+
+    if (type == "stream_event") {
+        auto eIt = ev.find("event");
+        if (eIt == ev.end() || !eIt->is_object()) return;
+        const auto& e = *eIt;
+        const std::string et = StringField(e, "type");
+        if (et == "message_start") {
+            // A new API round: settle the previous round's thinking.
+            EmitPendingThinking();
+            activeReasoning_.clear();
+            thinkingEmitted_ = false;
+            liveThinkingIdx_ = -1;
+            auto msg = e.find("message");
+            claudeStreamMsgId_ = msg != e.end() ? StringField(*msg, "id") : std::string();
+        } else if (et == "content_block_start") {
+            auto block = e.find("content_block");
+            if (block != e.end() && StringField(*block, "type") == "tool_use")
+                EmitPendingThinking();
+        } else if (et == "content_block_delta") {
+            auto dIt = e.find("delta");
+            if (dIt == e.end() || !dIt->is_object()) return;
+            const std::string dt = StringField(*dIt, "type");
+            if (dt == "text_delta") {
+                const std::string t = StringField(*dIt, "text");
+                if (t.empty()) return;
+                EmitPendingThinking();
+                claudeStreamedMsgIds_.insert(claudeStreamMsgId_);
+                activeAssistantText_ += t;
+                if (mdStream_) mdStream_->Feed(wxString::FromUTF8(t));
+            } else if (dt == "thinking_delta") {
+                activeReasoning_ += StringField(*dIt, "thinking");
+                UpdateLiveThinking();
+            }
+        } else if (et == "content_block_stop") {
+            // Close the markdown block so a following tool call or text block
+            // starts on its own.
+            if (mdStream_) mdStream_->Flush();
+        }
+        return;
+    }
+
+    if (type == "assistant") {
+        auto msgIt = ev.find("message");
+        if (msgIt == ev.end() || !msgIt->is_object()) return;
+        const auto& msg = *msgIt;
+        // Claude Code reports API failures (unsupported model, auth, limits)
+        // as a synthetic assistant message. The result event carries the same
+        // error and FailClaudeTurn shows it, so this isn't a reply to keep.
+        auto apiErr = ev.find("is_api_error_message");
+        if ((apiErr != ev.end() && apiErr->is_boolean() && apiErr->get<bool>())
+            || StringField(msg, "model") == "<synthetic>")
+            return;
+        const std::string id = StringField(msg, "id");
+        // Claude Code sends one "assistant" event per finished content block;
+        // blocks of the same API message share its id.
+        if (id != claudeMsgId_ || !claudePendingMsg_.is_object()) {
+            FlushClaudePendingMessage();
+            claudeMsgId_ = id;
+            claudePendingMsg_ = {{"role", "assistant"},
+                                 {"content", ""},
+                                 {"model", claudeModel_}};
+            if (!claudeSessionId_.empty())
+                claudePendingMsg_["claudeSessionId"] = claudeSessionId_;
+        }
+        auto blocks = msg.find("content");
+        if (blocks == msg.end() || !blocks->is_array()) return;
+        for (const auto& b : *blocks) {
+            const std::string bt = StringField(b, "type");
+            if (bt == "text") {
+                const std::string t = StringField(b, "text");
+                if (t.empty()) continue;
+                std::string c = StringField(claudePendingMsg_, "content");
+                if (!c.empty()) c += "\n\n";
+                claudePendingMsg_["content"] = c + t;
+                // Not streamed as deltas (an older CLI, say): render it whole.
+                if (!claudeStreamedMsgIds_.count(id) && mdStream_) {
+                    EmitPendingThinking();
+                    mdStream_->Feed(wxString::FromUTF8(t));
+                    mdStream_->Flush();
+                }
+            } else if (bt == "thinking") {
+                const std::string t = StringField(b, "thinking");
+                if (t.empty()) continue;
+                std::string r = StringField(claudePendingMsg_, "reasoning_content");
+                if (!r.empty()) r += "\n\n";
+                claudePendingMsg_["reasoning_content"] = r + t;
+                if (activeReasoning_.empty() && !thinkingEmitted_) activeReasoning_ = t;
+            } else if (bt == "tool_use") {
+                const std::string toolId = StringField(b, "id");
+                const std::string name = StringField(b, "name");
+                auto input = b.find("input");
+                std::string args = input != b.end()
+                    ? input->dump(-1, ' ', false, nlohmann::json::error_handler_t::replace)
+                    : std::string("{}");
+                claudeToolUses_[toolId] = {name, args};
+                if (!claudePendingMsg_.contains("tool_calls"))
+                    claudePendingMsg_["tool_calls"] = nlohmann::json::array();
+                claudePendingMsg_["tool_calls"].push_back({
+                    {"id", toolId},
+                    {"type", "function"},
+                    {"function", {{"name", name}, {"arguments", args}}},
+                });
+            }
+        }
+        return;
+    }
+
+    if (type == "user") {
+        auto msgIt = ev.find("message");
+        if (msgIt == ev.end() || !msgIt->is_object()) return;
+        auto blocks = msgIt->find("content");
+        if (blocks == msgIt->end() || !blocks->is_array()) return;
+        for (const auto& b : *blocks) {
+            if (StringField(b, "type") != "tool_result") continue;
+            // The calls this result answers go into history_ first.
+            FlushClaudePendingMessage();
+            if (mdStream_) mdStream_->Flush();
+            EmitPendingThinking();
+
+            const std::string toolId = StringField(b, "tool_use_id");
+            auto rc = b.find("content");
+            std::string result = rc != b.end() ? ClaudeToolResultText(*rc) : std::string();
+            if (result.size() > kClaudeToolResultMaxChars) {
+                result.resize(kClaudeToolResultMaxChars);
+                result += "\n[output truncated]";
+            }
+            auto use = claudeToolUses_.find(toolId);
+            const std::string name = use != claudeToolUses_.end() ? use->second.first
+                                                                  : std::string("tool");
+            const std::string args = use != claudeToolUses_.end() ? use->second.second
+                                                                  : std::string();
+            RenderToolBlock(name, args, result);
+            history_.push_back({
+                {"role", "tool"},
+                {"tool_call_id", toolId},
+                {"name", name},
+                {"content", result},
+                {"model", claudeModel_},
+            });
+        }
+    }
+}
+
+void ChatFrame::FlushClaudePendingMessage() {
+    if (!claudePendingMsg_.is_object()) return;
+    nlohmann::json msg = std::move(claudePendingMsg_);
+    claudePendingMsg_ = nullptr;
+    const bool hasTools = msg.contains("tool_calls") && !msg["tool_calls"].empty();
+    const bool hasText = !StringField(msg, "content").empty();
+    if (!hasText && !hasTools && StringField(msg, "reasoning_content").empty())
+        return;
+    // OpenAI shape: content is null when a message only calls tools.
+    if (!hasText && hasTools) msg["content"] = nullptr;
+    history_.push_back(std::move(msg));
+}
+
+void ChatFrame::OnClaudeDone(ClaudeProcessResult res) {
+    if (!claudeBuf_.empty()) OnClaudeData("\n");  // a final unterminated line
+    if (!claudePromptFile_.empty()) {
+        wxRemoveFile(wxString::FromUTF8(claudePromptFile_));
+        claudePromptFile_.clear();
+    }
+    if (quitRequested_) {
+        Close();
+        return;
+    }
+
+    if (mdStream_) mdStream_->Flush();
+    mdStream_.reset();
+    EmitPendingThinking();
+    FlushClaudePendingMessage();
+
+    LogDebug("=== CLAUDE done exit=" + std::to_string(res.exitCode)
+             + (res.cancelled ? " cancelled" : "")
+             + (claudeResultSeen_ ? (claudeIsError_ ? " result=error" : " result=ok")
+                                  : " no-result")
+             + " ===");
+    if (!res.stderrTail.empty()) LogDebug("claude stderr: " + res.stderrTail);
+
+    if (!res.started) {
+        FailClaudeTurn("couldn't start claude (" + res.error + ")");
+        return;
+    }
+    if (res.cancelled) {
+        // SIGINT let Claude Code record the partial turn; what we already
+        // recorded stays too, so the next turn resumes consistently.
+        RenderErrorBlock("Cancelled.");
+        FinalizeTurn(true);
+        return;
+    }
+
+    std::string detail = claudeErrorText_;
+    if (detail.empty() && !claudeResultSeen_) {
+        detail = res.stderrTail;
+        while (!detail.empty() && std::isspace((unsigned char)detail.back()))
+            detail.pop_back();
+    }
+
+    // Claude Code prunes old session transcripts; a gritcode session can
+    // outlive the Claude session it points at. Start a new one and hand over
+    // the whole conversation instead.
+    if (claudeResumed_ && !claudeRetriedFresh_
+        && detail.find("No conversation found") != std::string::npos) {
+        claudeRetriedFresh_ = true;
+        LogDebug("claude: session gone, retrying without --resume");
+        StartClaudeTurn(/*fresh=*/true);
+        return;
+    }
+
+    if (claudeResultSeen_ && !claudeIsError_) {
+        FinalizeTurn();
+        return;
+    }
+    if (detail.empty())
+        detail = "Claude Code exited with status " + std::to_string(res.exitCode) + ".";
+    FailClaudeTurn(detail);
+}
+
+void ChatFrame::FailClaudeTurn(const std::string& detail) {
+    std::string shown = detail;
+    if (shown.size() > 1500) shown = shown.substr(0, 1500) + "…";
+    std::string lower = detail;
+    std::transform(lower.begin(), lower.end(), lower.begin(),
+                   [](unsigned char c) { return (char)std::tolower(c); });
+    const bool authProblem = lower.find("login") != std::string::npos
+                             || lower.find("log in") != std::string::npos
+                             || lower.find("not logged") != std::string::npos
+                             || lower.find("authenticat") != std::string::npos
+                             || lower.find("api key") != std::string::npos;
+    wxString msg;
+    if (authProblem) {
+        msg = "Claude Code isn't signed in. Run claude in a terminal and sign "
+              "in, then try again.\n\n" + wxString::FromUTF8(shown);
+    } else {
+        msg = "Claude Code error: " + wxString::FromUTF8(shown);
+    }
+    RenderErrorBlock(msg);
+
+    // Nothing from this turn was recorded: drop the unanswered user message,
+    // as the HTTP error path does, so it isn't sent again with the next one.
+    if (history_.size() == claudeTurnHistoryStart_ && !history_.empty()
+        && IsUserTurn(history_.back()))
+        history_.pop_back();
+    FinalizeTurn(true);
 }

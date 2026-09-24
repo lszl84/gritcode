@@ -4,7 +4,7 @@
 
 **[gritcode.ai](https://gritcode.ai)** · [Download](https://github.com/lszl84/gritcode/releases/latest) · [Features](https://gritcode.ai/features/) · [Compare](https://gritcode.ai/compare/) · [♥ Sponsor](https://gritcode.ai/sponsor/)
 
-Runs [DeepSeek](https://platform.deepseek.com/) V4 Pro and V4.1 Flash with your API key, or free models through the [Kilo Gateway](https://kilo.ai/docs/gateway) with no key and no sign-up.
+Runs [DeepSeek](https://platform.deepseek.com/) V4 Pro and V4.1 Flash with your API key, or free models through the [Kilo Gateway](https://kilo.ai/docs/gateway) with no key and no sign-up. It can also run Claude through your own [Claude Code](#claude) install.
 
 ![Gritcode: importing a .gritsession and replaying its prompts in a new project (2× speed)](assets/screencast-clip.gif)
 
@@ -63,6 +63,12 @@ On other Linux distributions, install the equivalent development packages for wx
 ## API keys
 
 Click the ⚙ gear button in the bottom toolbar to open Settings, then paste your DeepSeek API key ([get one here](https://platform.deepseek.com/)). Keys are stored in the OS keyring: the macOS Keychain or the Linux Secret Service. Kilo Free needs no key.
+
+## Claude
+
+The Model dropdown also offers **Claude (Opus 5.5)** and **Claude (Sonnet 5)**. These run your installed [Claude Code](https://code.claude.com/docs/en/setup) (the `claude` command) headlessly, so you need Claude Code installed and signed in: run `claude` once in a terminal and log in. Gritcode never sees your Claude credentials; usage goes to your own Claude account or API key.
+
+With Claude selected, Claude Code runs its own agent loop and tools (Bash, Read, Edit, …), and Gritcode shows them in the chat. As with Gritcode's own agent, tools run without confirmation prompts. Each Gritcode session resumes the same Claude Code session, and when you switch models mid-session the other model gets a transcript of what happened. Claude's effort level is in Settings.
 
 ## Support Gritcode
 

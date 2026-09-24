@@ -235,6 +235,7 @@ set_target_properties(syntax_grammars PROPERTIES
 set(SRCS
     src/main.cpp
     src/chat_frame.cpp
+    src/claude_agent.cpp
     src/chat_canvas.cpp
     src/md_parser.cpp
     src/inline_parser.cpp

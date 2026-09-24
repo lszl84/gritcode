@@ -1,9 +1,36 @@
 #include "settings_dialog.h"
+#include "claude_agent.h"
 #include "preferences.h"
 #include <wx/sizer.h>
 #include <wx/stattext.h>
 #include <wx/hyperlink.h>
 #include <wx/msgdlg.h>
+#include <cstdlib>
+#include <mutex>
+#include <thread>
+
+// Handoff between the dialog and its background Claude Code lookup. The
+// lookup can outlive the dialog, so it reports through `target`, which the
+// dialog clears (under `mu`) when it closes.
+struct ClaudeProbeState {
+    std::mutex mu;
+    SettingsDialog* target = nullptr;
+};
+
+namespace {
+
+// Claude Code effort levels, in dropdown order. "" is Claude Code's own
+// default and passes no --effort flag.
+struct EffortLevel {
+    const char* value;
+    const char* label;
+};
+const EffortLevel kClaudeEfforts[] = {
+    {"", "Default"}, {"low", "Low"}, {"medium", "Medium"},
+    {"high", "High"}, {"xhigh", "Extra high"}, {"max", "Max"},
+};
+
+}  // namespace
 
 SettingsDialog::SettingsDialog(wxWindow* parent)
     : wxDialog(parent, wxID_ANY, "Settings",
@@ -82,6 +109,57 @@ SettingsDialog::SettingsDialog(wxWindow* parent)
     effortRow->Add(effortChoice_, 0, wxALIGN_CENTER_VERTICAL | wxLEFT, 8);
     outer->Add(effortRow, 0, wxLEFT | wxRIGHT | wxTOP, 12);
 
+    // ---- Claude section ----
+    auto* claudeHeading = new wxStaticText(this, wxID_ANY, "Claude");
+    wxFont chf = claudeHeading->GetFont();
+    chf.MakeBold();
+    claudeHeading->SetFont(chf);
+    outer->Add(claudeHeading, 0, wxLEFT | wxRIGHT | wxTOP, 12);
+
+    // Gritcode drives the user's own Claude Code install and never handles
+    // Claude credentials, so sign-in happens in Claude Code itself.
+    auto* claudeInfo = new wxStaticText(this, wxID_ANY,
+        "Uses your installed Claude Code (the claude command).\n"
+        "Sign in by running claude in a terminal first.");
+    claudeInfo->SetFont(smaller);
+    outer->Add(claudeInfo, 0, wxLEFT | wxRIGHT | wxTOP, 12);
+
+    // Filled in by OnClaudeProbed. Ellipsized so a long install path can't
+    // widen the dialog after it is already on screen.
+    claudeStatus_ = new wxStaticText(this, wxID_ANY,
+        wxString::FromUTF8("Looking for Claude Code\xE2\x80\xA6"),
+        wxDefaultPosition, wxDefaultSize,
+        wxST_NO_AUTORESIZE | wxST_ELLIPSIZE_MIDDLE);
+    claudeStatus_->SetFont(smaller);
+    claudeInstallLink_ = new wxHyperlinkCtrl(this, wxID_ANY,
+        "Claude Code not found - install it",
+        "https://code.claude.com/docs/en/setup");
+    claudeInstallLink_->Hide();
+    outer->AddSpacer(4);
+    outer->Add(claudeStatus_, 0, wxEXPAND | wxLEFT | wxRIGHT, 12);
+    outer->Add(claudeInstallLink_, 0, wxLEFT | wxRIGHT, 12);
+
+    auto* claudeEffortRow = new wxBoxSizer(wxHORIZONTAL);
+    auto* claudeEffortLabel = new wxStaticText(this, wxID_ANY, "Effort:");
+    // Same label width as DeepSeek's, so the two effort dropdowns line up.
+    claudeEffortLabel->SetMinSize(effortLabel->GetBestSize());
+    claudeEffortChoice_ = new wxChoice(this, wxID_ANY);
+    const wxString currentEffort = Preferences::GetClaudeEffort();
+    int effortSel = 0;
+    for (int i = 0; i < (int)(sizeof(kClaudeEfforts) / sizeof(kClaudeEfforts[0])); ++i) {
+        claudeEffortChoice_->Append(kClaudeEfforts[i].label);
+        if (currentEffort == kClaudeEfforts[i].value) effortSel = i;
+    }
+    claudeEffortChoice_->SetMinSize(FromDIP(wxSize(110, -1)));
+    claudeEffortChoice_->SetSelection(effortSel);
+    claudeEffortChoice_->SetToolTip(
+        "How hard Claude thinks before answering. Default uses Claude Code's "
+        "own setting for the model. Higher levels can do better on hard tasks "
+        "but are slower and use more of your Claude usage.");
+    claudeEffortRow->Add(claudeEffortLabel, 0, wxALIGN_CENTER_VERTICAL);
+    claudeEffortRow->Add(claudeEffortChoice_, 0, wxALIGN_CENTER_VERTICAL | wxLEFT, 8);
+    outer->Add(claudeEffortRow, 0, wxLEFT | wxRIGHT | wxTOP, 12);
+
     // ---- Agent tools section ----
     auto* toolsHeading = new wxStaticText(this, wxID_ANY, "Agent tools");
     wxFont thf = toolsHeading->GetFont();
@@ -111,6 +189,54 @@ SettingsDialog::SettingsDialog(wxWindow* parent)
 
     Bind(wxEVT_BUTTON, &SettingsDialog::OnSave, this, wxID_OK);
     showCb_->Bind(wxEVT_CHECKBOX, &SettingsDialog::OnToggleShow, this);
+
+    StartClaudeProbe();
+}
+
+SettingsDialog::~SettingsDialog() {
+    // A lookup still running must not call back into a dead dialog. Any
+    // callback it already queued is dropped along with this window's events.
+    std::lock_guard<std::mutex> lk(claudeProbe_->mu);
+    claudeProbe_->target = nullptr;
+}
+
+void SettingsDialog::StartClaudeProbe() {
+    claudeProbe_ = std::make_shared<ClaudeProbeState>();
+    claudeProbe_->target = this;
+    // `claude --version` usually takes milliseconds but can take seconds
+    // (macOS checks a freshly updated binary on its first run), so it never
+    // runs on the GUI thread. Detached: the dialog may close before it ends.
+    std::thread([probe = claudeProbe_]() {
+        const std::string exe = FindClaudeExecutable();
+        const std::string version = ClaudeVersion(exe);
+        std::lock_guard<std::mutex> lk(probe->mu);
+        if (SettingsDialog* dlg = probe->target) {
+            dlg->CallAfter([dlg, exe, version]() {
+                dlg->OnClaudeProbed(exe, version);
+            });
+        }
+    }).detach();
+}
+
+void SettingsDialog::OnClaudeProbed(const std::string& exe,
+                                    const std::string& version) {
+    if (exe.empty()) {
+        claudeStatus_->Hide();
+        claudeInstallLink_->Show();
+        Layout();
+        return;
+    }
+    wxString where = wxString::FromUTF8(exe);
+    if (const char* home = std::getenv("HOME")) {
+        wxString h = wxString::FromUTF8(home);
+        if (!h.IsEmpty() && where.StartsWith(h)) where = "~" + where.Mid(h.length());
+    }
+    // `claude --version` prints e.g. "2.1.281 (Claude Code)".
+    const std::string v = version.substr(0, version.find(' '));
+    claudeStatus_->SetLabel(v.empty()
+        ? "Found Claude Code at " + where
+        : "Found Claude Code " + wxString::FromUTF8(v) + " at " + where);
+    Layout();
 }
 
 void SettingsDialog::OnToggleShow(wxCommandEvent&) {
@@ -186,10 +312,13 @@ void SettingsDialog::OnSave(wxCommandEvent& evt) {
         Preferences::SetApiKeyPlaintext(provider, wxString());
     }
 
-    // Persist the Grit History tools toggle and the reasoning effort.
+    // Persist the Grit History tools toggle and the reasoning efforts.
     Preferences::SetEnableGritHistory(gritHistoryCb_->IsChecked());
     Preferences::SetReasoningEffort(
         effortChoice_->GetSelection() == 1 ? "max" : "high");
+    int ce = claudeEffortChoice_->GetSelection();
+    if (ce >= 0 && ce < (int)(sizeof(kClaudeEfforts) / sizeof(kClaudeEfforts[0])))
+        Preferences::SetClaudeEffort(kClaudeEfforts[ce].value);
 
     evt.Skip();  // let default handler close with wxID_OK
 }

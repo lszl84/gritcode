@@ -14,6 +14,7 @@
 #include <chrono>
 #include <nlohmann/json.hpp>
 #include "chat_canvas.h"
+#include "claude_agent.h"
 #include "md_parser.h"
 #include "mcp_server.h"
 #include "memory.h"
@@ -21,6 +22,7 @@
 #include "streaming_web_request.h"
 #include "tools.h"
 #include <atomic>
+#include <map>
 #include <memory>
 #include <set>
 #include <string>
@@ -104,13 +106,22 @@ private:
     // not required for normal chat.
     MemoryDB memory_;
 
-    // Selected model dropdown index. 0 is Kilo Free; indices >= 1 map
-    // into remoteModels_ (the DeepSeek model list). remoteModels_ is the live
-    // GET /models result when available, otherwise empty — and an empty list
-    // means the dropdown uses the hardcoded DeepSeek fallback instead. The
-    // live list and fallback are never shown together.
+    // Selected model index (not the dropdown row; see RouteForIndex). 0 is
+    // Kilo Free, indices >= 1 map into remoteModels_ (the DeepSeek model
+    // list), and the Claude entries have their own fixed indices.
+    // remoteModels_ is the live GET /models result when available, otherwise
+    // empty — and an empty list means the dropdown uses the hardcoded
+    // DeepSeek fallback instead. The live list and fallback are never shown
+    // together.
     int currentModelIndex_ = 0;
     std::vector<std::string> remoteModels_;
+    // Model index the current turn started with. A switch to Claude in the
+    // middle of an OpenAI-style tool loop can't take over that loop, so the
+    // loop keeps this model until the turn ends.
+    int turnModelIndex_ = 0;
+    // Model id of the in-flight OpenAI-style completion, recorded on the
+    // assistant messages it produces.
+    std::string requestModel_;
 
     StreamingWebRequest request_;
     std::unique_ptr<MdStream> mdStream_;
@@ -432,6 +443,46 @@ private:
     // Set once per turn after an overflow-forced compaction, so a second
     // provider overflow surfaces an error instead of looping.
     bool overflowRetried_ = false;
+
+    // ---- Claude turns (the user's own Claude Code CLI) ----
+    // A Claude turn runs `claude -p` with stream-json in and out. Claude Code
+    // runs its own agent loop and tools; gritcode renders the events and
+    // records them in history_ in the same OpenAI-style shape as other
+    // models, tagged with "model" and "claudeSessionId" so the next turn can
+    // --resume the same Claude Code session.
+    ClaudeAgentProcess claudeProc_;
+    std::string claudeBuf_;              // partial stdout line
+    std::string claudeModel_;            // model id the turn was sent to
+    std::string claudeSessionId_;        // from system/init of this run
+    std::string claudePromptFile_;       // temp --append-system-prompt-file
+    bool claudeResumed_ = false;         // this run passed --resume
+    bool claudeRetriedFresh_ = false;    // already retried without --resume
+    bool claudeResultSeen_ = false;
+    bool claudeIsError_ = false;
+    std::string claudeErrorText_;
+    size_t claudeTurnHistoryStart_ = 0;  // history_ size after the user message
+    // Top-level assistant message being assembled from per-block "assistant"
+    // events (same API message id). Flushed into history_ before its tool
+    // results, or when the next message starts.
+    std::string claudeMsgId_;
+    nlohmann::json claudePendingMsg_;
+    std::string claudeStreamMsgId_;               // message being streamed now
+    std::set<std::string> claudeStreamedMsgIds_;  // messages whose text streamed
+    // tool_use id -> (name, compact JSON input), for rendering the result.
+    std::map<std::string, std::pair<std::string, std::string>> claudeToolUses_;
+
+    // Spawn the CLI for the user message at the end of history_. `fresh`
+    // skips --resume (used after Claude Code reports the session is gone).
+    void StartClaudeTurn(bool fresh = false);
+    void OnClaudeData(std::string_view chunk);
+    void OnClaudeDone(ClaudeProcessResult res);
+    void HandleClaudeEvent(const nlohmann::json& ev);
+    void FlushClaudePendingMessage();
+    // Show a Claude Code failure (with a sign-in hint for auth errors), drop
+    // the user message if the turn recorded nothing, and end the turn.
+    void FailClaudeTurn(const std::string& detail);
+    // Italic notice when a turn goes to a different model than the last one.
+    void RenderModelSwitchNotice(const std::string& modelId);
 
     // Debug log (debug builds only).
     DebugWindow* debugWindow_ = nullptr;

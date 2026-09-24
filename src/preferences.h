@@ -24,10 +24,11 @@ public:
 
     // ---- non-secret prefs (wxConfig) ----
 
-    // Resolves the effective model index. If the user has never explicitly
-    // picked a model, defaults to DeepSeek Pro (2) when an API key is stored,
-    // otherwise Kilo Free (0). Once the user changes the dropdown, that
-    // choice sticks permanently.
+    // Resolves the effective model index (see RouteForIndex in chat_frame.cpp;
+    // not a dropdown row). If the user has never explicitly picked a model,
+    // defaults to DeepSeek Pro (2) when an API key is stored, otherwise Kilo
+    // Free (0). Once the user changes the dropdown, that choice sticks
+    // permanently.
     static int  GetLastModelIndex();
     static void SetLastModelIndex(int idx);
 
@@ -44,6 +45,12 @@ public:
     // Anything else stored in the config reads back as "high".
     static wxString GetReasoningEffort();
     static void     SetReasoningEffort(const wxString& effort);
+
+    // Claude Code effort, passed as `claude --effort`: "low", "medium",
+    // "high", "xhigh" or "max". Empty (the default) passes no flag, so
+    // Claude Code uses its own default for the model.
+    static wxString GetClaudeEffort();
+    static void     SetClaudeEffort(const wxString& effort);
 
     // ---- API keys (wxSecretStore) ----
 
