@@ -1,6 +1,8 @@
 #include "preferences.h"
 #include <wx/config.h>
 #include <wx/fileconf.h>
+#include <wx/filename.h>
+#include <wx/stdpaths.h>
 #if wxUSE_SECRETSTORE
 #include <wx/secretstore.h>
 #else
@@ -47,12 +49,18 @@ const SecretSchema kSecretSchema = {
 
 void Preferences::Init() {
     if (wxConfigBase::Get(false) != nullptr) return;
-    // wxFileConfig path with wxCONFIG_USE_SUBDIR: stores inside
-    // wxStandardPaths::GetUserDataDir() as ~/.gritcode/gritcode.conf,
-    // sharing the directory with run_configs.json and the memory DB.
+    // Stored inside wxStandardPaths::GetUserDataDir(): ~/.gritcode/gritcode.conf
+    // on Linux, ~/Library/Application Support/gritcode/gritcode Preferences on
+    // macOS, %APPDATA%\gritcode\gritcode.ini on Windows. wxCONFIG_USE_SUBDIR
+    // only picks that directory; without wxCONFIG_USE_LOCAL_FILE there is no
+    // file at all and Flush() silently writes nothing. wxFileConfig doesn't
+    // create the directory either, so make sure it exists.
+    const wxString dir = wxStandardPaths::Get().GetUserDataDir();
+    if (!wxFileName::DirExists(dir))
+        wxFileName::Mkdir(dir, wxS_DIR_DEFAULT, wxPATH_MKDIR_FULL);
     auto* cfg = new wxFileConfig("gritcode", wxEmptyString,
                                  wxEmptyString, wxEmptyString,
-                                 wxCONFIG_USE_SUBDIR);
+                                 wxCONFIG_USE_LOCAL_FILE | wxCONFIG_USE_SUBDIR);
     wxConfigBase::Set(cfg);
 }
 
