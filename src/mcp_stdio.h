@@ -1,10 +1,16 @@
 #pragma once
 
+#include <string>
+
 // Run gritcode as a stdio MCP server (JSON-RPC over stdin/stdout,
 // newline-delimited) exposing grit_history_search and grit_history_fetch.
 // Intended to be spawned as a child process by an MCP-aware agent client
 // (Claude CLI via --mcp-config, etc).
 //
+// With a non-empty `runProjectCwd` it exposes only run_project instead,
+// defaulting to that project directory: Claude turns get it so Claude can
+// configure the Play button (see ChatFrame::StartClaudeTurn).
+//
 // Blocks on stdin; returns when the peer closes stdin. Return value is
 // the exit code to use from main().
-int RunMcpStdioServer();
+int RunMcpStdioServer(const std::string& runProjectCwd = std::string());

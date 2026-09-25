@@ -1,5 +1,6 @@
 #include "mcp_stdio.h"
 #include "memory.h"
+#include "tools.h"
 
 #include <nlohmann/json.hpp>
 #include <cstdio>
@@ -86,6 +87,21 @@ static json FetchToolDef() {
     };
 }
 
+// run_project in MCP form, built from the definition gritcode's own agent
+// gets so the two can't drift apart.
+static json RunProjectToolDef() {
+    for (const auto& t : GetToolDefinitions(false)) {
+        const auto& fn = t["function"];
+        if (fn.value("name", "") != "run_project") continue;
+        return {
+            {"name", "run_project"},
+            {"description", fn["description"]},
+            {"inputSchema", fn["parameters"]},
+        };
+    }
+    return json::object();
+}
+
 static json MakeResult(const json& id, const json& result) {
     return {{"jsonrpc", "2.0"}, {"id", id}, {"result", result}};
 }
@@ -95,13 +111,14 @@ static json MakeError(const json& id, int code, const std::string& msg) {
             {"error", {{"code", code}, {"message", msg}}}};
 }
 
-int RunMcpStdioServer() {
+int RunMcpStdioServer(const std::string& runProjectCwd) {
     // Line-buffered stdout: Claude's stdio MCP client reads one line at a
     // time and hangs if the response isn't flushed immediately.
     std::setvbuf(stdout, nullptr, _IOLBF, 0);
 
+    const bool runProjectOnly = !runProjectCwd.empty();
     MemoryDB memory;
-    memory.Open(MemoryDB::DefaultPath());
+    if (!runProjectOnly) memory.Open(MemoryDB::DefaultPath());
 
     std::string line;
     while (std::getline(std::cin, line)) {
@@ -128,14 +145,16 @@ int RunMcpStdioServer() {
                     {"tools", {{"listChanged", false}}}
                 }},
                 {"serverInfo", {
-                    {"name", "grit-history"},
+                    {"name", runProjectOnly ? "gritcode" : "grit-history"},
                     {"version", "0.1.0"}
                 }}
             };
             std::cout << MakeResult(id, result).dump() << "\n";
 
         } else if (method == "tools/list") {
-            json result = {{"tools", json::array({SearchToolDef(), FetchToolDef()})}};
+            json result = {{"tools", runProjectOnly
+                ? json::array({RunProjectToolDef()})
+                : json::array({SearchToolDef(), FetchToolDef()})}};
             std::cout << MakeResult(id, result).dump() << "\n";
 
         } else if (method == "tools/call") {
@@ -146,7 +165,13 @@ int RunMcpStdioServer() {
             std::string text;
             bool ok = true;
 
-            if (!memory.IsOpen()) {
+            if (runProjectOnly) {
+                if (name != "run_project") {
+                    std::cout << MakeError(id, -32601, "unknown tool: " + name).dump() << "\n";
+                    continue;
+                }
+                text = DispatchTool(name, args, nullptr, nullptr, runProjectCwd, false);
+            } else if (!memory.IsOpen()) {
                 text = "Memory index is not available.";
             } else if (name == "grit_history_search") {
                 std::string query = args.value("query", "");

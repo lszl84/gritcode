@@ -68,7 +68,7 @@ Click the ⚙ gear button in the bottom toolbar to open Settings, then paste you
 
 The Model dropdown also offers **Claude (Opus 5.5)** and **Claude (Sonnet 5)**. These run your installed [Claude Code](https://code.claude.com/docs/en/setup) (the `claude` command) headlessly, so you need Claude Code installed and signed in: run `claude` once in a terminal and log in. Gritcode never sees your Claude credentials; usage goes to your own Claude account or API key.
 
-With Claude selected, Claude Code runs its own agent loop and tools (Bash, Read, Edit, …), and Gritcode shows them in the chat. As with Gritcode's own agent, tools run without confirmation prompts. Each Gritcode session resumes the same Claude Code session, and when you switch models mid-session the other model gets a transcript of what happened. Claude's effort level is in Settings.
+With Claude selected, Claude Code runs its own agent loop and tools (Bash, Read, Edit, …), and Gritcode shows them in the chat. As with Gritcode's own agent, tools run without confirmation prompts. The ▶ Play button works the same with Claude: Gritcode gives Claude its `run_project` tool so it can set up the run command. Each Gritcode session resumes the same Claude Code session, and when you switch models mid-session the other model gets a transcript of what happened. Claude's effort level is in Settings.
 
 ## Support Gritcode
 

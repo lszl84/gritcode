@@ -189,6 +189,10 @@ static int RunApp(int argc, char* argv[]) {
     // are headless (no window, no MCP TCP server) and exit on their own.
     for (int i = 1; i < argc; i++) {
         if (std::strcmp(argv[i], "--mcp-stdio") == 0) {
+            for (int j = i + 1; j + 1 < argc; j++) {
+                if (std::strcmp(argv[j], "--run-project") == 0)
+                    return RunMcpStdioServer(argv[j + 1]);
+            }
             return RunMcpStdioServer();
         }
         if (std::strcmp(argv[i], "--reindex") == 0) {
@@ -201,6 +205,8 @@ static int RunApp(int argc, char* argv[]) {
                 "Options:\n"
                 "  --reindex      Rebuild the memory index from session history on disk\n"
                 "  --mcp-stdio    Run as a stdio MCP server exposing grit_history_search/fetch\n"
+                "  --mcp-stdio --run-project DIR\n"
+                "                 Run as a stdio MCP server exposing only run_project for DIR\n"
                 "  --help, -h     Show this help\n");
             return 0;
         }

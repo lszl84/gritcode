@@ -1715,6 +1715,15 @@ ChatFrame::ChatFrame()
             return {{"ok", true}, {"promptCount", promptCount}};
         });
     };
+    cb.play = [this, guiSync]() -> nlohmann::json {
+        return guiSync([this]() -> nlohmann::json {
+            if (streaming_) return {{"started", false}, {"reason", "streaming"}};
+            const bool configured = RunConfigStore::Get(activeCwd_).has_value();
+            wxCommandEvent ev(wxEVT_BUTTON, ID_PLAY);
+            OnPlay(ev);
+            return {{"started", true}, {"configured", configured}};
+        });
+    };
     mcp_.Start(std::move(cb));
 
     SetDropTarget(new FrameFileDropTarget(this));
@@ -2547,25 +2556,10 @@ void ChatFrame::OnPlay(wxCommandEvent&) {
             "\n\nFor compiled projects, just build and run - no browser needed."
             "[/hidden]";
 
-        // Show only the visible prompt on the canvas.
-        Block ub;
-        ub.type = BlockType::UserPrompt;
-        ub.rawText = visible;
-        InlineRun r;
-        r.text = visible;
-        ub.runs.push_back(r);
-        ub.visibleText = visible;
-        canvas_->AddBlock(std::move(ub));
-
-        // The API sees visible + hidden; the canvas shows only visible.
-        history_.push_back({{"role", "user"},
-                            {"content", visible.ToStdString(wxConvUTF8) + hidden}});
-
-        streaming_ = true;
-        canvas_->SetThinking(true);
-        UpdateQueueUI();
-        toolIter_ = 0;
-        StartCompletion();
+        // The canvas shows only the visible prompt; the model also gets the
+        // hidden instructions. StartTurn routes it to whichever model is
+        // selected, Claude included.
+        StartTurn(visible, {}, hidden);
     }
 }
 void ChatFrame::OnSettings(wxCommandEvent&) {
@@ -3697,7 +3691,8 @@ void ChatFrame::OnSend(wxCommandEvent&) {
 }
 
 void ChatFrame::StartTurn(const wxString& userText,
-                        std::vector<PendingImage> images) {
+                        std::vector<PendingImage> images,
+                        const std::string& hiddenInstructions) {
     overflowRetried_ = false;
     turnModelIndex_ = currentModelIndex_;
     const ModelRoute route = RouteForIndex(currentModelIndex_, remoteModels_);
@@ -3722,7 +3717,7 @@ void ChatFrame::StartTurn(const wxString& userText,
     // session can show where the model changed.
     nlohmann::json userMsg = {
         {"role", "user"},
-        {"content", userText.ToStdString(wxConvUTF8)},
+        {"content", userText.ToStdString(wxConvUTF8) + hiddenInstructions},
         {"model", modelId},
     };
     if (!images.empty()) {
@@ -3741,12 +3736,6 @@ void ChatFrame::StartTurn(const wxString& userText,
     UpdateQueueUI();  // Send becomes "Add", chip row stays visible if non-empty.
     toolIter_ = 0;
 
-    if (route.claudeCli) {
-        claudeModel_ = modelId;
-        claudeRetriedFresh_ = false;
-        StartClaudeTurn();
-        return;
-    }
     StartCompletion();
 }
 
@@ -3882,6 +3871,16 @@ void ChatFrame::EmitImageBlock(const std::string& hash, const std::string& mime,
 }
 
 void ChatFrame::StartCompletion() {
+    // A Claude turn never takes the HTTP path: Claude Code runs its own agent
+    // loop and manages (and compacts) its own context, so gritcode's
+    // compaction doesn't apply either.
+    const ModelRoute turnRoute = RouteForIndex(turnModelIndex_, remoteModels_);
+    if (turnRoute.claudeCli) {
+        claudeModel_ = turnRoute.model;
+        claudeRetriedFresh_ = false;
+        StartClaudeTurn();
+        return;
+    }
     // Compaction preflight. If the rendered request would overflow the
     // model's context window, we summarize the head of history first via
     // a separate streaming request; the summary completion path will
@@ -5322,23 +5321,52 @@ void ChatFrame::StartClaudeTurn(bool fresh) {
         {"message", {{"role", "user"}, {"content", std::move(content)}}},
     };
 
+    // Extra context and config go through files: that keeps a large
+    // AGENTS.md clear of argv limits and Windows command-line quoting.
+    claudeTempFiles_.clear();
+    auto writeTemp = [this](const std::string& content) -> std::string {
+        wxString tmp = wxFileName::CreateTempFileName("gritclaude");
+        if (tmp.empty()) return std::string();
+        std::ofstream f(tmp.ToStdString(wxConvUTF8), std::ios::binary | std::ios::trunc);
+        f << content;
+        f.close();
+        if (!f) {
+            wxRemoveFile(tmp);
+            return std::string();
+        }
+        claudeTempFiles_.push_back(tmp.ToStdString(wxConvUTF8));
+        return claudeTempFiles_.back();
+    };
+
     // Project instructions: Claude Code reads CLAUDE.md itself but not
-    // gritcode's AGENTS.md. A file keeps a large AGENTS.md clear of argv
-    // limits and Windows command-line quoting.
+    // gritcode's AGENTS.md.
     std::string append =
         "You are running inside gritcode, a desktop coding app. The user reads "
         "your replies, rendered as markdown, and your tool calls in gritcode's "
-        "chat window.";
+        "chat window.\n\n"
+        "Play button: gritcode's \u25B6 button runs one stored shell command "
+        "for this project directly, without the AI. Manage it with the "
+        "run_project tool (mcp__gritcode__run_project): 'get' shows it, "
+        "'detect' suggests one, 'set' stores it (test it with Bash first, and "
+        "pass cwd = the project root), 'forget' removes it.";
     const std::string agents = LoadAgentsInstructions(activeCwd_);
     if (!agents.empty()) append += "\n\n" + agents;
-    claudePromptFile_.clear();
-    wxString tmp = wxFileName::CreateTempFileName("gritclaude");
-    if (!tmp.empty()) {
-        std::ofstream f(tmp.ToStdString(wxConvUTF8), std::ios::binary | std::ios::trunc);
-        f << append;
-        if (f) claudePromptFile_ = tmp.ToStdString(wxConvUTF8);
-        else wxRemoveFile(tmp);
-    }
+    const std::string promptFile = writeTemp(append);
+
+    // gritcode's own stdio MCP server, in its run_project-only mode, so the
+    // Play button can be configured from a Claude turn too. It writes the
+    // same run config store the Play button reads.
+    const nlohmann::json mcpConfig = {
+        {"mcpServers", {
+            {"gritcode", {
+                {"type", "stdio"},
+                {"command", wxStandardPaths::Get().GetExecutablePath().utf8_string()},
+                {"args", {"--mcp-stdio", "--run-project", activeCwd_}},
+            }},
+        }},
+    };
+    const std::string mcpFile = writeTemp(mcpConfig.dump(
+        -1, ' ', false, nlohmann::json::error_handler_t::replace));
 
     ClaudeRunSpec spec;
     spec.executable = exe;
@@ -5363,9 +5391,13 @@ void ChatFrame::StartClaudeTurn(bool fresh) {
         spec.args.push_back("--resume");
         spec.args.push_back(resumeId);
     }
-    if (!claudePromptFile_.empty()) {
+    if (!promptFile.empty()) {
         spec.args.push_back("--append-system-prompt-file");
-        spec.args.push_back(claudePromptFile_);
+        spec.args.push_back(promptFile);
+    }
+    if (!mcpFile.empty()) {
+        spec.args.push_back("--mcp-config");
+        spec.args.push_back(mcpFile);
     }
     spec.stdinPayload = line.dump(-1, ' ', false,
                                   nlohmann::json::error_handler_t::replace)
@@ -5618,10 +5650,8 @@ void ChatFrame::FlushClaudePendingMessage() {
 
 void ChatFrame::OnClaudeDone(ClaudeProcessResult res) {
     if (!claudeBuf_.empty()) OnClaudeData("\n");  // a final unterminated line
-    if (!claudePromptFile_.empty()) {
-        wxRemoveFile(wxString::FromUTF8(claudePromptFile_));
-        claudePromptFile_.clear();
-    }
+    for (const auto& f : claudeTempFiles_) wxRemoveFile(wxString::FromUTF8(f));
+    claudeTempFiles_.clear();
     if (quitRequested_) {
         Close();
         return;

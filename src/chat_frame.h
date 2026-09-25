@@ -407,7 +407,11 @@ private:
     // sseBuf_ (which doubles as raw-body capture under Storage_None).
     wxString ExtractErrorBody() const;
 
-    void StartTurn(const wxString& userText, std::vector<PendingImage> images = {});
+    // Starts a model turn for a user message (the only entry point, so every
+    // turn is routed the same way). `hiddenInstructions` is appended to the
+    // message the model sees but not shown on the canvas.
+    void StartTurn(const wxString& userText, std::vector<PendingImage> images = {},
+                   const std::string& hiddenInstructions = std::string());
     void EnqueueMessage(const wxString& text);
     void LogDebug(const std::string& line);
     void OpenDebugWindow();
@@ -454,7 +458,9 @@ private:
     std::string claudeBuf_;              // partial stdout line
     std::string claudeModel_;            // model id the turn was sent to
     std::string claudeSessionId_;        // from system/init of this run
-    std::string claudePromptFile_;       // temp --append-system-prompt-file
+    // Temp files for this run (--append-system-prompt-file, --mcp-config),
+    // removed when it ends.
+    std::vector<std::string> claudeTempFiles_;
     bool claudeResumed_ = false;         // this run passed --resume
     bool claudeRetriedFresh_ = false;    // already retried without --resume
     bool claudeResultSeen_ = false;

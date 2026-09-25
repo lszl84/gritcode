@@ -84,6 +84,10 @@ struct MCPCallbacks {
     // Import a .gritsession file from the given path. Returns
     // {ok: bool, promptCount: int, error?: string}.
     std::function<nlohmann::json(const std::string&)> importSession;
+
+    // Press the ▶ Play button, exactly as a click would. Returns
+    // {started: false, reason: "streaming"} while a turn is in flight.
+    std::function<nlohmann::json()> play;
 };
 
 class MCPServer {

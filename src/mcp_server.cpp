@@ -181,6 +181,10 @@ json MCPServer::HandleRequest(const json& request) {
         cb_.toggleTool(params["index"].get<int>());
         return okResult({{"toggled", true}});
     }
+    if (method == "play") {
+        if (!cb_.play) return err(-32603, "not ready");
+        return okResult(cb_.play());
+    }
     if (method == "listSessions") {
         if (!cb_.listSessions) return err(-32603, "not ready");
         return okResult(cb_.listSessions());
