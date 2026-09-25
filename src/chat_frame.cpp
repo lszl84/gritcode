@@ -98,7 +98,12 @@ constexpr int kImportPaneWidth  = 400;
 constexpr int kFileTreeWidth    = 280;   // fixed (non-resizable) file tree width
 constexpr int kEditorTextWidth  = kFileTreeWidth * 5 / 2;  // editor text = 2.5x tree
 constexpr int kEditorPaneWidth  = kFileTreeWidth + kEditorTextWidth;  // whole right pane
-constexpr int kMainMinClientW   = 610;   // min chat-pane width with no panels
+constexpr int kMainMinClientW   = 220;   // min chat-pane width with no panels
+// Chat-pane widths below which toolbar items hide, least important first.
+constexpr int kToolbarLabelsW   = 640;   // "Session:" / "Model:" captions
+constexpr int kToolbarSettingsW = 500;   // settings (and debug Log) button
+constexpr int kToolbarExportW   = 466;   // export button
+constexpr int kToolbarModelW    = 430;   // model dropdown
 
 // Payload attached to each file-tree node.
 class FileTreeItemData : public wxTreeItemData {
@@ -1059,6 +1064,7 @@ ChatFrame::ChatFrame()
     wxBitmapBundle bbSettings = LoadThemedSvgIcon("settings.svg", kIconSize, accent);
 
     auto* toolbarRow = new wxBoxSizer(wxHORIZONTAL);
+    toolbarRow_ = toolbarRow;
 
     wxBitmapBundle bbHamburger = LoadThemedSvgIcon("hamburger.svg", kIconSize, accent);
     hamburgerBtn_ = new wxBitmapButton(panel, ID_HAMBURGER, bbHamburger,
@@ -1066,11 +1072,12 @@ ChatFrame::ChatFrame()
                                         wxBORDER_NONE);
     hamburgerBtn_->SetToolTip(wxString::FromUTF8("Toggle session reference"));
 
-    auto* sessionLabel = new wxStaticText(panel, wxID_ANY, "Session:");
+    sessionLabel_ = new wxStaticText(panel, wxID_ANY, "Session:");
     sessionChoice_ = new wxChoice(panel, ID_SESSION);
-    sessionChoice_->SetMinSize(FromDIP(wxSize(220, -1)));
-    auto* modelLabel = new wxStaticText(panel, wxID_ANY, "Model:");
+    sessionChoice_->SetMinSize(FromDIP(wxSize(160, -1)));
+    modelLabel_ = new wxStaticText(panel, wxID_ANY, "Model:");
     modelChoice_ = new wxChoice(panel, ID_MODEL);
+    modelChoice_->SetMinSize(FromDIP(wxSize(150, -1)));
     currentModelIndex_ = Preferences::GetLastModelIndex();
     RebuildModelChoice();
     settingsBtn_ = new wxBitmapButton(panel, ID_SETTINGS, bbSettings,
@@ -1097,19 +1104,19 @@ ChatFrame::ChatFrame()
     playBtn_->SetToolTip(wxString::FromUTF8("Build and run project"));
 
     toolbarRow->Add(hamburgerBtn_, 0, wxALIGN_CENTER_VERTICAL | wxRIGHT, 6);
-    toolbarRow->Add(sessionLabel, 0, wxALIGN_CENTER_VERTICAL | wxRIGHT, 6);
+    toolbarRow->Add(sessionLabel_, 0, wxALIGN_CENTER_VERTICAL | wxRIGHT, 6);
     // Session and model both get a small proportion so they share resize delta;
     // the stretch spacer absorbs most of it. Once the spacer collapses (narrow
     // window) both dropdowns shrink toward their MinSize.
     toolbarRow->Add(sessionChoice_, 1, wxALIGN_CENTER_VERTICAL | wxRIGHT, 2);
     toolbarRow->Add(playBtn_, 0, wxALIGN_CENTER_VERTICAL | wxRIGHT, 8);
-    toolbarRow->Add(modelLabel, 0, wxALIGN_CENTER_VERTICAL | wxRIGHT, 6);
+    toolbarRow->Add(modelLabel_, 0, wxALIGN_CENTER_VERTICAL | wxRIGHT, 6);
     toolbarRow->Add(modelChoice_, 1, wxALIGN_CENTER_VERTICAL);
     toolbarRow->AddStretchSpacer(8);
     toolbarRow->Add(settingsBtn_, 0, wxALIGN_CENTER_VERTICAL);
     toolbarRow->Add(exportBtn_, 0, wxALIGN_CENTER_VERTICAL | wxLEFT, 4);
 #ifndef NDEBUG
-    auto* debugBtn = new wxButton(panel, wxID_ANY, "Log",
+    auto* debugBtn = debugBtn_ = new wxButton(panel, wxID_ANY, "Log",
                                   wxDefaultPosition, FromDIP(wxSize(48, -1)),
                                   wxBORDER_NONE);
     debugBtn->SetToolTip("Open debug log (request bodies + compaction)");
@@ -1164,6 +1171,12 @@ ChatFrame::ChatFrame()
     // padded content.
     root->Add(outer, 1, wxEXPAND | wxLEFT | wxRIGHT, FromDIP(kEdgePad));
     panel->SetSizer(root);
+    // Runs before the panel's default size handler lays out, so toolbar
+    // visibility is settled by the time the sizer positions the toolbar.
+    panel->Bind(wxEVT_SIZE, [this](wxSizeEvent& e) {
+        UpdateToolbarFit();
+        e.Skip();
+    });
 
     // Editor — right pane of the inner splitter, hidden until the editor
     // toggle. A project file tree on the left and an editable text area on
@@ -1729,7 +1742,7 @@ ChatFrame::ChatFrame()
     SetDropTarget(new FrameFileDropTarget(this));
 
     input_->SetFocus();
-    SetMinSize(wxSize(620, 400));
+    SetMinClientSize(wxSize(kMainMinClientW, 400));
 
 #ifdef __WXOSX__
     // Tahoe look: native styling only, the layout above stays shared.
@@ -2643,6 +2656,27 @@ void ChatFrame::SyncPanelSizing(int centerW) {
     Layout();
     splitter_->UpdateSize();
     innerSplitter_->UpdateSize();
+}
+
+void ChatFrame::UpdateToolbarFit() {
+    if (!toolbarRow_) return;
+    int w = mainPanel_->GetClientSize().x;
+    auto fit = [&](wxWindow* win, int minW) {
+        if (win) toolbarRow_->Show(win, w >= minW);
+    };
+    fit(sessionLabel_, kToolbarLabelsW);
+    fit(modelLabel_, kToolbarLabelsW);
+    fit(settingsBtn_, kToolbarSettingsW);
+    fit(debugBtn_, kToolbarSettingsW);
+    fit(exportBtn_, kToolbarExportW);
+    fit(modelChoice_, kToolbarModelW);
+    // Without the model dropdown the session dropdown takes the freed room:
+    // the stretch spacer stops stretching, and the dropdown may shrink further.
+    // Next to the model dropdown it keeps a readable width.
+    bool modelShown = w >= kToolbarModelW;
+    sessionChoice_->SetMinSize(FromDIP(wxSize(modelShown ? 160 : 100, -1)));
+    for (auto* item : toolbarRow_->GetChildren())
+        if (item->IsSpacer()) item->SetProportion(modelShown ? 8 : 0);
 }
 
 void ChatFrame::OnInnerSashChanging(wxSplitterEvent& e) {

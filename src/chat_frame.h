@@ -84,6 +84,13 @@ private:
     // dropdowns and a gear button on the right.
     wxChoice* sessionChoice_ = nullptr;
     wxChoice* modelChoice_ = nullptr;
+    // "Session:" / "Model:" captions. These, the settings/export/debug
+    // buttons and the model dropdown hide as the chat pane narrows (see
+    // UpdateToolbarFit).
+    wxStaticText* sessionLabel_ = nullptr;
+    wxStaticText* modelLabel_ = nullptr;
+    wxButton* debugBtn_ = nullptr;   // Debug builds only
+    wxBoxSizer* toolbarRow_ = nullptr;
     wxBitmapButton* playBtn_ = nullptr;
     wxBitmapButton* settingsBtn_ = nullptr;
     wxBitmapButton* exportBtn_ = nullptr;
@@ -268,6 +275,8 @@ private:
     // Resize the frame so the chat pane keeps `centerW` pixels regardless of
     // which side panels are open, and keep the minimum width in sync.
     void SyncPanelSizing(int centerW);
+    // Hide toolbar items the chat pane has no room for, least important first.
+    void UpdateToolbarFit();
     void OnInnerSashChanging(wxSplitterEvent& e);
     // Project file tree in the right editor panel.
     void PopulateEditorTree();
