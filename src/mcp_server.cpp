@@ -185,6 +185,17 @@ json MCPServer::HandleRequest(const json& request) {
         if (!cb_.play) return err(-32603, "not ready");
         return okResult(cb_.play());
     }
+    if (method == "togglePanel") {
+        if (!cb_.togglePanel) return err(-32603, "not ready");
+        std::string panel = params.value("panel", std::string());
+        if (panel != "editor" && panel != "import")
+            return err(-32602, "'panel' must be \"editor\" or \"import\"");
+        return okResult(cb_.togglePanel(panel));
+    }
+    if (method == "getPanes") {
+        if (!cb_.getPanes) return err(-32603, "not ready");
+        return okResult(cb_.getPanes());
+    }
     if (method == "listSessions") {
         if (!cb_.listSessions) return err(-32603, "not ready");
         return okResult(cb_.listSessions());

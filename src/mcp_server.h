@@ -88,6 +88,14 @@ struct MCPCallbacks {
     // Press the ▶ Play button, exactly as a click would. Returns
     // {started: false, reason: "streaming"} while a turn is in flight.
     std::function<nlohmann::json()> play;
+
+    // Toggle a side panel ("editor" or "import") as its toolbar button would,
+    // then return getPanes().
+    std::function<nlohmann::json(const std::string&)> togglePanel;
+
+    // Pixel widths of the window client area and each visible pane:
+    // {window, import, chat, editor} (0 for a hidden pane).
+    std::function<nlohmann::json()> getPanes;
 };
 
 class MCPServer {

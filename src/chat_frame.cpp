@@ -1,5 +1,6 @@
 #include "chat_frame.h"
 #include "omarchy_theme.h"
+#include "hyprland.h"
 #include "editor_indent.h"
 #include "format_u8.h"
 #include "inline_parser.h"
@@ -1734,6 +1735,21 @@ ChatFrame::ChatFrame()
             return {{"started", true}, {"configured", configured}};
         });
     };
+    auto panes = [this]() -> nlohmann::json {
+        return {{"window", GetClientSize().x},
+                {"import", splitter_->IsSplit() ? importPanel_->GetSize().x : 0},
+                {"chat", mainPanel_->GetSize().x},
+                {"editor", innerSplitter_->IsSplit() ? editorPanel_->GetSize().x : 0}};
+    };
+    cb.togglePanel = [this, guiSync, panes](const std::string& panel) -> nlohmann::json {
+        return guiSync([this, panel, panes]() -> nlohmann::json {
+            wxCommandEvent ev(wxEVT_BUTTON);
+            if (panel == "editor") OnEditorToggle(ev);
+            else OnHamburger(ev);
+            return panes();
+        });
+    };
+    cb.getPanes = [guiSync, panes]() -> nlohmann::json { return guiSync(panes); };
     mcp_.Start(std::move(cb));
 
     SetDropTarget(new FrameFileDropTarget(this));
@@ -2626,7 +2642,9 @@ void ChatFrame::OnCanvasLink(wxCommandEvent& e) {
 }
 
 void ChatFrame::OnHamburger(wxCommandEvent&) {
-    // The chat pane keeps its current width; only the window grows/shrinks.
+    // The chat pane keeps its current width; only the window grows/shrinks
+    // (unless tiled, see SyncPanelSizing).
+    const bool tiled = hyprland::IsTiled().value_or(false);
     int centerW = mainPanel_->GetSize().x;
     if (splitter_->IsSplit()) {
         splitter_->Unsplit(importPanel_);
@@ -2635,18 +2653,27 @@ void ChatFrame::OnHamburger(wxCommandEvent&) {
         importPanel_->Show();
         splitter_->SplitVertically(importPanel_, innerSplitter_, kImportPaneWidth);
     }
-    SyncPanelSizing(centerW);
+    SyncPanelSizing(centerW, tiled);
 }
 
 void ChatFrame::OnEditorToggle(wxCommandEvent&) {
+    const bool tiled = hyprland::IsTiled().value_or(false);
     int centerW = mainPanel_->GetSize().x;
     if (innerSplitter_->IsSplit()) {
         // Remember the editor's current width (it may have changed via window
-        // resize) so toggling it back open restores the same width.
-        editorPaneW_ = editorPanel_->GetSize().x;
+        // resize) so toggling it back open restores the same width. A tiled
+        // width is squeezed to fit the tile; keep the floating one instead.
+        if (!tiled) editorPaneW_ = editorPanel_->GetSize().x;
         innerSplitter_->Unsplit(editorPanel_);
         editorPanel_->Hide();
-        SyncPanelSizing(centerW);
+        SyncPanelSizing(centerW, tiled);
+    } else if (tiled) {
+        editorPanel_->Show();
+        ReloadTreeKeepExpanded();
+        CheckEditorFileChangedOnDisk();
+        // The window can't grow: split in place, LayoutTiledPanes places the sash.
+        innerSplitter_->SplitVertically(mainPanel_, editorPanel_, 0);
+        SyncPanelSizing(centerW, tiled);
     } else {
         editorPanel_->Show();
         // The agent (or an external tool) may have created/deleted files since
@@ -2670,7 +2697,11 @@ void ChatFrame::OnEditorToggle(wxCommandEvent&) {
     UpdateWindowTitle();
 }
 
-void ChatFrame::SyncPanelSizing(int centerW) {
+void ChatFrame::SyncPanelSizing(int centerW, bool tiled) {
+    if (tiled) {
+        LayoutTiledPanes();
+        return;
+    }
     // Import pane width includes the splitter sash, and the editor counts its
     // (possibly user-adjusted) width plus the inner sash. The target window
     // width is the fixed chat width plus whatever panes are visible, so
@@ -2691,6 +2722,39 @@ void ChatFrame::SyncPanelSizing(int centerW) {
     Layout();
     splitter_->UpdateSize();
     innerSplitter_->UpdateSize();
+}
+
+void ChatFrame::LayoutTiledPanes() {
+    // A tiling compositor owns the window size, so share the current width
+    // instead of growing. The minimum is capped at the tile width too: a
+    // minimum wider than the tile makes Hyprland squeeze the whole window.
+    int importMinW = splitter_->IsSplit()
+                ? splitter_->GetMinimumPaneSize() + splitter_->GetSashSize() : 0;
+    int editorMinW = innerSplitter_->IsSplit()
+                ? innerSplitter_->GetMinimumPaneSize() + innerSplitter_->GetSashSize() : 0;
+    int minW = kMainMinClientW + importMinW + editorMinW;
+    SetMinClientSize(wxSize(std::min(minW, GetClientSize().x), 400));
+    Layout();
+    splitter_->UpdateSize();
+
+    // Import pane: its usual width, but at most 40% of the window.
+    if (splitter_->IsSplit()) {
+        int room = splitter_->GetClientSize().x - splitter_->GetSashSize();
+        int importW = std::max(std::min(kImportPaneWidth, room * 2 / 5),
+                               splitter_->GetMinimumPaneSize());
+        splitter_->SetSashPosition(importW);
+    }
+    innerSplitter_->UpdateSize();
+
+    // Editor: its remembered width, but the chat keeps at least 40% of the
+    // room (and never less than its own minimum).
+    if (innerSplitter_->IsSplit()) {
+        int room = innerSplitter_->GetClientSize().x - innerSplitter_->GetSashSize();
+        int chatW = std::max(kMainMinClientW, room * 2 / 5);
+        int editorW = std::max(std::min(editorPaneW_, room - chatW),
+                               innerSplitter_->GetMinimumPaneSize());
+        innerSplitter_->SetSashPosition(room - editorW);
+    }
 }
 
 void ChatFrame::UpdateToolbarFit() {
@@ -3730,10 +3794,11 @@ void ChatFrame::ShowImportDialog() {
 
     // Split to show the import panel on the left.
     if (!splitter_->IsSplit()) {
+        const bool tiled = hyprland::IsTiled().value_or(false);
         int centerW = mainPanel_->GetSize().x;
         importPanel_->Show();
         splitter_->SplitVertically(importPanel_, innerSplitter_, kImportPaneWidth);
-        SyncPanelSizing(centerW);
+        SyncPanelSizing(centerW, tiled);
     }
 }
 

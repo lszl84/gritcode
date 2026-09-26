@@ -273,8 +273,11 @@ private:
     void ShowImportDialog();
     // Grow/shrink the frame so the chat pane keeps its width as side panels
     // Resize the frame so the chat pane keeps `centerW` pixels regardless of
-    // which side panels are open, and keep the minimum width in sync.
-    void SyncPanelSizing(int centerW);
+    // which side panels are open, and keep the minimum width in sync. When
+    // `tiled` (Hyprland tiling), the window keeps its size and
+    // LayoutTiledPanes shares it between the panes instead.
+    void SyncPanelSizing(int centerW, bool tiled = false);
+    void LayoutTiledPanes();
     // Hide toolbar items the chat pane has no room for, least important first.
     void UpdateToolbarFit();
     void OnInnerSashChanging(wxSplitterEvent& e);
