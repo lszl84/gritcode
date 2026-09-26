@@ -791,9 +791,22 @@ std::vector<uint32_t> BuildCharOffsets(std::string_view text) {
     return offs;
 }
 
+// Colour for newly inserted text (typing, loading a file). Never route it
+// through SetDefaultStyle(colour): wx merges a style into the previous default
+// and fills a missing background from its own guess of the control's colour
+// (on wxGTK), and GTK then stamps that background onto every inserted
+// character. A background captured under a light theme stays for the app's
+// lifetime, painting white slabs behind the text in a dark theme. So reset the
+// default style and set only the control's text colour (which updates just the
+// default foreground).
+void SetBaseColour(wxTextCtrl *ctrl, const Palette &p) {
+    ctrl->SetDefaultStyle(wxTextAttr());
+    ctrl->SetForegroundColour(p.c[(int)Cat::None]);
+}
+
 void Apply(wxTextCtrl *ctrl, std::string_view text,
            const std::vector<Token> &tokens, const Palette &p) {
-    ctrl->SetDefaultStyle(DefaultAttr(p));
+    SetBaseColour(ctrl, p);
     auto offs = BuildCharOffsets(text);
     long last = static_cast<long>(offs[text.size()]);
     ctrl->SetStyle(0, last, DefaultAttr(p));
@@ -812,7 +825,7 @@ void ClearStyles(wxTextCtrl *ctrl) {
     if (!ctrl)
         return;
     Palette p = PaletteFor(ctrl);
-    ctrl->SetDefaultStyle(DefaultAttr(p));
+    SetBaseColour(ctrl, p);
     ctrl->SetStyle(0, ctrl->GetLastPosition(), DefaultAttr(p));
 }
 
