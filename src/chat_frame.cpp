@@ -1750,6 +1750,24 @@ ChatFrame::ChatFrame()
         });
     };
     cb.getPanes = [guiSync, panes]() -> nlohmann::json { return guiSync(panes); };
+    cb.scrollToBlock = [this, guiSync](int idx) -> nlohmann::json {
+        return guiSync([this, idx]() -> nlohmann::json {
+            canvas_->ScrollToBlock(idx);
+            return {{"ok", true}};
+        });
+    };
+    cb.checkLayout = [this, guiSync]() -> nlohmann::json {
+        return guiSync([this]() -> nlohmann::json {
+            nlohmann::json stale = nlohmann::json::array();
+            for (const auto& s : canvas_->FindStaleLayouts())
+                stale.push_back({s[0], s[1], s[2]});
+            return {{"blocks", (int)canvas_->Blocks().size()},
+                    {"layoutWidth", canvas_->LayoutWidth()},
+                    {"measured", canvas_->MeasuredBlocks()},
+                    {"clientWidth", canvas_->GetClientSize().x},
+                    {"stale", std::move(stale)}};
+        });
+    };
     mcp_.Start(std::move(cb));
 
     SetDropTarget(new FrameFileDropTarget(this));

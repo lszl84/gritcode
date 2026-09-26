@@ -1158,6 +1158,35 @@ int ChatCanvas::EstimateBlockHeight(const Block& b, int contentW) const {
     }
 }
 
+void ChatCanvas::ScrollToBlock(int idx) {
+    if (idx < 0 || idx >= (int)blocks_.size() || blockTops_.size() != blocks_.size() + 1)
+        return;
+    int xu, yu;
+    GetScrollPixelsPerUnit(&xu, &yu);
+    if (yu > 0) Scroll(-1, blockTops_[idx] / yu);
+    // Lay out as a paint would: hidden windows (e.g. another Hyprland
+    // workspace) may not be painted, and layout only happens in paint.
+    PrepareLayoutForPaint();
+    Refresh();
+}
+
+std::vector<std::array<int, 3>> ChatCanvas::FindStaleLayouts() {
+    PrepareLayoutForPaint();  // see ScrollToBlock
+    std::vector<std::array<int, 3>> out;
+    if (layoutWidth_ <= 0) return out;
+    const int contentW = ContentWidthFor(layoutWidth_);
+    wxClientDC dc(this);
+    for (int i = 0; i < (int)blocks_.size(); ++i) {
+        const Block& b = blocks_[i];
+        if (b.cachedWidth != contentW) continue;  // honestly unmeasured
+        Block fresh = b;
+        LayoutBlock(dc, fresh, contentW, 0);
+        if (fresh.cachedHeight != b.cachedHeight)
+            out.push_back({i, b.cachedHeight, fresh.cachedHeight});
+    }
+    return out;
+}
+
 void ChatCanvas::RecomputeTops() {
     int y = kTopMargin;
     blockTops_.assign(blocks_.size() + 1, 0);
@@ -1249,7 +1278,12 @@ void ChatCanvas::Relayout(int width) {
     for (auto& b : blocks_) {
         if (b.cachedWidth != contentW) {
             b.cachedHeight = EstimateBlockHeight(b, contentW);
-            // cachedWidth stays != contentW so the block is measured lazily.
+            // The height is now an estimate, so the block's lines (wrapped at
+            // its old width) no longer match it: mark it unmeasured. Keeping
+            // the old cachedWidth would make a later Relayout back to that
+            // width treat the estimate as a real measurement, and the block
+            // would paint its lines over its neighbours.
+            b.cachedWidth = -1;
         }
     }
     layoutWidth_ = width;
@@ -1257,6 +1291,30 @@ void ChatCanvas::Relayout(int width) {
     RecomputeTops();
 
     PERF_LOG("Relayout n=%d w=%d h=%d", (int)blocks_.size(), width, contentHeight_);
+}
+
+int ChatCanvas::PrepareLayoutForPaint() {
+    EnsureFonts();
+    wxSize sz = GetClientSize();
+    // While a resize is in flight, paint the cached layout (just re-centered
+    // at the new client width) instead of re-wrapping every block per frame.
+    // OnResizeSettle flips layoutDirty_ once the drag stops and triggers the
+    // real relayout. Genuine invalidations (AddBlock, ToggleToolCall, theme
+    // change) already mark the layout dirty, so they take the slow path here.
+    const int layoutW = (layoutWidth_ > 0 && !layoutDirty_) ? layoutWidth_ : sz.x;
+    Relayout(layoutW);
+
+    // Read scroll offset.
+    int xu, yu;
+    GetScrollPixelsPerUnit(&xu, &yu);
+    int vx, vy;
+    GetViewStart(&vx, &vy);
+    const int viewY = (yu > 0) ? vy * yu : 0;
+
+    // Measure any unmeasured blocks in/around the viewport before rendering,
+    // so PaintBlock has real line geometry. Off-screen blocks stay estimated.
+    EnsureVisibleLaidOut(viewY, sz.y, ContentWidthFor(layoutW));
+    return viewY;
 }
 
 // ---------- Paint ----------
@@ -1319,26 +1377,8 @@ void ChatCanvas::RenderViewport(wxDC& dc, int viewY, int width, int height,
 void ChatCanvas::OnPaint(wxPaintEvent&) {
     PERF_SCOPE_T("OnPaint", 50);
 
-    EnsureFonts();
     wxSize sz = GetClientSize();
-    // While a resize is in flight, paint the cached layout (just re-centered
-    // at the new client width) instead of re-wrapping every block per frame.
-    // OnResizeSettle flips layoutDirty_ once the drag stops and triggers the
-    // real relayout. Genuine invalidations (AddBlock, ToggleToolCall, theme
-    // change) already mark the layout dirty, so they take the slow path here.
-    const int layoutW = (layoutWidth_ > 0 && !layoutDirty_) ? layoutWidth_ : sz.x;
-    Relayout(layoutW);
-
-    // Read scroll offset.
-    int xu, yu;
-    GetScrollPixelsPerUnit(&xu, &yu);
-    int vx, vy;
-    GetViewStart(&vx, &vy);
-    const int viewY = (yu > 0) ? vy * yu : 0;
-
-    // Measure any unmeasured blocks in/around the viewport before rendering,
-    // so PaintBlock has real line geometry. Off-screen blocks stay estimated.
-    EnsureVisibleLaidOut(viewY, sz.y, ContentWidthFor(layoutW));
+    const int viewY = PrepareLayoutForPaint();
 
     BlockPos selStart = selAnchor_, selEnd = selCaret_;
     if (selEnd < selStart) std::swap(selStart, selEnd);

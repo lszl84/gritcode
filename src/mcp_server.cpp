@@ -196,6 +196,16 @@ json MCPServer::HandleRequest(const json& request) {
         if (!cb_.getPanes) return err(-32603, "not ready");
         return okResult(cb_.getPanes());
     }
+    if (method == "scrollToBlock") {
+        if (!cb_.scrollToBlock) return err(-32603, "not ready");
+        if (!params.contains("index") || !params["index"].is_number_integer())
+            return err(-32602, "missing/invalid 'index' param");
+        return okResult(cb_.scrollToBlock(params["index"].get<int>()));
+    }
+    if (method == "checkLayout") {
+        if (!cb_.checkLayout) return err(-32603, "not ready");
+        return okResult(cb_.checkLayout());
+    }
     if (method == "listSessions") {
         if (!cb_.listSessions) return err(-32603, "not ready");
         return okResult(cb_.listSessions());

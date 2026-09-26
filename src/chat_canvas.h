@@ -104,6 +104,22 @@ public:
     // GUI thread; callers must marshal via CallAfter.
     const std::vector<Block>& Blocks() const { return blocks_; }
 
+    // Test hooks (driven through the control server).
+    // Scroll so block `idx` is at the top of the view.
+    void ScrollToBlock(int idx);
+    // Blocks whose layout claims to be current for the present width but whose
+    // stored height disagrees with a fresh measurement: {index, stored, real}.
+    std::vector<std::array<int, 3>> FindStaleLayouts();
+    int LayoutWidth() const { return layoutWidth_; }
+    // Indices of blocks measured at the current layout width.
+    std::vector<int> MeasuredBlocks() const {
+        std::vector<int> out;
+        if (layoutWidth_ <= 0) return out;
+        for (int i = 0; i < (int)blocks_.size(); ++i)
+            if (blocks_[i].cachedWidth == ContentWidthFor(layoutWidth_)) out.push_back(i);
+        return out;
+    }
+
     // ---- Selection introspection / programmatic drive (used by MCP). All
     //      callers must already be on the GUI thread.
     BlockPos HitTestPublic(int canvasX, int canvasY) const {
@@ -242,6 +258,9 @@ private:
 
     // Layout (or re-layout) all blocks to the given content width.
     void Relayout(int width);
+    // The layout half of OnPaint: relayout if needed and measure the blocks
+    // around the viewport. Returns the view's top y in canvas coords.
+    int PrepareLayoutForPaint();
     // Client width -> content column width (clamped to [100, kMaxContentW]).
     int ContentWidthFor(int clientW) const;
     // Cheap O(text) height estimate for an unmeasured block — no DC calls, so

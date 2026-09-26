@@ -96,6 +96,13 @@ struct MCPCallbacks {
     // Pixel widths of the window client area and each visible pane:
     // {window, import, chat, editor} (0 for a hidden pane).
     std::function<nlohmann::json()> getPanes;
+
+    // Scroll the chat so block `index` is at the top; returns {ok}.
+    std::function<nlohmann::json(int)> scrollToBlock;
+
+    // Verify the chat layout cache: {blocks, stale: [[index, stored, real]]}
+    // for blocks whose stored height disagrees with a fresh measurement.
+    std::function<nlohmann::json()> checkLayout;
 };
 
 class MCPServer {
