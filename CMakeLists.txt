@@ -8,7 +8,7 @@ if(NOT CMAKE_OSX_DEPLOYMENT_TARGET)
     set(CMAKE_OSX_DEPLOYMENT_TARGET "14.0" CACHE STRING "Minimum macOS version" FORCE)
 endif()
 
-project(gritcode VERSION 0.5.19 LANGUAGES C CXX)
+project(gritcode VERSION 0.5.20 LANGUAGES C CXX)
 
 # Human-facing version string (used for packaging, bundle metadata, etc.)
 set(GRITCODE_VERSION "${PROJECT_VERSION}")
