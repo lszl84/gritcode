@@ -275,4 +275,8 @@ jobs:
           case "$GITHUB_REF_NAME" in
             *-*) set -- --prerelease "$@" ;;
           esac
+          # Hand-written notes go above the generated changelog link. A
+          # suffixed tag uses its base version's notes (v0.5.14-rc1 -> v0.5.14).
+          notes="release-notes/${GITHUB_REF_NAME%%-*}.md"
+          if [ -f "$notes" ]; then set -- --notes "$(cat "$notes")" "$@"; fi
           gh release create "$GITHUB_REF_NAME" artifacts/* "$@"
