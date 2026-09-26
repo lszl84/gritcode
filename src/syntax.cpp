@@ -10,6 +10,7 @@
 // node's range.
 
 #include "syntax.h"
+#include "omarchy_theme.h"
 
 #include <wx/settings.h>
 #include <wx/textctrl.h>
@@ -68,11 +69,39 @@ struct Palette {
     wxColour c[static_cast<int>(Cat::Count)];
 };
 
-bool IsDark(wxTextCtrl *ctrl) {
+wxColour CtrlBg(wxTextCtrl *ctrl) {
     wxColour bg = ctrl->GetBackgroundColour();
-    if (!bg.IsOk())
-        bg = wxSystemSettings::GetColour(wxSYS_COLOUR_WINDOW);
+    return bg.IsOk() ? bg : wxSystemSettings::GetColour(wxSYS_COLOUR_WINDOW);
+}
+
+bool IsDark(wxTextCtrl *ctrl) {
+    wxColour bg = CtrlBg(ctrl);
     return bg.Red() * 299 + bg.Green() * 587 + bg.Blue() * 114 < 50000;
+}
+
+// Omarchy theme: map categories onto the theme's ANSI colours, the way a
+// terminal renders them, keeping each readable on the editor background.
+Palette MakeOmarchyPalette(const omarchy::Theme &t, const wxColour &bg) {
+    const wxColour fg = t.Get("foreground");
+    auto pick = [&](const char *key, const wxColour &fallback) {
+        wxColour c = t.Get(key);
+        return omarchy::Readable(c.IsOk() ? c : fallback, bg, 3.0);
+    };
+    wxColour accent = t.Get("accent");
+    if (!accent.IsOk()) accent = fg;
+    Palette p;
+    p.c[(int)Cat::Comment] = omarchy::Readable(omarchy::Mix(fg, bg, 0.45), bg, 2.5);
+    p.c[(int)Cat::String] = pick("green", fg);
+    p.c[(int)Cat::Number] = pick("yellow", fg);
+    p.c[(int)Cat::Keyword] = pick("magenta", accent);
+    p.c[(int)Cat::Const] = pick("red", fg);
+    p.c[(int)Cat::Func] = pick("blue", accent);
+    p.c[(int)Cat::Type] = pick("cyan", fg);
+    p.c[(int)Cat::Prop] = pick("bright_blue", fg);
+    p.c[(int)Cat::Decor] = pick("yellow", fg);
+    p.c[(int)Cat::Heading] = pick("accent", fg);
+    p.c[(int)Cat::None] = omarchy::Readable(fg, bg, 4.5);
+    return p;
 }
 
 Palette MakePalette(bool dark) {
@@ -103,6 +132,12 @@ Palette MakePalette(bool dark) {
         p.c[(int)Cat::None] = wxColour(0x00, 0x00, 0x00);
     }
     return p;
+}
+
+Palette PaletteFor(wxTextCtrl *ctrl) {
+    if (const omarchy::Theme *t = omarchy::Current())
+        return MakeOmarchyPalette(*t, CtrlBg(ctrl));
+    return MakePalette(IsDark(ctrl));
 }
 
 wxTextAttr Attr(const Palette &p, Cat cat) {
@@ -776,7 +811,7 @@ void Apply(wxTextCtrl *ctrl, std::string_view text,
 void ClearStyles(wxTextCtrl *ctrl) {
     if (!ctrl)
         return;
-    Palette p = MakePalette(IsDark(ctrl));
+    Palette p = PaletteFor(ctrl);
     ctrl->SetDefaultStyle(DefaultAttr(p));
     ctrl->SetStyle(0, ctrl->GetLastPosition(), DefaultAttr(p));
 }
@@ -786,7 +821,7 @@ void Highlight(wxTextCtrl *ctrl, const wxString &path,
     if (!ctrl)
         return;
     const Lang &l = LangFor(path.ToStdString(wxConvUTF8));
-    Palette p = MakePalette(IsDark(ctrl));
+    Palette p = PaletteFor(ctrl);
     std::vector<Token> tokens;
     if (l.language && utf8Text.size() <= kHighlightLimitBytes) {
         TSParser *parser = ts_parser_new();

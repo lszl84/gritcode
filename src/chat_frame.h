@@ -361,6 +361,10 @@ private:
     // once at construction and again on EVT_SYS_COLOUR_CHANGED so the icons
     // stay readable when the user toggles light/dark themes.
     void ReloadToolbarIcons();
+    // Recolour everything from the current system / Omarchy theme.
+    void ApplyTheme();
+    // Watch Omarchy's current-theme dir so a theme switch recolours live.
+    void StartThemeWatcher();
 
     // ---- Session import/export ----
     std::vector<nlohmann::json> importedMessages_;   // raw messages from import
@@ -386,6 +390,13 @@ private:
     bool treeSelectionRestoring_ = false;                // suppress SEL_CHANGED during reload
     wxTimer* highlightTimer_ = nullptr;                  // debounced syntax highlight
     wxFileSystemWatcher* fileWatcher_ = nullptr;         // watches activeCwd for changes
+    // Omarchy theme watcher. Its events go to a separate handler so they
+    // never reach the project watcher's OnFsWatcherEvent; the timer
+    // coalesces the burst of writes a theme switch makes. The handler is
+    // declared first so it outlives the timer.
+    wxEvtHandler themeEvents_;
+    wxTimer themeTimer_;
+    wxFileSystemWatcher* themeWatcher_ = nullptr;
     wxTimer* treeRefreshTimer_ = nullptr;                // debounces watcher bursts
     wxTreeItemId treeCtxItem_;                           // right-clicked tree item
     wxString treeCtxPath_;                               // right-clicked item path

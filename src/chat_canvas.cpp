@@ -1,4 +1,5 @@
 #include "chat_canvas.h"
+#include "omarchy_theme.h"
 #include "perf_log.h"
 #include <wx/dnd.h>
 #include <wx/dcbuffer.h>
@@ -77,7 +78,45 @@ bool IsDarkMode() {
     return lum < 128;
 }
 
+// Palette derived from the active Omarchy theme. Built from background,
+// foreground and accent (the keys every theme defines) blended toward each
+// other, so it follows the theme's character without assuming anything about
+// its ANSI colours; accent-coloured text is contrast-checked.
+Palette MakeOmarchyPalette(const omarchy::Theme& t) {
+    using omarchy::Mix;
+    using omarchy::Readable;
+    const wxColour bg = t.Get("background");
+    const wxColour fg = t.Get("foreground");
+    wxColour accent = t.Get("accent");
+    if (!accent.IsOk()) accent = t.Get("blue");
+    if (!accent.IsOk()) accent = fg;
+    wxColour codeBg = t.Get("lighter_background");
+    if (!codeBg.IsOk() || codeBg == bg) codeBg = Mix(bg, fg, 0.07);
+
+    Palette p;
+    p.bg            = bg;
+    p.text          = fg;
+    p.codeBg        = codeBg;
+    p.codeFg        = fg;
+    p.userBubbleBg  = Mix(bg, accent, 0.22);
+    p.selectionBg   = Mix(bg, accent, 0.40);
+    p.thinkingDot   = Mix(fg, bg, 0.30);
+    p.tableBorder   = Mix(bg, fg, 0.35);
+    p.tableHeaderBg = codeBg;
+    p.toolHeaderBg  = Mix(bg, accent, 0.12);
+    p.toolBodyBg    = Mix(bg, fg, 0.04);
+    p.toolAccent    = Readable(accent, p.toolHeaderBg, 3.0);
+    p.toolDim       = Readable(Mix(fg, bg, 0.40), p.toolHeaderBg, 3.0);
+    p.thinkingBg    = Mix(bg, fg, 0.05);
+    p.thinkingText  = Mix(fg, bg, 0.22);
+    p.thinkingAccent= Readable(Mix(fg, bg, 0.35), p.thinkingBg, 3.0);
+    p.linkColour    = Readable(accent, bg, 4.5);
+    return p;
+}
+
 Palette MakePalette() {
+    if (const omarchy::Theme* t = omarchy::Current())
+        return MakeOmarchyPalette(*t);
     Palette p;
     if (IsDarkMode()) {
         p.bg            = wxColour( 34,  34,  38);
@@ -237,13 +276,12 @@ void ChatCanvas::EnsureFonts() {
     if (fontsReady_) return;
 #ifdef __APPLE__
     const int bodySz = 14;
-    const int codeSz = 13;
     static const int hSizes[6] = {24, 21, 18, 16, 15, 14};
 #else
     const int bodySz = 12;
-    const int codeSz = 11;
     static const int hSizes[6] = {22, 19, 16, 14, 13, 12};
 #endif
+    const int codeSz = kCodeFontPt;
     fontBody_ = wxFont(wxFontInfo(bodySz).Family(wxFONTFAMILY_DEFAULT));
     fontBodyBold_ = wxFont(wxFontInfo(bodySz).Family(wxFONTFAMILY_DEFAULT).Bold());
     fontBodyItalic_ = wxFont(wxFontInfo(bodySz).Family(wxFONTFAMILY_DEFAULT).Italic());

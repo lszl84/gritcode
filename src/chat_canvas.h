@@ -7,6 +7,14 @@
 #include <unordered_map>
 #include <vector>
 
+// Point size of code text in the chat. The file editor uses it too, so
+// editor text and chat code blocks always match.
+#ifdef __APPLE__
+constexpr int kCodeFontPt = 13;
+#else
+constexpr int kCodeFontPt = 11;
+#endif
+
 struct Palette {
     wxColour bg;
     wxColour text;
@@ -42,6 +50,10 @@ public:
     // Override the background colour computed from system theme.
     // Pass wxNullColour to revert to the default palette bg.
     void SetBgColour(const wxColour& c) { bgOverride_ = c; Refresh(); }
+
+    // Recompute colours from the system / Omarchy theme and repaint.
+    void ApplyTheme() { RebuildPalette(); Refresh(); }
+    const Palette& GetPalette() const { return palette_; }
 
     // Append a finalized block. Triggers reflow + redraw.
     void AddBlock(Block b);

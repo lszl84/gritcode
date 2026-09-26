@@ -1,4 +1,5 @@
 #include "chat_frame.h"
+#include "omarchy_theme.h"
 #include "editor_indent.h"
 #include "format_u8.h"
 #include "inline_parser.h"
@@ -1210,9 +1211,8 @@ ChatFrame::ChatFrame()
                                wxDefaultPosition, wxDefaultSize,
                                wxTE_MULTILINE | wxTE_RICH2 | wxTE_PROCESS_TAB);
     {
-        // One point above the GUI font, closer to the chat's body text size.
-        const int editorPt =
-            wxSystemSettings::GetFont(wxSYS_DEFAULT_GUI_FONT).GetPointSize() + 1;
+        // Same size as code blocks in the chat.
+        const int editorPt = kCodeFontPt;
 #ifdef __WXOSX__
         wxFont mono = MacMonospaceFont(editorPt);
 #else
@@ -1291,12 +1291,7 @@ ChatFrame::ChatFrame()
     // Match tool accent colour from ChatCanvas palette. Set before the font:
     // macOS only applies a button's text colour when SetFont/SetLabel rebuild
     // its title, so the reverse order leaves the link in the default colour.
-    {
-        wxColour bg = wxSystemSettings::GetColour(wxSYS_COLOUR_WINDOW);
-        bool isDark = (bg.Red() * 299 + bg.Green() * 587 + bg.Blue() * 114) < 50000;
-        changeBtn->SetForegroundColour(
-            isDark ? wxColour(140, 200, 255) : wxColour(30, 90, 170));
-    }
+    changeBtn->SetForegroundColour(importCanvas_->GetPalette().toolAccent);
     auto cf = changeBtn->GetFont();
     cf.SetPointSize(cf.GetPointSize() - 1);
     changeBtn->SetFont(cf);
@@ -1437,7 +1432,9 @@ ChatFrame::ChatFrame()
          [this](wxCommandEvent&) { FetchRemoteModelsAsync(); },
          ID_MODEL_REFRESH);
     Bind(wxEVT_SYS_COLOUR_CHANGED,
-         [this](wxSysColourChangedEvent& e) { ReloadToolbarIcons(); e.Skip(); });
+         [this](wxSysColourChangedEvent& e) { ApplyTheme(); e.Skip(); });
+    // The watcher needs a running event loop, so start it once one is up.
+    CallAfter([this] { StartThemeWatcher(); });
 
     // Helper: bounce a value-returning closure onto the GUI thread and block
     // the calling (MCP) thread until it has returned. Polls `destroying_` so
@@ -1899,6 +1896,9 @@ ChatFrame::~ChatFrame() {
     claudeProc_ = ClaudeAgentProcess();
     delete fileWatcher_;  // stop filesystem watches (own their thread)
     fileWatcher_ = nullptr;
+    delete themeWatcher_;
+    themeWatcher_ = nullptr;
+    themeTimer_.Stop();
     // ~StreamingWebRequest joins the worker thread, so by the time we return
     // no more callbacks can be posted.
 
@@ -2084,6 +2084,41 @@ void ChatFrame::RequestCancel() {
     // cancelled here. Escape cancels AI-initiated tool calls, not user-
     // initiated Play runs. If the user started a dev server via Play,
     // they want it to keep running.
+}
+
+void ChatFrame::StartThemeWatcher() {
+    themeTimer_.SetOwner(&themeEvents_);
+    themeEvents_.Bind(wxEVT_TIMER, [this](wxTimerEvent&) {
+        // A switch may replace directories under the watch; re-arm it.
+        if (themeWatcher_) {
+            themeWatcher_->RemoveAll();
+            wxString dir = omarchy::WatchDir();
+            if (!dir.empty()) themeWatcher_->Add(wxFileName::DirName(dir));
+        }
+        ApplyTheme();
+    });
+    wxString dir = omarchy::WatchDir();
+    if (dir.empty()) return;  // not an Omarchy system
+    themeWatcher_ = new wxFileSystemWatcher();
+    themeWatcher_->SetOwner(&themeEvents_);
+    themeEvents_.Bind(wxEVT_FSWATCHER, [this](wxFileSystemWatcherEvent&) {
+        themeTimer_.StartOnce(400);
+    });
+    themeWatcher_->Add(wxFileName::DirName(dir));
+}
+
+void ChatFrame::ApplyTheme() {
+    omarchy::Reload();
+    canvas_->ApplyTheme();
+    importCanvas_->SetBgColour(wxSystemSettings::GetColour(wxSYS_COLOUR_WINDOW));
+    importCanvas_->ApplyTheme();
+    changeBtn_->SetForegroundColour(importCanvas_->GetPalette().toolAccent);
+    ReloadToolbarIcons();
+    if (!pendingQueue_.empty()) RebuildChips();
+    // Re-colour the open file with the new syntax palette.
+    if (codeEdit_ && !editorFilePath_.empty() && highlightTimer_)
+        highlightTimer_->StartOnce(1);
+    Refresh();
 }
 
 void ChatFrame::ReloadToolbarIcons() {
