@@ -57,6 +57,7 @@ jobs:
         with:
           name: linux-deb
           path: build/gritcode-*.deb
+          retention-days: 7
 
   macos:
     name: macOS
@@ -135,6 +136,7 @@ jobs:
         with:
           name: macos-dmg
           path: build/gritcode-*.dmg
+          retention-days: 7
 
   archlinux:
     name: Arch Linux
@@ -176,6 +178,7 @@ jobs:
         with:
           name: archlinux-pkg
           path: packaging/archlinux/*.pkg.tar.zst
+          retention-days: 7
 
   windows:
     name: Windows
@@ -240,6 +243,7 @@ jobs:
         with:
           name: windows-installer
           path: build-win/gritcode-*.exe
+          retention-days: 7
 
   release:
     name: Publish GitHub Release
