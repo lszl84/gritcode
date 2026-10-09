@@ -4686,7 +4686,11 @@ void ChatFrame::FinalizeTurn(bool wasCancelledOrError) {
         return;
     }
     UpdateQueueUI();
-    if (input_->IsShown()) input_->SetFocus();
+    // Put the cursor back in the input, but only if the user is already here:
+    // on wxGTK, SetFocus() on an inactive window calls gtk_window_present(),
+    // and Wayland compositors (Hyprland) then switch workspaces and pull the
+    // window to the front whenever a turn finishes in the background.
+    if (input_->IsShown() && IsActive()) input_->SetFocus();
 }
 
 void ChatFrame::RenderToolBlock(const std::string& name,
