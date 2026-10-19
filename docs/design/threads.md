@@ -63,7 +63,20 @@ the decision tray come later (see `orchestrator-conversation.md`).
 ## Steps
 
 1. Threads: struct, multi-thread runtime, store, per-thread cwd, write queue,
-   dropdown.
+   dropdown. (done)
 2. Subagents: a DeepSeek `task` tool running a child thread headless, and
    Claude Code subagent events shown as child threads.
-3. Worktree threads (only when the UI uses them).
+3. Fixes that matter once threads run at once (found on the old branch): a
+   bash timeout that kills the whole process group, a lock around run-config
+   read-modify-write, SSE parsing of CRLF streams / a final event without a
+   blank line / `data:` without a space, and "Refresh" in the file tree saving
+   the open file.
+4. Project brief: a short per-folder brief (`.grit/brief.md` or generated)
+   injected into new threads instead of the whole history.
+5. Thread pane: an optional left list of the folder's threads and their child
+   threads with state (running, waiting, failed, done).
+6. Worktree threads: a thread can run in its own git worktree, so several
+   threads write in one project at once; diff and merge back.
+7. Project-scoped history search for the memory tool.
+
+The orchestrator ideas (`orchestrator-conversation.md`) build on 2 and 5.
