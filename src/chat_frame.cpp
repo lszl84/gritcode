@@ -75,7 +75,7 @@ constexpr int ID_TREE_NEW_FILE      = wxID_HIGHEST + 17;
 constexpr int ID_TREE_RENAME        = wxID_HIGHEST + 18;
 constexpr int ID_TREE_SHOW_IN_FILES = wxID_HIGHEST + 19;
 constexpr int ID_TREE_NEW_FOLDER    = wxID_HIGHEST + 20;
-constexpr int ID_TREE_REFRESH       = wxID_HIGHEST + 21;
+constexpr int ID_TREE_REFRESH       = wxID_HIGHEST + 28;
 constexpr int ID_TREE_TOGGLE_HIDDEN = wxID_HIGHEST + 27;
 constexpr int ID_EDITOR_SAVE        = wxID_HIGHEST + 21;
 constexpr int ID_EDITOR_SAVE_AS     = wxID_HIGHEST + 22;
@@ -4415,86 +4415,73 @@ void ChatFrame::DoSendActualRequest(Thread& t) {
         });
 }
 
-void ChatFrame::OnStreamData(Thread& t, std::string_view chunk) {
-    if (chunk.empty()) return;
-    t.sseBuf.append(chunk.data(), chunk.size());
+void ChatFrame::OnStreamData(Thread& t, std::string_view chunk, bool streamEnded) {
+    if (chunk.empty() && !streamEnded) return;
+    for (const std::string& payload : TakeSseEvents(t.sseBuf, chunk, streamEnded)) {
+        if (payload == "[DONE]") continue;
+        try {
+            auto j = nlohmann::json::parse(payload);
+            if (!j.contains("choices") || j["choices"].empty()) continue;
+            const auto& choice = j["choices"][0];
+            if (choice.contains("finish_reason")
+                && choice["finish_reason"].is_string())
+                t.finishReason = choice["finish_reason"].get<std::string>();
+            if (!choice.contains("delta")) continue;
+            const auto& delta = choice["delta"];
 
-    size_t pos;
-    while ((pos = t.sseBuf.find("\n\n")) != std::string::npos) {
-        std::string event = t.sseBuf.substr(0, pos);
-        t.sseBuf.erase(0, pos + 2);
-
-        std::istringstream stream(event);
-        std::string line;
-        while (std::getline(stream, line)) {
-            if (!line.empty() && line.back() == '\r') line.pop_back();
-            if (line.rfind("data: ", 0) != 0) continue;
-            std::string payload = line.substr(6);
-            if (payload == "[DONE]") continue;
-            try {
-                auto j = nlohmann::json::parse(payload);
-                if (!j.contains("choices") || j["choices"].empty()) continue;
-                const auto& choice = j["choices"][0];
-                if (choice.contains("finish_reason")
-                    && choice["finish_reason"].is_string())
-                    t.finishReason = choice["finish_reason"].get<std::string>();
-                if (!choice.contains("delta")) continue;
-                const auto& delta = choice["delta"];
-
-                // ---- text content ----
-                // DeepSeek streams reasoning bytes in `reasoning_content` and
-                // visible bytes in `content` (potentially in the same delta).
-                // Other providers may use `reasoning` or `reasoning_text`. We
-                // capture reasoning into t.activeReasoning so it can be round-
-                // tripped on the next request — DeepSeek requires this on every
-                // assistant message in history or returns 400.
-                for (const char* f : {"reasoning_content", "reasoning", "reasoning_text"}) {
-                    if (delta.contains(f) && delta[f].is_string()) {
-                        t.activeReasoning += delta[f].get<std::string>();
-                        UpdateLiveThinking(t);
-                        break;
-                    }
+            // ---- text content ----
+            // DeepSeek streams reasoning bytes in `reasoning_content` and
+            // visible bytes in `content` (potentially in the same delta).
+            // Other providers may use `reasoning` or `reasoning_text`. We
+            // capture reasoning into t.activeReasoning so it can be round-
+            // tripped on the next request — DeepSeek requires this on every
+            // assistant message in history or returns 400.
+            for (const char* f : {"reasoning_content", "reasoning", "reasoning_text"}) {
+                if (delta.contains(f) && delta[f].is_string()) {
+                    t.activeReasoning += delta[f].get<std::string>();
+                    UpdateLiveThinking(t);
+                    break;
                 }
-                if (delta.contains("content") && delta["content"].is_string()) {
-                    std::string content = delta["content"].get<std::string>();
-                    if (!content.empty()) {
-                        // First non-reasoning byte of this round: emit the
-                        // thinking block now so it lands before any content
-                        // block the markdown stream is about to push out.
-                        EmitPendingThinking(t);
-                        t.activeAssistantText += content;
-                        if (t.mdStream) t.mdStream->Feed(wxString::FromUTF8(content));
-                    }
-                }
-
-                // ---- tool_calls ----
-                if (delta.contains("tool_calls") && delta["tool_calls"].is_array()
-                    && !delta["tool_calls"].empty()) {
-                    // Same as the content case — render thinking before any
-                    // tool block lands. RenderToolBlock fires later in
-                    // HandleCompletion, but emitting here keeps the order
-                    // consistent regardless of when the model interleaves
-                    // tool_calls and content.
-                    EmitPendingThinking(t);
-                    for (const auto& tc : delta["tool_calls"]) {
-                        int idx = tc.value("index", 0);
-                        if ((int)t.activeToolCalls.size() <= idx)
-                            t.activeToolCalls.resize(idx + 1);
-                        auto& cur = t.activeToolCalls[idx];
-                        if (tc.contains("id") && tc["id"].is_string())
-                            cur.id = tc["id"].get<std::string>();
-                        if (tc.contains("function") && tc["function"].is_object()) {
-                            const auto& fn = tc["function"];
-                            if (fn.contains("name") && fn["name"].is_string())
-                                cur.name = fn["name"].get<std::string>();
-                            if (fn.contains("arguments") && fn["arguments"].is_string())
-                                cur.args += fn["arguments"].get<std::string>();
-                        }
-                    }
-                }
-            } catch (...) {
-                // Ignore malformed events (keepalives, partial JSON, etc.).
             }
+            if (delta.contains("content") && delta["content"].is_string()) {
+                std::string content = delta["content"].get<std::string>();
+                if (!content.empty()) {
+                    // First non-reasoning byte of this round: emit the
+                    // thinking block now so it lands before any content
+                    // block the markdown stream is about to push out.
+                    EmitPendingThinking(t);
+                    t.activeAssistantText += content;
+                    if (t.mdStream) t.mdStream->Feed(wxString::FromUTF8(content));
+                }
+            }
+
+            // ---- tool_calls ----
+            if (delta.contains("tool_calls") && delta["tool_calls"].is_array()
+                && !delta["tool_calls"].empty()) {
+                // Same as the content case — render thinking before any
+                // tool block lands. RenderToolBlock fires later in
+                // HandleCompletion, but emitting here keeps the order
+                // consistent regardless of when the model interleaves
+                // tool_calls and content.
+                EmitPendingThinking(t);
+                for (const auto& tc : delta["tool_calls"]) {
+                    int idx = tc.value("index", 0);
+                    if ((int)t.activeToolCalls.size() <= idx)
+                        t.activeToolCalls.resize(idx + 1);
+                    auto& cur = t.activeToolCalls[idx];
+                    if (tc.contains("id") && tc["id"].is_string())
+                        cur.id = tc["id"].get<std::string>();
+                    if (tc.contains("function") && tc["function"].is_object()) {
+                        const auto& fn = tc["function"];
+                        if (fn.contains("name") && fn["name"].is_string())
+                            cur.name = fn["name"].get<std::string>();
+                        if (fn.contains("arguments") && fn["arguments"].is_string())
+                            cur.args += fn["arguments"].get<std::string>();
+                    }
+                }
+            }
+        } catch (...) {
+            // Ignore malformed events (keepalives, partial JSON, etc.).
         }
     }
 }
@@ -4506,6 +4493,8 @@ void ChatFrame::OnStreamDone(Thread& t, WebResponse resp) {
         Close();
         return;
     }
+    // A last event the server didn't end with a blank line.
+    if (resp.ok) OnStreamData(t, {}, /*streamEnded=*/true);
 
     // Flush markdown parser before deciding what to do next — any pending
     // paragraph/code block needs to land before tool blocks or the next turn.
@@ -5364,33 +5353,21 @@ void ChatFrame::RunSummaryThenSend(Thread& t, int splitIdx) {
         });
 }
 
-void ChatFrame::OnSummaryStreamData(Thread& t, std::string_view chunk) {
-    if (chunk.empty()) return;
-    t.summarySseBuf.append(chunk.data(), chunk.size());
-
-    size_t pos;
-    while ((pos = t.summarySseBuf.find("\n\n")) != std::string::npos) {
-        std::string event = t.summarySseBuf.substr(0, pos);
-        t.summarySseBuf.erase(0, pos + 2);
-        std::istringstream stream(event);
-        std::string line;
-        while (std::getline(stream, line)) {
-            if (!line.empty() && line.back() == '\r') line.pop_back();
-            if (line.rfind("data: ", 0) != 0) continue;
-            std::string payload = line.substr(6);
-            if (payload == "[DONE]") continue;
-            try {
-                auto j = nlohmann::json::parse(payload);
-                if (!j.contains("choices") || j["choices"].empty()) continue;
-                const auto& choice = j["choices"][0];
-                if (!choice.contains("delta")) continue;
-                const auto& delta = choice["delta"];
-                if (delta.contains("content") && delta["content"].is_string()) {
-                    t.summaryText += delta["content"].get<std::string>();
-                }
-            } catch (...) {
-                // Tolerate keepalives / partial JSON / malformed events.
+void ChatFrame::OnSummaryStreamData(Thread& t, std::string_view chunk, bool streamEnded) {
+    if (chunk.empty() && !streamEnded) return;
+    for (const std::string& payload : TakeSseEvents(t.summarySseBuf, chunk, streamEnded)) {
+        if (payload == "[DONE]") continue;
+        try {
+            auto j = nlohmann::json::parse(payload);
+            if (!j.contains("choices") || j["choices"].empty()) continue;
+            const auto& choice = j["choices"][0];
+            if (!choice.contains("delta")) continue;
+            const auto& delta = choice["delta"];
+            if (delta.contains("content") && delta["content"].is_string()) {
+                t.summaryText += delta["content"].get<std::string>();
             }
+        } catch (...) {
+            // Tolerate keepalives / partial JSON / malformed events.
         }
     }
 }
@@ -5398,6 +5375,7 @@ void ChatFrame::OnSummaryStreamData(Thread& t, std::string_view chunk) {
 void ChatFrame::OnSummaryStreamDone(Thread& t, WebResponse resp) {
   try {
     if (quitRequested_) { Close(); return; }
+    if (resp.ok) OnSummaryStreamData(t, {}, /*streamEnded=*/true);
     // User hit Escape during the summary call — abort the whole turn rather
     // than dropping the head with no summary and continuing.
     if (!resp.ok && resp.error == "cancelled") {
