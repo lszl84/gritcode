@@ -46,6 +46,19 @@ std::string GetStringArg(const nlohmann::json& args, const char* key) {
     return v.get<std::string>();
 }
 
+// The bash timeout: `timeout_seconds` (a number, or a numeric string as some
+// models send) clamped to [1, 600], or 30 when it is missing or not positive.
+int BashTimeoutSeconds(const nlohmann::json& args) {
+    double t = 0;
+    if (args.is_object() && args.contains("timeout_seconds")) {
+        const auto& v = args["timeout_seconds"];
+        if (v.is_number()) t = v.get<double>();
+        else if (v.is_string()) try { t = std::stod(v.get<std::string>()); } catch (...) {}
+    }
+    if (!(t > 0)) return 30;  // also catches NaN
+    return (int)std::clamp(t, 1.0, 600.0);
+}
+
 // Expand a leading "~" (and "~/...") to $HOME and expand $VAR / ${VAR}
 // environment-variable references, then resolve a relative path against
 // `cwd` (the thread's folder; the process cwd is never used).
@@ -270,7 +283,7 @@ static std::string RunCommandWin(const std::string& cmd, ToolCancelToken* token,
     if (token && token->cancelled.load()) return "[cancelled]";
     if (truncated) out += "\n[output truncated]";
     if (out.empty()) out = "(no output)";
-    if (timedOut) out += "\n[timed out after 30s]";
+    if (timedOut) out += "\n[timed out after " + std::to_string(timeoutSeconds) + "s]";
 
     return out;
 }
@@ -279,7 +292,7 @@ std::string ToolBash(const nlohmann::json& args, ToolCancelToken* token,
                      const std::string& cwd) {
     std::string cmd = GetStringArg(args, "command");
     if (cmd.empty()) return "Error: missing 'command' argument";
-    return RunCommandWin(cmd, token, 30, cwd);
+    return RunCommandWin(cmd, token, BashTimeoutSeconds(args), cwd);
 }
 
 #else  // !_WIN32
@@ -290,7 +303,9 @@ std::string ToolBash(const nlohmann::json& args, ToolCancelToken* token,
 //
 // Timeout is enforced in the parent (SIGTERM → 500 ms → SIGKILL on the
 // process group), not via an external `timeout` binary — that GNU utility
-// doesn't exist on macOS.
+// doesn't exist on macOS. Once bash is reaped after a timeout or Escape, the
+// group gets a final SIGKILL: bash can die on SIGTERM while a grandchild that
+// ignores it lives on.
 //
 // The child chdir()s into `cwd` (the thread's folder) before exec, so
 // threads in different folders can run bash at the same time.
@@ -299,6 +314,7 @@ std::string ToolBash(const nlohmann::json& args, ToolCancelToken* token,
     std::string cmd = GetStringArg(args, "command");
     if (cmd.empty()) return "Error: missing 'command' argument";
     if (token && token->cancelled.load()) return "[cancelled]";
+    const int timeoutSeconds = BashTimeoutSeconds(args);
     const char* dir = cwd.empty() ? nullptr : cwd.c_str();
 
     int pfd[2];
@@ -355,11 +371,11 @@ std::string ToolBash(const nlohmann::json& args, ToolCancelToken* token,
     bool pipeEof = false;
     int status = 0;
     char buf[4096];
-    auto timeoutDeadline = std::chrono::steady_clock::now() + std::chrono::seconds(30);
+    auto timeoutDeadline = std::chrono::steady_clock::now() + std::chrono::seconds(timeoutSeconds);
     auto killDeadline = std::chrono::steady_clock::time_point::max();
 
     for (;;) {
-        // 30s timeout: same escalation as cancellation (SIGTERM → SIGKILL).
+        // Timeout: same escalation as cancellation (SIGTERM → SIGKILL).
         if (!sentTerm && std::chrono::steady_clock::now() >= timeoutDeadline) {
             timedOut = true;
             kill(-pid, SIGTERM);
@@ -410,6 +426,9 @@ std::string ToolBash(const nlohmann::json& args, ToolCancelToken* token,
         }
     }
     close(pfd[0]);
+    // Only after a timeout or Escape: after a normal exit, `nohup … &`
+    // processes are meant to keep running.
+    if (sentTerm) kill(-pid, SIGKILL);
     if (token) token->activePgid.store(0);
 
     if (token && token->cancelled.load()) return "[cancelled]";
@@ -418,7 +437,7 @@ std::string ToolBash(const nlohmann::json& args, ToolCancelToken* token,
     if (out.empty()) out = "(no output)";
 
     if (timedOut)
-        out += "\n[timed out after 30s]";
+        out += "\n[timed out after " + std::to_string(timeoutSeconds) + "s]";
     else if (WIFEXITED(status) && WEXITSTATUS(status) != 0)
         out += "\n[exit " + std::to_string(WEXITSTATUS(status)) + "]";
     else if (WIFSIGNALED(status))
@@ -981,14 +1000,20 @@ nlohmann::json GetToolDefinitions(bool includeGritHistory) {
 
     tools.push_back(ToolDef(
         "bash",
-        "Run a shell command. Captures stdout+stderr, 30 second timeout, runs in the project directory."
+        "Run a shell command. Captures stdout+stderr, runs in the project directory."
+        " Killed after `timeout_seconds` (default 30, max 600) with the output so far kept."
 #ifdef _WIN32
         " On Windows, uses cmd /c.",
 #else
         " Uses bash.",
 #endif
         {{"type", "object"},
-         {"properties", {{"command", StrParam("Shell command to execute.")}}},
+         {"properties", {
+             {"command", StrParam("Shell command to execute.")},
+             {"timeout_seconds", {{"type", "integer"},
+                                  {"description", "Seconds before the command is killed. "
+                                   "Default 30, max 600. Raise it for slow builds and tests."}}},
+         }},
          {"required", {"command"}}}));
 
     tools.push_back(ToolDef(
