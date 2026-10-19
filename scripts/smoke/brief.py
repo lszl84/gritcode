@@ -72,7 +72,7 @@ try:
             break
         except OSError:
             time.sleep(0.2)
-    g = Grit(base_port=PORT)
+    g = Grit(port=PORT)
     threads = g.list_threads()["threads"]
     first = next(t["id"] for t in threads if t["cwd"] == P and t["id"] != "00000000000000aa")
 
