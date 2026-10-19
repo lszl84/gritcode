@@ -47,9 +47,9 @@ std::string GetStringArg(const nlohmann::json& args, const char* key) {
 }
 
 // Expand a leading "~" (and "~/...") to $HOME and expand $VAR / ${VAR}
-// environment-variable references. Everything else (including relative
-// paths) is left untouched so the process cwd still resolves it.
-std::string ExpandPath(const std::string& path) {
+// environment-variable references, then resolve a relative path against
+// `cwd` (the thread's folder; the process cwd is never used).
+std::string ResolvePath(const std::string& path, const std::string& cwd) {
     if (path.empty()) return path;
     std::string out;
     out.reserve(path.size() + 16);
@@ -83,15 +83,17 @@ std::string ExpandPath(const std::string& path) {
         }
         out += path[i];
     }
+    std::filesystem::path p(out);
+    if (p.is_relative() && !cwd.empty()) return (std::filesystem::path(cwd) / p).string();
     return out;
 }
 
 // ---------------- file/shell tools ----------------
 
-std::string ToolReadFile(const nlohmann::json& args) {
+std::string ToolReadFile(const nlohmann::json& args, const std::string& cwd) {
     std::string path = GetStringArg(args, "path");
     if (path.empty()) return "Error: missing 'path' argument";
-    path = ExpandPath(path);
+    path = ResolvePath(path, cwd);
 
     std::ifstream f(path);
     if (!f) return "Error: cannot open " + path;
@@ -111,10 +113,10 @@ std::string ToolReadFile(const nlohmann::json& args) {
     return s;
 }
 
-std::string ToolWriteFile(const nlohmann::json& args) {
+std::string ToolWriteFile(const nlohmann::json& args, const std::string& cwd) {
     std::string path = GetStringArg(args, "path");
     if (path.empty()) return "Error: missing 'path' argument";
-    path = ExpandPath(path);
+    path = ResolvePath(path, cwd);
     if (!args.contains("content") || !args["content"].is_string())
         return "Error: missing 'content' argument";
     std::string content = args["content"].get<std::string>();
@@ -133,12 +135,12 @@ std::string ToolWriteFile(const nlohmann::json& args) {
     return "Wrote " + std::to_string(content.size()) + " bytes to " + path;
 }
 
-std::string ToolEditFile(const nlohmann::json& args) {
+std::string ToolEditFile(const nlohmann::json& args, const std::string& cwd) {
     std::string path = GetStringArg(args, "path");
     std::string oldStr = GetStringArg(args, "old_str");
     std::string newStr = GetStringArg(args, "new_str");
     if (path.empty()) return "Error: missing 'path' argument";
-    path = ExpandPath(path);
+    path = ResolvePath(path, cwd);
     if (oldStr.empty()) return "Error: 'old_str' must not be empty";
 
     std::ifstream in(path, std::ios::binary);
@@ -170,8 +172,9 @@ std::string ToolEditFile(const nlohmann::json& args) {
 
 // Shared Windows process runner. timeoutSeconds == 0 disables the timeout
 // (used by ToolBashDirect for long-running Play-button builds / dev servers).
+// The command runs in `cwd` (the process cwd when empty).
 static std::string RunCommandWin(const std::string& cmd, ToolCancelToken* token,
-                                 int timeoutSeconds) {
+                                 int timeoutSeconds, const std::string& cwd = {}) {
     if (cmd.empty()) return "Error: empty command";
     if (token && token->cancelled.load()) return "[cancelled]";
 
@@ -199,7 +202,8 @@ static std::string RunCommandWin(const std::string& cmd, ToolCancelToken* token,
     cmdBuf.push_back('\0');
 
     if (!CreateProcessA(nullptr, cmdBuf.data(), nullptr, nullptr, TRUE,
-                        CREATE_NO_WINDOW, nullptr, nullptr, &si, &pi)) {
+                        CREATE_NO_WINDOW, nullptr,
+                        cwd.empty() ? nullptr : cwd.c_str(), &si, &pi)) {
         CloseHandle(hRead);
         CloseHandle(hWrite);
         return "Error: CreateProcess failed (" + std::to_string(GetLastError()) + ")";
@@ -271,10 +275,11 @@ static std::string RunCommandWin(const std::string& cmd, ToolCancelToken* token,
     return out;
 }
 
-std::string ToolBash(const nlohmann::json& args, ToolCancelToken* token) {
+std::string ToolBash(const nlohmann::json& args, ToolCancelToken* token,
+                     const std::string& cwd) {
     std::string cmd = GetStringArg(args, "command");
     if (cmd.empty()) return "Error: missing 'command' argument";
-    return RunCommandWin(cmd, token, 30);
+    return RunCommandWin(cmd, token, 30, cwd);
 }
 
 #else  // !_WIN32
@@ -286,10 +291,15 @@ std::string ToolBash(const nlohmann::json& args, ToolCancelToken* token) {
 // Timeout is enforced in the parent (SIGTERM → 500 ms → SIGKILL on the
 // process group), not via an external `timeout` binary — that GNU utility
 // doesn't exist on macOS.
-std::string ToolBash(const nlohmann::json& args, ToolCancelToken* token) {
+//
+// The child chdir()s into `cwd` (the thread's folder) before exec, so
+// threads in different folders can run bash at the same time.
+std::string ToolBash(const nlohmann::json& args, ToolCancelToken* token,
+                     const std::string& cwd) {
     std::string cmd = GetStringArg(args, "command");
     if (cmd.empty()) return "Error: missing 'command' argument";
     if (token && token->cancelled.load()) return "[cancelled]";
+    const char* dir = cwd.empty() ? nullptr : cwd.c_str();
 
     int pfd[2];
     if (pipe(pfd) < 0) return "Error: pipe failed";
@@ -308,6 +318,12 @@ std::string ToolBash(const nlohmann::json& args, ToolCancelToken* token) {
         setpgid(0, 0);
         dup2(pfd[1], STDOUT_FILENO);
         dup2(pfd[1], STDERR_FILENO);
+        // Never run the command somewhere else when the folder is gone.
+        if (dir && chdir(dir) != 0) {
+            const char msg[] = "Error: cannot enter the working directory\n";
+            (void)!write(STDOUT_FILENO, msg, sizeof msg - 1);
+            _exit(126);
+        }
         // pfd[0]/pfd[1] are O_CLOEXEC so they auto-close on exec.
         execlp("bash", "bash", "-c", cmd.c_str(),
                (char*)nullptr);
@@ -413,10 +429,10 @@ std::string ToolBash(const nlohmann::json& args, ToolCancelToken* token) {
 
 #endif  // _WIN32
 
-std::string ToolListDirectory(const nlohmann::json& args) {
+std::string ToolListDirectory(const nlohmann::json& args, const std::string& cwd) {
     std::string path = GetStringArg(args, "path");
     if (path.empty()) path = ".";
-    path = ExpandPath(path);
+    path = ResolvePath(path, cwd);
 
     namespace fs = std::filesystem;
     std::error_code ec;
@@ -716,10 +732,10 @@ std::string MimeForImagePath(const std::string& path) {
     return {};
 }
 
-std::string ToolAskVision(const nlohmann::json& args) {
+std::string ToolAskVision(const nlohmann::json& args, const std::string& cwd) {
     std::string path = GetStringArg(args, "path");
     if (path.empty()) return "Error: missing 'path' argument";
-    path = ExpandPath(path);
+    path = ResolvePath(path, cwd);
 
     std::string question = GetStringArg(args, "question");
     if (question.empty()) {
@@ -965,7 +981,7 @@ nlohmann::json GetToolDefinitions(bool includeGritHistory) {
 
     tools.push_back(ToolDef(
         "bash",
-        "Run a shell command. Captures stdout+stderr, 30 second timeout, runs in the application's cwd."
+        "Run a shell command. Captures stdout+stderr, 30 second timeout, runs in the project directory."
 #ifdef _WIN32
         " On Windows, uses cmd /c.",
 #else
@@ -1262,13 +1278,14 @@ std::string DispatchTool(const std::string& name, const nlohmann::json& args,
                          bool enableGritHistory) {
     if (token && token->cancelled.load()) return "[cancelled]";
     try {
-        if (name == "read_file")     return CapOutput(ToolReadFile(args));
-        if (name == "write_file")    return CapOutput(ToolWriteFile(args));
-        if (name == "edit_file")     return CapOutput(ToolEditFile(args));
-        if (name == "bash")          return CapOutput(ToolBash(args, token));
-        if (name == "list_directory")return CapOutput(ToolListDirectory(args));
+        if (name == "read_file")     return CapOutput(ToolReadFile(args, currentCwd));
+        if (name == "write_file")    return CapOutput(ToolWriteFile(args, currentCwd));
+        if (name == "edit_file")     return CapOutput(ToolEditFile(args, currentCwd));
+        if (name == "bash")          return CapOutput(ToolBash(args, token, currentCwd));
+        if (name == "list_directory")return CapOutput(ToolListDirectory(args, currentCwd));
         if (name == "web_fetch")     return ToolWebFetch(args);   // already capped
-        if (name == "ask_vision")    return CapOutput(ToolAskVision(args));
+        if (name == "ask_vision")    return CapOutput(ToolAskVision(args, currentCwd));
+
         if (name == "web_search")    return ToolWebSearch(args);  // already capped
         if (name == "grit_history_search" || name == "grit_history_fetch") {
             if (!enableGritHistory)
