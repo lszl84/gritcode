@@ -130,6 +130,8 @@ void SessionStore::WriteSessionFile(const Entry& e,
     j["lastUsed"] = e.lastUsed;
     if (!e.title.empty()) j["title"] = e.title;
     if (!e.parent.empty()) j["parent"] = e.parent;
+    if (!e.worktree.empty()) j["worktree"] = e.worktree;
+    if (!e.branch.empty()) j["branch"] = e.branch;
     j["messages"] = history;
 
     std::string body = j.dump(2, ' ', false,
@@ -166,6 +168,10 @@ bool SessionStore::SaveBrief(const std::string& cwd, const std::string& text) co
     return AtomicWrite(BriefPath(cwd), text);
 }
 
+std::string SessionStore::WorktreePath(const std::string& id) const {
+    return root_ + "/worktrees/" + id;
+}
+
 void SessionStore::SetLastActive(const std::string& cwd, const std::string& threadId) {
     lastActiveCwd_ = cwd;
     lastActiveThread_ = threadId;
@@ -194,6 +200,8 @@ void SessionStore::WriteIndex() const {
             j["sessions"].push_back(std::move(row));
         } else {
             if (!e.parent.empty()) row["parent"] = e.parent;
+            if (!e.worktree.empty()) row["worktree"] = e.worktree;
+            if (!e.branch.empty()) row["branch"] = e.branch;
             j["threads"].push_back(std::move(row));
         }
     }
@@ -217,6 +225,8 @@ void SessionStore::ReadIndex() {
         ent.lastUsed = e.value("lastUsed", std::string{});
         ent.title = e.value("title", std::string{});
         ent.parent = e.value("parent", std::string{});
+        ent.worktree = e.value("worktree", std::string{});
+        ent.branch = e.value("branch", std::string{});
         if (ent.cwd.empty()) return;
         // Backfill id if older index lacks it.
         if (ent.id.empty()) ent.id = IdForCwd(ent.cwd);
@@ -242,7 +252,7 @@ void SessionStore::ReadIndex() {
 
     // Session files the index doesn't list: 0.5.x rewrites the index with
     // only `sessions`, dropping `threads`. Their headers (id, cwd, lastUsed,
-    // title, parent) are enough; the messages are skipped while parsing.
+    // title, parent, worktree, branch) are enough; the messages are skipped while parsing.
     std::error_code ec;
     for (const auto& file : fs::directory_iterator(sessionsDir_, ec)) {
         if (file.path().extension() != ".json") continue;
