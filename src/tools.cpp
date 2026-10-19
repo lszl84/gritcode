@@ -947,7 +947,11 @@ std::string ToolBashDirect(const std::string& cmd, ToolCancelToken* token) {
 }
 #endif
 
-nlohmann::json GetToolDefinitions(bool includeGritHistory) {
+bool IsWriteTool(const std::string& name) {
+    return name == "write_file" || name == "edit_file" || name == "run_project";
+}
+
+nlohmann::json GetToolDefinitions(bool includeGritHistory, bool subagent) {
     using J = nlohmann::json;
     J tools = J::array();
 
@@ -1100,6 +1104,33 @@ nlohmann::json GetToolDefinitions(bool includeGritHistory) {
          }},
          {"required", {"action"}}}));
 
+    if (subagent) {
+        J readOnly = J::array();
+        for (auto& t : tools) {
+            if (!IsWriteTool(t["function"]["name"].get<std::string>()))
+                readOnly.push_back(std::move(t));
+        }
+        return readOnly;
+    }
+
+    tools.push_back(ToolDef(
+        "task",
+        "Delegate a self-contained sub-task to a subagent: a separate agent with a "
+        "fresh context that works in the same folder and returns a concise report. "
+        "Use it for research that would otherwise fill your context (searching a "
+        "codebase, reading many files, comparing options), or to run independent "
+        "investigations at once: several task calls in one response run in "
+        "parallel. The subagent is read-only: it can read files, list "
+        "directories, search the web and run shell commands to inspect, but it "
+        "cannot edit files or start subagents, so make the changes yourself from "
+        "its report. It sees nothing of this conversation: the prompt must "
+        "contain everything it needs.",
+        {{"type", "object"},
+         {"properties", {
+             {"description", StrParam("Short label (3-6 words) shown to the user, e.g. 'Find config loading'.")},
+             {"prompt", StrParam("Complete instructions: the goal, relevant paths and context, and what to report back.")},
+         }},
+         {"required", {"description", "prompt"}}}));
     return tools;
 }
 

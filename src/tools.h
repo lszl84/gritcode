@@ -8,8 +8,15 @@ class MemoryDB;
 // Returns the OpenAI-compatible "tools" array describing all tools the agent
 // can call. Pass this as the "tools" field of the chat completions request.
 // When includeGritHistory is false, grit_history_search/fetch are omitted so
-// the model cannot see or call them.
-nlohmann::json GetToolDefinitions(bool includeGritHistory);
+// the model cannot see or call them. Top-level threads also get `task`, which
+// the chat frame runs as a child thread (a subagent); subagents get no `task`
+// and none of the tools that change files (see IsWriteTool).
+nlohmann::json GetToolDefinitions(bool includeGritHistory, bool subagent = false);
+
+// Tools that change files or project config. Subagents run concurrently with
+// their parent and each other in one folder, so they are read-only: these
+// tools are neither offered to them nor run for them.
+bool IsWriteTool(const std::string& name);
 
 // Cancellation handle threaded into the worker that runs a tool batch.
 // The GUI flips `cancelled` from the GUI thread (Escape key); the worker
