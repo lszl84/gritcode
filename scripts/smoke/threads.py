@@ -25,7 +25,7 @@ from grit import Grit  # noqa: E402
 LAUNCHER = os.path.expanduser("~/.local/share/grit-dev/run-hidden.sh")
 BIN = os.path.abspath(sys.argv[1] if len(sys.argv) > 1 else "build/gritcode")
 DATA = tempfile.mkdtemp(prefix="grit-threads-")
-PORT = random.randint(18800, 18899)
+PORT = int(os.environ.get("GRIT_MCP_PORT") or random.randint(18800, 18899))
 INDEX = os.path.join(DATA, "gritcode", "sessions.json")
 SESSIONS = os.path.join(DATA, "gritcode", "sessions")
 failures = 0

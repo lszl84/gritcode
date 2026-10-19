@@ -9,6 +9,7 @@
 #include <fstream>
 #include <functional>
 #include <random>
+#include <sstream>
 
 namespace fs = std::filesystem;
 
@@ -34,19 +35,24 @@ std::string DataRoot() {
 #endif
 }
 
-void AtomicWrite(const std::string& path, const std::string& content) {
+bool AtomicWrite(const std::string& path, const std::string& content) {
     std::string tmp = path + ".tmp";
     {
         std::ofstream f(tmp, std::ios::binary | std::ios::trunc);
         f << content;
+        f.close();
+        if (!f) return false;
     }
     std::error_code ec;
     fs::rename(tmp, path, ec);
     if (ec) {
         // rename can fail across mount points; copy + remove as fallback.
-        fs::copy_file(tmp, path, fs::copy_options::overwrite_existing, ec);
+        std::error_code copyEc;
+        fs::copy_file(tmp, path, fs::copy_options::overwrite_existing, copyEc);
         fs::remove(tmp, ec);
+        return !copyEc;
     }
+    return true;
 }
 
 }  // namespace
@@ -137,6 +143,27 @@ void SessionStore::UpdateIndex(const Entry& e) {
     else entries_.push_back(e);
     SortEntries();
     WriteIndex();
+}
+
+std::string SessionStore::BriefPath(const std::string& cwd) const {
+    return root_ + "/briefs/" + IdForCwd(cwd) + ".md";
+}
+
+std::string SessionStore::LoadBrief(const std::string& cwd) const {
+    std::ifstream f(BriefPath(cwd), std::ios::binary);
+    std::ostringstream ss;
+    ss << f.rdbuf();
+    return ss.str();
+}
+
+bool SessionStore::SaveBrief(const std::string& cwd, const std::string& text) const {
+    std::error_code ec;
+    if (text.empty()) {
+        fs::remove(BriefPath(cwd), ec);
+        return !ec;
+    }
+    fs::create_directories(root_ + "/briefs", ec);
+    return AtomicWrite(BriefPath(cwd), text);
 }
 
 void SessionStore::SetLastActive(const std::string& cwd, const std::string& threadId) {

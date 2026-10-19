@@ -8,6 +8,7 @@
 #include "preferences.h"
 #include "run_config_store.h"
 #include "settings_dialog.h"
+#include "project_brief.h"
 #include "image_store.h"
 #include "debug_window.h"
 #include "syntax.h"
@@ -420,6 +421,20 @@ ModelRoute CompletionRoute(int currentIdx, int turnIdx,
     return route;
 }
 
+// Model that writes a project brief: DeepSeek Flash when there is a key (it
+// is cheap and fast), otherwise the free model. Claude runs through its CLI,
+// which doesn't fit a single request.
+ModelRoute BriefRoute(const std::vector<std::string>& remoteModels) {
+    if (!Preferences::HasApiKey(Preferences::Provider::DeepSeek))
+        return RouteForIndex(kModelKiloFree, remoteModels);
+    const std::vector<std::string>& ids = DeepseekModels(remoteModels);
+    auto flash = std::ranges::find_if(ids, [](const std::string& id) {
+        return id.find("flash") != std::string::npos;
+    });
+    return RouteForIndex(flash == ids.end() ? 1 : 1 + (int)(flash - ids.begin()),
+                         remoteModels);
+}
+
 // String field of a history/event object, or empty when missing or not a
 // string. Imported sessions and CLI events are untrusted shapes; value()
 // would throw on a type mismatch.
@@ -485,6 +500,23 @@ Block NoticeBlock(const wxString& msg) {
     b.visibleText = msg;
     InlineRun r; r.text = msg; r.italic = true;
     b.runs.push_back(r);
+    return b;
+}
+
+// Shown in a new thread of a folder that has other threads but no brief.
+Block BriefHintNotice() {
+    const wxString text =
+        "This thread starts without the history of the folder's other "
+        "threads. A project brief tells every thread what the project is "
+        "about. ";
+    const wxString linkText = wxString::FromUTF8("Write or generate one\xE2\x80\xA6");
+    Block b = NoticeBlock(text);
+    b.rawText = b.visibleText = text + linkText;
+    InlineRun link;
+    link.text = linkText;
+    link.bold = true;
+    link.link = "gritcode://brief";
+    b.runs.push_back(link);
     return b;
 }
 
@@ -698,9 +730,8 @@ std::string LoadAgentsInstructions(const std::string& cwd) {
 }
 
 // The static base of the system prompt (platform info + tool guidance).
-// AGENTS.md instructions are appended to this by both SeedSystemPrompt and
-// RefreshSystemPromptAgents so the same base is used for fresh and restored
-// sessions alike.
+// SystemPrompt appends AGENTS.md and the folder context, so fresh and
+// restored threads share the same base.
 std::string BaseSystemPrompt() {
     std::string platformInfo;
 #ifdef _WIN32
@@ -2223,6 +2254,7 @@ void ChatFrame::RefreshSessionChoice() {
         threadRowIds_.push_back(r.id);
     }
     sessionChoice_->Append("New thread");
+    sessionChoice_->Append(wxString::FromUTF8("Project brief\xE2\x80\xA6"));
     sessionChoice_->Append(wxString::FromUTF8("Open folder\xE2\x80\xA6"));
     auto active = std::ranges::find(threadRowIds_, Active().id);
     sessionChoice_->SetSelection((int)(active - threadRowIds_.begin()));
@@ -2238,7 +2270,8 @@ void ChatFrame::OnSessionChoice(wxCommandEvent& evt) {
     RefreshSessionChoice();
     if (!id.empty()) SelectThread(id);
     else if (sel == threadRows) NewThread(activeCwd_);
-    else if (sel == threadRows + 1) CreateNewSession();
+    else if (sel == threadRows + 1) EditProjectBrief();
+    else if (sel == threadRows + 2) CreateNewSession();
 }
 
 void ChatFrame::CreateNewSession() {
@@ -2279,7 +2312,11 @@ bool ChatFrame::NewThread(const std::string& cwd) {
     // Not saved until its first turn ends, so an unused one leaves nothing
     // behind.
     Thread& t = OpenThread(SessionStore::NewThreadId(), cwd);
-    if (ShowThread(t.id)) return true;
+    if (ShowThread(t.id)) {
+        if (store_.LoadBrief(cwd).empty() && !FolderThreads(cwd).empty())
+            canvas_->AddBlock(BriefHintNotice());
+        return true;
+    }
     threads_.pop_back();  // cancelled; nothing refers to it yet
     return false;
 }
@@ -2308,7 +2345,7 @@ ChatFrame::Thread& ChatFrame::OpenThread(const std::string& id,
         t.lastUsed = e->lastUsed;
     }
     if (store_.Load(id, t.history)) {
-        RefreshSystemPromptAgents(t);
+        RefreshSystemPrompt(t);
         // Sessions from before threads have no title yet.
         if (t.title.empty()) {
             auto first = std::ranges::find_if(t.history, IsUserTurn);
@@ -2382,25 +2419,88 @@ void ChatFrame::Persist(Thread& t) {
     });
 }
 
-void ChatFrame::SeedSystemPrompt(Thread& t) {
+std::string ChatFrame::SystemPrompt(Thread& t) {
+    t.lastAgentsContent = LoadAgentsInstructions(t.cwd);
     std::string content = BaseSystemPrompt();
-    std::string agents = LoadAgentsInstructions(t.cwd);
-    if (!agents.empty()) content += "\n\n" + agents;
-    t.history.push_back({{"role", "system"}, {"content", std::move(content)}});
+    if (!t.lastAgentsContent.empty()) content += "\n\n" + t.lastAgentsContent;
+    if (std::string folder = FolderContext(t); !folder.empty())
+        content += "\n\n" + folder;
+    return content;
 }
 
-void ChatFrame::RefreshSystemPromptAgents(Thread& t) {
-    // Rebuild t.history[0]'s content from the static base + current AGENTS.md.
-    // This re-injects project instructions into an EXISTING thread whose
-    // system message was seeded before AGENTS.md existed (or changed).
+void ChatFrame::SeedSystemPrompt(Thread& t) {
+    t.history.push_back({{"role", "system"}, {"content", SystemPrompt(t)}});
+}
+
+void ChatFrame::RefreshSystemPrompt(Thread& t) {
     if (t.history.empty()) return;
     auto& m = t.history[0];
     if (!m.is_object() || m.value("role", std::string{}) != "system") return;
-    std::string agents = LoadAgentsInstructions(t.cwd);
-    t.lastAgentsContent = agents;
-    std::string content = BaseSystemPrompt();
-    if (!agents.empty()) content += "\n\n" + agents;
-    m["content"] = std::move(content);
+    m["content"] = SystemPrompt(t);
+}
+
+std::vector<ChatFrame::FolderThread> ChatFrame::FolderThreads(const std::string& cwd) const {
+    std::vector<FolderThread> out;
+    for (const Thread& t : threads_) {
+        if (t.cwd == cwd && t.parent.empty() && !t.title.empty())
+            out.push_back({t.id, t.title, t.lastUsed});
+    }
+    for (const auto& e : store_.List()) {
+        if (e.cwd == cwd && e.parent.empty() && !e.title.empty()
+            && std::ranges::find(threads_, e.id, &Thread::id) == threads_.end())
+            out.push_back({e.id, e.title, e.lastUsed});
+    }
+    std::ranges::stable_sort(out, std::greater{}, &FolderThread::lastUsed);
+    return out;
+}
+
+std::string ChatFrame::FolderContext(const Thread& t) const {
+    // Titles and days only: a list that changes on every turn would keep
+    // changing the cached prompt prefix.
+    constexpr int kMaxListed = 10;
+    std::string list;
+    int listed = 0;
+    for (const FolderThread& o : FolderThreads(t.cwd)) {
+        if (o.id == t.id) continue;
+        if (listed++ == kMaxListed) break;
+        list += "\n- " + o.title + " (last used " + o.lastUsed.substr(0, 10) + ")";
+    }
+    std::string out;
+    if (std::string brief = store_.LoadBrief(t.cwd); !brief.empty())
+        out = "Project brief for " + t.cwd + " (kept by the user, may be "
+              "out of date):\n" + brief;
+    if (!list.empty()) {
+        if (!out.empty()) out += "\n\n";
+        out += "Other threads in this folder: separate conversations whose "
+               "history isn't available here." + list;
+    }
+    return out;
+}
+
+void ChatFrame::EditProjectBrief() {
+    const std::string cwd = activeCwd_;
+    std::vector<std::string> titles;
+    for (const FolderThread& f : FolderThreads(cwd)) titles.push_back(f.title);
+    const ModelRoute route = BriefRoute(remoteModels_);
+    const BriefModel model{
+        .url = route.url,
+        .model = route.model,
+        .apiKey = route.needsApiKey
+                      ? Preferences::GetApiKey(route.provider).utf8_string()
+                      : std::string(),
+        .deepseek = route.needsApiKey,
+        .label = ModelLabelForId(route.model),
+    };
+    const auto brief = ShowBriefDialog(this, DisplayPath(cwd), store_.LoadBrief(cwd), model,
+                                       BriefMaterial(cwd, LoadAgentsInstructions(cwd), titles));
+    if (!brief) return;
+    if (!store_.SaveBrief(cwd, *brief)) {
+        wxMessageBox("The project brief could not be saved.", "Project brief",
+                     wxOK | wxICON_ERROR, this);
+        return;
+    }
+    for (Thread& t : threads_)
+        if (t.cwd == cwd) RefreshSystemPrompt(t);
 }
 
 void ChatFrame::RestoreCanvasFromHistory() {
@@ -2739,6 +2839,8 @@ void ChatFrame::OnCanvasLink(wxCommandEvent& e) {
     if (e.GetString() == "gritcode://settings") {
         wxCommandEvent ev;
         OnSettings(ev);
+    } else if (e.GetString() == "gritcode://brief") {
+        EditProjectBrief();
     }
 }
 
@@ -3111,7 +3213,7 @@ void ChatFrame::OnTreeRefreshTimer(wxTimerEvent&) {
     std::string agents = LoadAgentsInstructions(activeCwd_);
     for (Thread& t : threads_) {
         if (t.cwd == activeCwd_ && agents != t.lastAgentsContent)
-            RefreshSystemPromptAgents(t);
+            RefreshSystemPrompt(t);
     }
 }
 
@@ -5647,6 +5749,8 @@ void ChatFrame::StartClaudeTurn(Thread& t, bool fresh) {
         "pass cwd = the project root), 'forget' removes it.";
     const std::string agents = LoadAgentsInstructions(t.cwd);
     if (!agents.empty()) append += "\n\n" + agents;
+    if (std::string folder = FolderContext(t); !folder.empty())
+        append += "\n\n" + folder;
     const std::string promptFile = writeTemp(append);
 
     // gritcode's own stdio MCP server, in its run_project-only mode, so the
