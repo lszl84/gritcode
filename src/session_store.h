@@ -11,6 +11,8 @@
 //   ~/.local/share/gritcode/sessions.json        (index)
 // The index keeps `sessions` (each folder's first thread, all that 0.5.x
 // reads) and adds `threads` for the others, which 0.5.x ignores.
+// Each folder can also have a project brief, keyed like its first thread:
+//   ~/.local/share/gritcode/briefs/<id>.md
 // Writes are atomic (temp file then rename) so a crash mid-write can't
 // corrupt the index or any session file.
 class SessionStore {
@@ -63,6 +65,11 @@ public:
     // ISO-8601 "now" string used as lastUsed.
     static std::string NowIso();
 
+    // The folder's project brief, empty when it has none. Saving an empty
+    // brief removes it; false when the file can't be written.
+    std::string LoadBrief(const std::string& cwd) const;
+    bool SaveBrief(const std::string& cwd, const std::string& text) const;
+
     // Persists the last active folder and thread in the index without
     // touching session files. Called when the user switches threads.
     void SetLastActive(const std::string& cwd, const std::string& threadId);
@@ -76,6 +83,7 @@ private:
     std::optional<std::string> lastActiveCwd_;
     std::optional<std::string> lastActiveThread_;
 
+    std::string BriefPath(const std::string& cwd) const;
     // Re-sort entries_ by lastUsed descending after a mutation.
     void SortEntries();
     // Persist entries_ + the last-active pointers to indexPath_ atomically.

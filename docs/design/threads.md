@@ -85,10 +85,36 @@ index keeps `sessions` (one entry per folder, exactly what 0.5.x reads) and
 adds `threads` for additional threads, which 0.5.x ignores. Downgrading keeps
 working: old versions see every folder's first thread with full history.
 
+## Project brief
+
+A thread starts without the history of the folder's other threads. The brief
+gives it the background instead: a few paragraphs on what the project is, its
+layout and conventions, and the current work. `SystemPrompt` composes the
+base prompt, AGENTS.md, the brief and a list of the folder's other titled
+threads (title and day last used, at most 10). Titles and days only: running
+state changes every turn and would keep changing the cached prompt prefix. A
+thread's prompt is rebuilt when it opens, when AGENTS.md changes and when the
+brief is saved; Claude turns get the same text with each run.
+
+Storage: `briefs/<folder id>.md` in the app data dir, next to `sessions/` and
+keyed like a folder's first thread. Gritcode doesn't write into the user's
+repo unasked, and AGENTS.md already is the versioned, in-repo place for
+project instructions (it is injected too). No brief means no section, as
+before.
+
+"Project brief…" in the thread dropdown opens a dialog to edit it. "Generate"
+asks DeepSeek Flash (cheap and fast; the free model without a key; Claude's
+CLI doesn't fit one request) to write it from the top-level entries, README,
+AGENTS.md and thread titles. The text streams into the box; failures show in
+red and restore the previous text. Nothing is generated unasked: a new thread
+in a folder with other threads and no brief only shows a one-line hint
+linking to the dialog.
+
 ## UI
 
 The session dropdown lists the current folder's threads (running ones marked,
-subagents indented under their parent) plus "New thread" and "Open folder…". A left thread pane, the agent map and
+subagents indented under their parent) plus "New thread", "Project brief…"
+and "Open folder…". A left thread pane, the agent map and
 the decision tray come later (see `orchestrator-conversation.md`).
 
 ## Steps
@@ -102,8 +128,9 @@ the decision tray come later (see `orchestrator-conversation.md`).
    read-modify-write, SSE parsing of CRLF streams / a final event without a
    blank line / `data:` without a space, and "Refresh" in the file tree saving
    the open file.
-4. Project brief: a short per-folder brief (`.grit/brief.md` or generated)
-   injected into new threads instead of the whole history.
+4. Project brief: a short per-folder brief (written or generated) and a
+   list of the folder's other threads in every thread's system prompt.
+   (done)
 5. Thread pane: an optional left list of the folder's threads and their child
    threads with state (running, waiting, failed, done).
 6. Worktree threads: a thread can run in its own git worktree, so several
