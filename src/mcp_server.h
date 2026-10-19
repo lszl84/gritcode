@@ -12,7 +12,8 @@
 // onto the GUI thread via wxFrame::CallAfter when they need to mutate UI.
 //
 // Wire protocol: newline-delimited JSON-RPC 2.0.
-// Default port: 8765. If unavailable, falls back to 8766..8770.
+// Default port: 8765. If unavailable, falls back to 8766..8770; the
+// GRIT_MCP_PORT environment variable pins one port instead.
 struct MCPCallbacks {
     // Returns a JSON status object. Should include at least
     // {streaming: bool, blocks: int}.
@@ -52,6 +53,15 @@ struct MCPCallbacks {
     // Create a fresh session for $HOME (default cwd) without prompting.
     // Interactive new-session flow goes through the directory dialog instead.
     std::function<nlohmann::json()> newSession;
+
+    // Threads. listThreads returns {threads: [{id, cwd, title, lastUsed,
+    // loaded, running, waiting}, ...], activeId}. newThread adds an empty
+    // thread in `cwd` (the active folder when empty) and makes it active;
+    // selectThread makes thread `id` active. Both return {ok, ...}; every
+    // other method acts on the active thread.
+    std::function<nlohmann::json()> listThreads;
+    std::function<nlohmann::json(const std::string&)> newThread;
+    std::function<nlohmann::json(const std::string&)> selectThread;
 
     // Set the active model by dropdown index (0=Kilo Free, 1=DeepSeek
     // Flash, 2=DeepSeek Pro). Persists via wxConfig. Returns {ok, modelIndex}.
