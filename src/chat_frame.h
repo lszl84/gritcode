@@ -20,6 +20,7 @@
 #include "memory.h"
 #include "session_store.h"
 #include "streaming_web_request.h"
+#include "thread_list.h"
 #include "tools.h"
 #include <atomic>
 #include <cstdint>
@@ -96,6 +97,7 @@ private:
     wxBitmapButton* exportBtn_ = nullptr;
     wxBitmapButton* hamburgerBtn_ = nullptr;
     wxBitmapButton* editorBtn_ = nullptr;
+    wxBitmapButton* threadsBtn_ = nullptr;
 
     // Streaming tool_call accumulator. Each delta carries an `index` field that
     // identifies which call the (id/name/arguments) fragments belong to.
@@ -459,8 +461,28 @@ private:
 
     // Repopulate the thread dropdown: the active folder's threads, most
     // recent first (running ones marked), then "New thread" and
-    // "Open folder…", and select the active thread.
+    // "Open folder…", and select the active thread. Refreshes the thread
+    // pane too.
     void RefreshSessionChoice();
+
+    // ---- Thread pane (optional, left of everything) ----
+    // The active folder's threads with their state; the selected row is the
+    // active thread. Hidden unless toggled on (remembered in preferences).
+    wxPanel* threadPane_ = nullptr;
+    ThreadList* threadList_ = nullptr;
+    // Refreshes the rows' current step while a thread of the folder runs.
+    wxTimer threadPaneTimer_;
+    // The active folder's threads, most recent first, each followed by its
+    // subagents; shared by the dropdown and the pane.
+    std::vector<ThreadRow> FolderRows();
+    // What running thread `t` is doing now: the tool it runs, "writing",
+    // "thinking", or what it waits for.
+    wxString CurrentStep(Thread& t);
+    void UpdateThreadPane(std::vector<ThreadRow> rows);
+    void OnThreadPaneToggle(wxCommandEvent&);
+    void OnThreadListContextMenu(wxContextMenuEvent& e);
+    // Width the thread pane takes from the window (0 when hidden).
+    int ThreadPaneW() const;
 
     // CreateNewSession pops a directory dialog and switches to that folder.
     // SwitchToCwd opens the most recently used thread of `cwd` (loading it,

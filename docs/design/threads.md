@@ -133,8 +133,22 @@ rebuild, as before; turns of sessions with no file any more stay searchable.
 
 The session dropdown lists the current folder's threads (running ones marked,
 subagents indented under their parent) plus "New thread", "Project brief…"
-and "Open folder…". A left thread pane, the agent map and
-the decision tray come later (see `orchestrator-conversation.md`).
+and "Open folder…".
+
+The thread pane (toolbar toggle, remembered in preferences) shows the same
+rows at the far left: a "New thread" button, then per thread a state mark
+(● running, ○ waiting for the folder, ⚠ failed until viewed) with the title,
+and a dim line below: while running the current step (the tool it runs,
+"writing", "thinking", "waiting for <thread>"), after a failure its notice,
+otherwise when it was last used. Both are built from one row list
+(`FolderRows`), so they always agree; the step is derived from the thread's
+existing fields (pending tool calls in history or Claude's pending message,
+in-flight text), and a 1 s timer refreshes the pane only while a thread of
+the folder runs. Clicking a row selects the thread, right-click on a running
+one offers "Stop". The pane is a fixed-width panel beside the splitters (no
+sash): opening it grows the window by its width, or shares a tiled window,
+like the other panes. The agent map and the decision tray come later (see
+`orchestrator-conversation.md`).
 
 ## Steps
 
@@ -151,7 +165,7 @@ the decision tray come later (see `orchestrator-conversation.md`).
    list of the folder's other threads in every thread's system prompt.
    (done)
 5. Thread pane: an optional left list of the folder's threads and their child
-   threads with state (running, waiting, failed, done).
+   threads with state (running, waiting, failed, done). (done)
 6. Worktree threads: a thread can run in its own git worktree, so several
    threads write in one project at once; diff and merge back.
 7. Project-scoped history search for the memory tool. (done)
