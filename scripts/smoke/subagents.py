@@ -59,7 +59,7 @@ def launch():
     path = f"PATH={FAKE}:{STUBS}:{os.environ['PATH']}"
     out = subprocess.check_output([LAUNCHER, BIN, f"GRIT_MCP_PORT={PORT}", path, *MODEL_ENV],
                                   env=env, stderr=subprocess.DEVNULL)
-    pid, g = int(out), Grit(base_port=PORT)
+    pid, g = int(out), Grit(port=PORT)
     for _ in range(100):
         try:
             g.status()

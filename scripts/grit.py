@@ -21,13 +21,17 @@ import time
 
 
 class Grit:
-    def __init__(self, host="127.0.0.1", base_port=8765):
+    # `port` connects to that port only. Tests must pass it: without it the
+    # client also tries the next five ports, where the user's own gritcode
+    # windows listen (8765, 8766, ...).
+    def __init__(self, host="127.0.0.1", base_port=8765, port=None):
         self.host = host
-        self.base_port = base_port
+        self.base_port = port or base_port
+        self.ports = [port] if port else range(base_port, base_port + 6)
         self._id = 0
 
     def _call(self, method, params=None, timeout=10):
-        for p in range(self.base_port, self.base_port + 6):
+        for p in self.ports:
             try:
                 s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
                 s.settimeout(timeout)
@@ -36,7 +40,7 @@ class Grit:
             except (ConnectionRefusedError, OSError):
                 s.close()
         else:
-            raise ConnectionError(f"no MCP server on {self.host}:{self.base_port}-{self.base_port+5}")
+            raise ConnectionError(f"no MCP server on {self.host}:{list(self.ports)}")
 
         self._id += 1
         req = {"jsonrpc": "2.0", "id": self._id, "method": method}
