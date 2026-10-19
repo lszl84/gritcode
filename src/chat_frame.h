@@ -22,8 +22,11 @@
 #include "streaming_web_request.h"
 #include "tools.h"
 #include <atomic>
+#include <cstdint>
+#include <deque>
 #include <map>
 #include <memory>
+#include <optional>
 #include <set>
 #include <string>
 #include <thread>
@@ -52,7 +55,8 @@ private:
     wxButton* clearQueueBtn_ = nullptr;
 
     // Chip row sitting between the canvas and the input. Hidden when the
-    // queue is empty; rebuilt from pendingQueue_ on every queue change.
+    // queue is empty; rebuilt from the active thread's pendingQueue on every
+    // queue change.
     wxPanel* chipRow_ = nullptr;
     wxSizer* chipSizer_ = nullptr;
 
@@ -74,17 +78,13 @@ private:
         std::vector<PendingImage> images;
     };
 
-    // Pending user messages typed/queued while a turn was in flight. On
-    // natural turn end the front auto-dispatches; on error/cancel we land
-    // in idle-queue mode.
-    std::vector<QueuedMessage> pendingQueue_;
     static constexpr size_t kMaxQueue_ = 5;
 
     // Toolbar row above the input. Plain wxBoxSizer with two labelled
     // dropdowns and a gear button on the right.
     wxChoice* sessionChoice_ = nullptr;
     wxChoice* modelChoice_ = nullptr;
-    // "Session:" / "Model:" captions. These, the settings/export/debug
+    // "Thread:" / "Model:" captions. These, the settings/export/debug
     // buttons and the model dropdown hide as the chat pane narrows (see
     // UpdateToolbarFit).
     wxStaticText* sessionLabel_ = nullptr;
@@ -97,17 +97,188 @@ private:
     wxBitmapButton* hamburgerBtn_ = nullptr;
     wxBitmapButton* editorBtn_ = nullptr;
 
-    // On-disk session persistence. Sessions are keyed by working directory
-    // (one session per folder, gritcode model). The dropdown is rebuilt from
-    // store_.List(); index 0 is the "New Session…" sentinel and indices 1..N
-    // map to cwds in sessionCwds_ (parallel to the dropdown rows).
-    SessionStore store_;
-    std::vector<std::string> sessionCwds_;
-    std::string activeCwd_;
-    std::string lastAgentsContent_;   // AGENTS.md text currently in history_[0]
+    // Streaming tool_call accumulator. Each delta carries an `index` field that
+    // identifies which call the (id/name/arguments) fragments belong to.
+    struct StreamToolCall {
+        std::string id;
+        std::string name;
+        std::string args;  // JSON string, accumulated across deltas
+    };
 
-    // Cross-project memory: FTS5 index over every saved session. Opened at
-    // construction; written after every PersistActive(); queried by the
+    // Worker-thread tool dispatch result (one entry per tool call). Populated
+    // off the GUI thread; consumed in OnToolBatchDone.
+    struct ToolBatchEntry {
+        std::string id;
+        std::string name;
+        std::string argsJson;  // raw arguments string for display
+        std::string result;
+    };
+
+    // One conversation. Several threads can run at once (one running turn per
+    // folder); only the active one draws to the canvas, the others update
+    // their data only.
+    struct Thread {
+        std::string id;        // session file id (SessionStore::Entry::id)
+        std::string cwd;       // tools and Claude Code run here
+        std::string title;     // from the first user message
+        std::string parent;    // parent thread id, empty for top-level threads
+        std::string lastUsed;  // ISO 8601, orders the dropdown
+        // Bumped whenever the thread's request, Claude process or tool worker
+        // is replaced. Async callbacks capture (id, gen) and are dropped when
+        // the gen no longer matches (see Find).
+        uint32_t gen = 0;
+
+        // Chat history as raw OpenAI-format messages. System prompt is the
+        // first entry; user/assistant/tool messages are appended in order.
+        std::vector<nlohmann::json> history;
+        std::string lastAgentsContent;  // AGENTS.md text currently in history[0]
+
+        // True from StartTurn until FinalizeTurn, including while `waiting`.
+        bool streaming = false;
+        // The turn is queued behind another thread running in the same folder
+        // and starts when that one finishes (see StartNextWaiting).
+        bool waiting = false;
+        // Pending user messages typed/queued while a turn was in flight. On
+        // natural turn end the front auto-dispatches; on error/cancel we land
+        // in idle-queue mode.
+        std::vector<QueuedMessage> pendingQueue;
+        // The current turn's user text as typed (without hidden instructions).
+        std::string turnPrompt;
+        // A turn that failed while the thread wasn't shown: its notice, and its
+        // prompt when the failure rolled that out of history. Switching to the
+        // thread shows the notice and puts the prompt back into the input, so
+        // a background failure never vanishes silently.
+        std::optional<Block> failureNotice;
+        std::string failedPrompt;
+
+        // Model index the current turn started with. A switch to Claude in the
+        // middle of an OpenAI-style tool loop can't take over that loop, so the
+        // loop keeps this model until the turn ends.
+        int turnModelIndex = 0;
+        // Model id of the in-flight OpenAI-style completion, recorded on the
+        // assistant messages it produces.
+        std::string requestModel;
+
+        StreamingWebRequest request;
+        // Feeds streamed assistant text to the canvas while the thread is shown.
+        std::unique_ptr<MdStream> mdStream;
+        std::string activeAssistantText;  // in-flight text, not yet in history
+        std::string activeReasoning;  // accumulated reasoning_content for the in-flight assistant turn
+        // Per-completion-round flag. Reset in StartCompletion. Flipped true the
+        // first time we emit a Thinking block for this round (either at the
+        // first content/tool_call delta, or at HandleCompletion for a pure-
+        // reasoning response). Keeps us from rendering the same reasoning twice
+        // when a delta carries both reasoning and content.
+        bool thinkingEmitted = false;
+        // Canvas index of this round's Thinking block while reasoning is still
+        // streaming (-1 when there is none, or the thread isn't shown). It is
+        // added collapsed at the first reasoning delta; while expanded, its
+        // text is refreshed a few times a second so the user can watch the
+        // reasoning. EmitPendingThinking / FinalizeTurn finalize it.
+        int liveThinkingIdx = -1;
+        std::chrono::steady_clock::time_point liveThinkingLastUpdate{};
+        // How long the last live re-layout took; paces the next one.
+        std::chrono::steady_clock::duration liveThinkingLayoutCost{};
+        // finish_reason of the in-flight completion ("stop", "length",
+        // "tool_calls", ...) and the max_tokens it was sent with, so a reply that
+        // hit the output limit can say so instead of ending silently.
+        std::string finishReason;
+        int requestMaxTokens = 0;
+
+        // SSE parsing state. Doubles as raw-body capture: on a non-2xx response
+        // the server sends a JSON error body instead of SSE, which lands here
+        // verbatim and we display it in the error block.
+        std::string sseBuf;
+        std::vector<StreamToolCall> activeToolCalls;
+
+        // Number of tool dispatch rounds taken in the current user turn.
+        // Telemetry only — the loop ends when the model stops emitting tool calls.
+        int toolIter = 0;
+
+        // Shared with the tool worker thread, if any. Set when a batch starts
+        // in HandleCompletion, cleared in OnToolBatchDone. Escape flips
+        // `cancelled` and signals any in-flight bash subprocess via `activePgid`.
+        std::shared_ptr<ToolCancelToken> currentToolToken;
+        // Tool dispatch worker. Owned (not detached) so the destructor can
+        // cancel and join it — otherwise a long-running bash invocation could
+        // outlive the frame.
+        std::thread toolWorker;
+
+        // ---- Context compaction ----
+        // historyCompactBaseCount: message count immediately after the last
+        //   successful compaction. The hysteresis check (<5 growth since then)
+        //   prevents firing a new compaction on every single turn — history
+        //   only grows between requests, so without the gate we'd re-compact
+        //   the same head every time.
+        // compacting: true while a summary LLM call is in flight. Set by
+        //   RunSummaryThenSend, cleared by ApplyCompaction. StartCompletion
+        //   skips the budget check while this is true.
+        int historyCompactBaseCount = 0;
+        bool compacting = false;
+        // Buffered state for the in-flight summary request.
+        std::string summarySseBuf;
+        std::string summaryText;
+        int compactionSplitIdx = -1;
+        int compactionHeadCount = 0;
+        // Set once per turn after an overflow-forced compaction, so a second
+        // provider overflow surfaces an error instead of looping.
+        bool overflowRetried = false;
+
+        // ---- Claude turns (the user's own Claude Code CLI) ----
+        // A Claude turn runs `claude -p` with stream-json in and out. Claude
+        // Code runs its own agent loop and tools; gritcode renders the events
+        // and records them in history in the same OpenAI-style shape as other
+        // models, tagged with "model" and "claudeSessionId" so the next turn
+        // can --resume the same Claude Code session.
+        ClaudeAgentProcess claudeProc;
+        std::string claudeBuf;              // partial stdout line
+        std::string claudeModel;            // model id the turn was sent to
+        std::string claudeSessionId;        // from system/init of this run
+        // Temp files for this run (--append-system-prompt-file, --mcp-config),
+        // removed when it ends.
+        std::vector<std::string> claudeTempFiles;
+        bool claudeResumed = false;         // this run passed --resume
+        bool claudeRetriedFresh = false;    // already retried without --resume
+        bool claudeResultSeen = false;
+        bool claudeIsError = false;
+        std::string claudeErrorText;
+        size_t claudeTurnHistoryStart = 0;  // history size after the user message
+        // Top-level assistant message being assembled from per-block
+        // "assistant" events (same API message id). Flushed into history
+        // before its tool results, or when the next message starts.
+        std::string claudeMsgId;
+        nlohmann::json claudePendingMsg;
+        std::string claudeStreamMsgId;               // message being streamed now
+        std::set<std::string> claudeStreamedMsgIds;  // messages whose text streamed
+        // tool_use id -> (name, compact JSON input), for rendering the result.
+        std::map<std::string, std::pair<std::string, std::string>> claudeToolUses;
+    };
+
+    // Every thread opened in this run (std::deque: addresses stay stable as
+    // threads are added). threads_[active_] is the one on the canvas.
+    std::deque<Thread> threads_;
+    size_t active_ = 0;
+    Thread& Active() { return threads_[active_]; }
+    const Thread& Active() const { return threads_[active_]; }
+    bool Shown(const Thread& t) const { return &t == &threads_[active_]; }
+    // Null when no open thread has this id (or, with `gen`, when the thread
+    // has moved on since an async callback captured it).
+    Thread* Find(const std::string& id);
+    Thread* Find(const std::string& id, uint32_t gen);
+    // Dropdown label: title, or a placeholder for untitled threads.
+    static wxString ThreadLabel(const std::string& id, const std::string& cwd,
+                                const std::string& title);
+
+    // On-disk persistence: one session file per thread. The dropdown lists
+    // the active folder's threads (rows map to ids in threadRowIds_), then
+    // "New thread" and "Open folder…".
+    SessionStore store_;
+    std::vector<std::string> threadRowIds_;
+    // Folder shown in the editor and file tree: the active thread's cwd.
+    std::string activeCwd_;
+
+    // Cross-project memory: FTS5 index over every saved thread. Opened at
+    // construction; written after every Persist(); queried by the
     // grit_history_search tool. If the open fails (e.g. read-only home) the
     // tool returns "Memory index unavailable" — memory is an enhancement,
     // not required for normal chat.
@@ -122,71 +293,6 @@ private:
     // together.
     int currentModelIndex_ = 0;
     std::vector<std::string> remoteModels_;
-    // Model index the current turn started with. A switch to Claude in the
-    // middle of an OpenAI-style tool loop can't take over that loop, so the
-    // loop keeps this model until the turn ends.
-    int turnModelIndex_ = 0;
-    // Model id of the in-flight OpenAI-style completion, recorded on the
-    // assistant messages it produces.
-    std::string requestModel_;
-
-    StreamingWebRequest request_;
-    std::unique_ptr<MdStream> mdStream_;
-
-    // Chat history as raw OpenAI-format messages. System prompt is the first
-    // entry; user/assistant/tool messages are appended in order.
-    std::vector<nlohmann::json> history_;
-    std::string activeAssistantText_;
-    std::string activeReasoning_;  // accumulated reasoning_content for the in-flight assistant turn
-    // Per-completion-round flag. Reset in StartCompletion. Flipped true the
-    // first time we emit a Thinking block for this round (either at the
-    // first content/tool_call delta, or at HandleCompletion for a pure-
-    // reasoning response). Keeps us from rendering the same reasoning twice
-    // when a delta carries both reasoning and content.
-    bool thinkingEmitted_ = false;
-    // Canvas index of this round's Thinking block while reasoning is still
-    // streaming (-1 when there is none). It is added collapsed at the first
-    // reasoning delta; while expanded, its text is refreshed a few times a
-    // second so the user can watch the reasoning. EmitPendingThinking /
-    // FinalizeTurn finalize it.
-    int liveThinkingIdx_ = -1;
-    std::chrono::steady_clock::time_point liveThinkingLastUpdate_{};
-    // How long the last live re-layout took; paces the next one.
-    std::chrono::steady_clock::duration liveThinkingLayoutCost_{};
-    // finish_reason of the in-flight completion ("stop", "length",
-    // "tool_calls", ...) and the max_tokens it was sent with, so a reply that
-    // hit the output limit can say so instead of ending silently.
-    std::string finishReason_;
-    int requestMaxTokens_ = 0;
-    bool streaming_ = false;
-
-    // SSE parsing state. Doubles as raw-body capture: on a non-2xx response the
-    // server sends a JSON error body instead of SSE, which lands here verbatim
-    // and we display it in the error block.
-    std::string sseBuf_;
-
-    // Streaming tool_call accumulator. Each delta carries an `index` field that
-    // identifies which call the (id/name/arguments) fragments belong to.
-    struct StreamToolCall {
-        std::string id;
-        std::string name;
-        std::string args;  // JSON string, accumulated across deltas
-    };
-    std::vector<StreamToolCall> activeToolCalls_;
-
-    // Number of tool dispatch rounds taken in the current user turn.
-    // Telemetry only — the loop ends when the model stops emitting tool calls.
-    int toolIter_ = 0;
-
-    // Shared with the active tool worker thread, if any. Set when a batch
-    // starts in HandleCompletion, cleared in OnToolBatchDone. Escape flips
-    // `cancelled` and signals any in-flight bash subprocess via `activePgid`.
-    std::shared_ptr<ToolCancelToken> currentToolToken_;
-
-    // Tool dispatch worker. Owned (not detached) so the destructor can cancel
-    // and join it — otherwise a long-running bash invocation could outlive the
-    // frame and call wxQueueEvent on a dangling `this`.
-    std::thread toolWorker_;
 
     // Separate thread for Play-button runs so a long-running dev server
     // doesn't block the tool dispatch worker (they share the same cancellation
@@ -206,12 +312,12 @@ private:
     WebCancelToken remoteModelsCancel_;
 
     // Graceful close — see OnClose.
-    void RestoreSession();       // renders history_ into the canvas + clears loading
+    void RestoreSession();       // renders the active thread into the canvas + clears loading
 
     void RebuildImageRow();
     void RemovePendingImageByHash(const std::string& hash);
     bool TryPasteImage();
-    bool HistoryIsLarge() const;           // >200 msgs or >250KB content
+    static bool HistoryIsLarge(const Thread& t);  // >200 msgs or >250KB content
     void RestoreCanvasMaybeDeferred();     // loading placeholder + deferred restore when large
     bool quitRequested_ = false;
 
@@ -239,20 +345,21 @@ private:
     void OnCharHook(wxKeyEvent&);
     void OnClose(wxCloseEvent&);
 
-    // Pop the front of pendingQueue_ and dispatch it as a fresh turn.
+    // Pop the front of t.pendingQueue and dispatch it as a fresh turn.
     // No-op on empty. Used both from FinalizeTurn (auto-dispatch on
     // natural completion) and from the Continue button (idle-queue mode).
-    void DispatchNextQueued();
-    // Reflect (streaming, queue) state across input/Send/Continue/Clear/
-    // chip-row visibility and the Send button label.
+    void DispatchNextQueued(Thread& t);
+    // Reflect the active thread's (streaming, queue) state across input/Send/
+    // Continue/Clear/chip-row visibility and the Send button label.
     void UpdateQueueUI();
-    // Recreate chip widgets to match pendingQueue_. Called from
+    // Recreate chip widgets to match the active thread's queue. Called from
     // UpdateQueueUI whenever the queue is non-empty.
     void RebuildChips();
 
-    // Cancel whatever is currently in flight: HTTP stream, tool batch, or
-    // both. Safe to call when nothing is running. Wired to Escape.
-    void RequestCancel();
+    // Cancel whatever the thread has in flight: HTTP stream, tool batch, or
+    // both, or a turn still waiting for its folder. Safe to call when nothing
+    // is running. Wired to Escape.
+    void RequestCancel(Thread& t);
     void OnSessionChoice(wxCommandEvent&);
     void OnModelChoice(wxCommandEvent&);
     void OnModelContextMenu(wxContextMenuEvent&);
@@ -336,29 +443,41 @@ private:
     void OnEditorShowInFiles(wxCommandEvent& e);
     wxTreeItemId FindTreeItemByPath(wxTreeItemId parent, const wxString& path);
 
-    // Repopulate the session choice from store_.List() with the leading
-    // "New Session…" entry, then restore the active selection.
+    // Repopulate the thread dropdown: the active folder's threads, most
+    // recent first (running ones marked), then "New thread" and
+    // "Open folder…", and select the active thread.
     void RefreshSessionChoice();
 
-    // Save current state, then create or switch sessions. CreateNewSession
-    // pops a directory dialog, then either loads existing history for that
-    // cwd or seeds a fresh one. Switch loads from disk and rebuilds canvas.
+    // CreateNewSession pops a directory dialog and switches to that folder.
+    // SwitchToCwd opens the most recently used thread of `cwd` (loading it,
+    // or seeding a fresh one). NewThread adds an empty thread in `cwd`.
+    // SelectThread shows thread `id`, loading it from disk when needed; false
+    // when it doesn't exist or the user cancelled (unsaved editor changes).
     void CreateNewSession();
     bool SwitchToCwd(const std::string& cwd);
+    bool NewThread(const std::string& cwd);
+    bool SelectThread(const std::string& id);
+    // Adds an open thread for (id, cwd): loaded from disk when it has a
+    // session file, otherwise seeded with a fresh system prompt.
+    Thread& OpenThread(const std::string& id, const std::string& cwd);
+    // Make open thread `id` the active one and rebuild the canvas from it.
+    // False when the user cancelled (unsaved editor changes).
+    bool ShowThread(const std::string& id);
 
-    // Persist current history to disk under activeCwd_.
-    void PersistActive();
+    // Persist the thread's history to its session file.
+    void Persist(Thread& t);
 
-    // Wipe blocks_ and re-render every renderable message in history_ —
+    // Re-render every renderable message in the active thread's history —
     // user prompts as UserPrompt blocks, assistant content via MdStream, tool
-    // call/result pairs as ToolCall blocks. System messages are skipped.
+    // call/result pairs as ToolCall blocks; system messages are skipped —
+    // followed by the in-flight turn (partial text, waiting notice).
     void RestoreCanvasFromHistory();
 
-    // Push the default system prompt into history_. Called on fresh sessions.
-    void SeedSystemPrompt();
-    // Re-inject AGENTS.md instructions into history_[0] for an existing
-    // (restored or switched-to) session whose system prompt predates them.
-    void RefreshSystemPromptAgents();
+    // Push the default system prompt into t.history. Called on fresh threads.
+    void SeedSystemPrompt(Thread& t);
+    // Re-inject AGENTS.md instructions into t.history[0] for an existing
+    // (restored or switched-to) thread whose system prompt predates them.
+    void RefreshSystemPromptAgents(Thread& t);
 
     // Re-render SVG icons with the current system foreground color. Called
     // once at construction and again on EVT_SYS_COLOUR_CHANGED so the icons
@@ -410,108 +529,61 @@ private:
     int imgFile_ = -1;
 
     // Streaming HTTP callbacks (delivered on the GUI thread via CallAfter).
-    // OnStreamData appends to sseBuf_ and parses any complete SSE events.
+    // OnStreamData appends to t.sseBuf and parses any complete SSE events.
     // OnStreamDone fires once with the final WebResponse and runs the same
     // post-stream finalization as the old OnWebRequestState handler did.
-    void OnStreamData(std::string_view chunk);
-    void OnStreamDone(WebResponse resp);
+    void OnStreamData(Thread& t, std::string_view chunk);
+    void OnStreamDone(Thread& t, WebResponse resp);
 
-    // Worker-thread tool dispatch result (one entry per tool call). Populated
-    // off the GUI thread; consumed in OnToolBatchDone.
-    struct ToolBatchEntry {
-        std::string id;
-        std::string name;
-        std::string argsJson;  // raw arguments string for display
-        std::string result;
-    };
-    void OnToolBatchDone(wxThreadEvent& e);
+    void OnToolBatchDone(Thread& t, std::vector<ToolBatchEntry> results);
 
     // After a non-2xx response: pull a human-readable error string out of
-    // sseBuf_ (which doubles as raw-body capture under Storage_None).
-    wxString ExtractErrorBody() const;
+    // t.sseBuf (which doubles as raw-body capture under Storage_None).
+    static wxString ExtractErrorBody(const Thread& t);
 
     // Starts a model turn for a user message (the only entry point, so every
     // turn is routed the same way). `hiddenInstructions` is appended to the
-    // message the model sees but not shown on the canvas.
-    void StartTurn(const wxString& userText, std::vector<PendingImage> images = {},
+    // message the model sees but not shown on the canvas. While another
+    // thread runs a turn in the same folder, the turn waits for it.
+    void StartTurn(Thread& t, const wxString& userText,
+                   std::vector<PendingImage> images = {},
                    const std::string& hiddenInstructions = std::string());
-    void EnqueueMessage(const wxString& text);
+    // The thread (other than `self`) running a turn in `cwd`, if any.
+    Thread* RunningIn(const std::string& cwd, const Thread& self);
+    // Start the first turn waiting for `cwd`, unless one is running there.
+    void StartNextWaiting(const std::string& cwd);
+    void EnqueueMessage(Thread& t, const wxString& text);
     void LogDebug(const std::string& line);
     void OpenDebugWindow();
-    nlohmann::json BuildModelView() const;
+    nlohmann::json BuildModelView(const Thread& t) const;
     void PruneToolOutputs(nlohmann::json& tail) const;
-    void EmitImageBlock(const std::string& hash, const std::string& mime, const std::string& name);
+    void EmitImageBlock(Thread& t, const std::string& hash, const std::string& mime,
+                        const std::string& name);
     Block MakeImageBlock(const std::string& hash, const std::string& mime, const std::string& name);
-    // Builds and sends the next chat completion request from the current
-    // history_ vector. Used both to start a turn and to continue after tool
-    // results have been appended.
-    void StartCompletion();
+    // Markdown stream for the thread's in-flight reply: its blocks go to the
+    // canvas while the thread is shown and are dropped otherwise.
+    std::unique_ptr<MdStream> MakeMdStream(Thread& t);
+    // Builds and sends the next chat completion request from t.history.
+    // Used both to start a turn and to continue after tool results have
+    // been appended.
+    void StartCompletion(Thread& t);
     // Build + dispatch the actual chat completion request. Split out of
     // StartCompletion so the compaction path can chain into it directly
     // after the summary returns without re-checking the budget.
-    void DoSendActualRequest();
+    void DoSendActualRequest(Thread& t);
 
-    // ---- Context compaction ----
-    // historyCompactBaseCount_: message count immediately after the last
-    //   successful compaction. The hysteresis check (<5 growth since then)
-    //   prevents firing a new compaction on every single turn — history
-    //   only grows between requests, so without the gate we'd re-compact
-    //   the same head every time.
-    // compacting_: true while a summary LLM call is in flight. Set by
-    //   RunSummaryThenSend, cleared by ApplyCompaction. StartCompletion
-    //   skips the budget check while this is true.
-    int historyCompactBaseCount_ = 0;
-    bool compacting_ = false;
-    // Buffered state for the in-flight summary request.
-    std::string summarySseBuf_;
-    std::string summaryText_;
-    int compactionSplitIdx_ = -1;
-    int compactionHeadCount_ = 0;
-    // Set once per turn after an overflow-forced compaction, so a second
-    // provider overflow surfaces an error instead of looping.
-    bool overflowRetried_ = false;
-
-    // ---- Claude turns (the user's own Claude Code CLI) ----
-    // A Claude turn runs `claude -p` with stream-json in and out. Claude Code
-    // runs its own agent loop and tools; gritcode renders the events and
-    // records them in history_ in the same OpenAI-style shape as other
-    // models, tagged with "model" and "claudeSessionId" so the next turn can
-    // --resume the same Claude Code session.
-    ClaudeAgentProcess claudeProc_;
-    std::string claudeBuf_;              // partial stdout line
-    std::string claudeModel_;            // model id the turn was sent to
-    std::string claudeSessionId_;        // from system/init of this run
-    // Temp files for this run (--append-system-prompt-file, --mcp-config),
-    // removed when it ends.
-    std::vector<std::string> claudeTempFiles_;
-    bool claudeResumed_ = false;         // this run passed --resume
-    bool claudeRetriedFresh_ = false;    // already retried without --resume
-    bool claudeResultSeen_ = false;
-    bool claudeIsError_ = false;
-    std::string claudeErrorText_;
-    size_t claudeTurnHistoryStart_ = 0;  // history_ size after the user message
-    // Top-level assistant message being assembled from per-block "assistant"
-    // events (same API message id). Flushed into history_ before its tool
-    // results, or when the next message starts.
-    std::string claudeMsgId_;
-    nlohmann::json claudePendingMsg_;
-    std::string claudeStreamMsgId_;               // message being streamed now
-    std::set<std::string> claudeStreamedMsgIds_;  // messages whose text streamed
-    // tool_use id -> (name, compact JSON input), for rendering the result.
-    std::map<std::string, std::pair<std::string, std::string>> claudeToolUses_;
-
-    // Spawn the CLI for the user message at the end of history_. `fresh`
+    // Spawn the CLI for the user message at the end of t.history. `fresh`
     // skips --resume (used after Claude Code reports the session is gone).
-    void StartClaudeTurn(bool fresh = false);
-    void OnClaudeData(std::string_view chunk);
-    void OnClaudeDone(ClaudeProcessResult res);
-    void HandleClaudeEvent(const nlohmann::json& ev);
-    void FlushClaudePendingMessage();
+    void StartClaudeTurn(Thread& t, bool fresh = false);
+    void OnClaudeData(Thread& t, std::string_view chunk);
+    void OnClaudeDone(Thread& t, ClaudeProcessResult res);
+    void HandleClaudeEvent(Thread& t, const nlohmann::json& ev);
+    void FlushClaudePendingMessage(Thread& t);
     // Show a Claude Code failure (with a sign-in hint for auth errors), drop
     // the user message if the turn recorded nothing, and end the turn.
-    void FailClaudeTurn(const std::string& detail);
+    void FailClaudeTurn(Thread& t, const std::string& detail);
     // Italic notice when a turn goes to a different model than the last one.
-    void RenderModelSwitchNotice(const std::string& modelId);
+    void RenderModelSwitchNotice(Thread& t, const std::string& modelId);
 
     // Debug log (debug builds only).
     DebugWindow* debugWindow_ = nullptr;
@@ -520,57 +592,64 @@ private:
     // Returns true if a summary request was kicked off (caller should
     // return immediately); false if history fits and the caller should
     // proceed to send the normal request.
-    bool MaybeCompactThenSend();
-    // Index into history_ marking the start of the verbatim tail (the most
+    bool MaybeCompactThenSend(Thread& t);
+    // Index into t.history marking the start of the verbatim tail (the most
     // recent ~kTailBudgetTokens of non-summary, non-system, non-compacted
     // messages). Messages before this index are the head to summarize.
-    int SelectTailSplit() const;
+    static int SelectTailSplit(const Thread& t);
     // Fires the summary stream request. The head [0..splitIdx) of
-    // history_ is summarized into a single user-role message.
-    void RunSummaryThenSend(int splitIdx);
+    // t.history is summarized into a single user-role message.
+    void RunSummaryThenSend(Thread& t, int splitIdx);
     // Summary stream callbacks (separate from the main OnStreamData /
     // OnStreamDone — the summary response is private to the compaction
     // path and never lands in canvas blocks).
-    void OnSummaryStreamData(std::string_view chunk);
-    void OnSummaryStreamDone(WebResponse resp);
-    // Replace history_[0..splitIdx) with a single isSummary user message
+    void OnSummaryStreamData(Thread& t, std::string_view chunk);
+    void OnSummaryStreamDone(Thread& t, WebResponse resp);
+    // Replace t.history[0..splitIdx) with a single isSummary user message
     // carrying `summary`, persist, then resume the real request. Falls
     // back to a generic "context dropped" notice if `success` is false so
     // the next request still fits.
-    void ApplyCompaction(bool success, const std::string& summary,
+    void ApplyCompaction(Thread& t, bool success, const std::string& summary,
                          const std::string& error);
     // Layer 3: aggressive compaction after a provider context-overflow 400.
     // Keeps only the most recent user turn verbatim. Returns false if there
     // is nothing to compact.
-    bool ForceCompactForOverflow();
+    bool ForceCompactForOverflow(Thread& t);
 
     // After State_Completed: if any tool_calls were accumulated, dispatch them
     // and continue; otherwise finalize the turn. freeModelStall renders the
     // friendly "free model stopped responding" notice instead of a generic
     // error (same history rollback + finalize path).
-    void HandleCompletion(const wxString& errorIfFailed,
+    void HandleCompletion(Thread& t, const wxString& errorIfFailed,
                           bool freeModelStall = false);
     // wasCancelledOrError=true (any failure path) lands us in idle-queue
     // mode if the queue is non-empty so the user decides whether to
     // Continue. Default false (natural completion) auto-dispatches.
-    void FinalizeTurn(bool wasCancelledOrError = false);
+    void FinalizeTurn(Thread& t, bool wasCancelledOrError = false);
 
-    void RenderToolBlock(const std::string& name,
+    // Canvas output for thread `t`. These draw only while `t` is shown, so a
+    // background thread's turn updates its data and nothing else.
+    void RenderToolBlock(Thread& t, const std::string& name,
                          const std::string& argsJson,
                          const std::string& result);
-    void RenderErrorBlock(const wxString& msg);
+    void RenderErrorBlock(Thread& t, const wxString& msg);
+    // "Waiting for <thread> to finish" while t.waiting.
+    void RenderWaitingNotice(Thread& t);
+    // A failed turn's notice: drawn now when `t` is shown, otherwise kept on
+    // the thread (with the prompt when it was rolled back) until viewed.
+    void ShowTurnFailure(Thread& t, Block notice, bool promptRolledBack);
     // Inline notice for when the no-key free model stalls: explains it's the
     // free tier, recommends DeepSeek, and links to Settings.
-    void RenderFreeModelStallNotice();
+    static Block FreeModelStallNotice();
     // Append a thinking block to the canvas. Always starts collapsed.
     // Empty text is a no-op (a model can advertise reasoning_content but
     // send nothing).
-    void RenderThinkingBlock(const wxString& text);
+    void RenderThinkingBlock(Thread& t, const wxString& text);
     // Emit the pending thinking block (if any) for the current completion
-    // round and set thinkingEmitted_ true. Idempotent.
-    void EmitPendingThinking();
+    // round and set t.thinkingEmitted true. Idempotent.
+    void EmitPendingThinking(Thread& t);
     // Called as reasoning deltas arrive: adds the collapsed live Thinking
     // block on the first one, then (throttled, and only while the user has it
     // expanded) refreshes its text. No-op once the round's thinking is emitted.
-    void UpdateLiveThinking();
+    void UpdateLiveThinking(Thread& t);
 };

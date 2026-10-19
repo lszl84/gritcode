@@ -32,6 +32,8 @@ struct ToolCancelToken {
 // Pass nullptr for `memory` if the index isn't open (those tools return a
 // "Memory index unavailable" string in that case). When enableGritHistory is
 // false, grit_history_search/fetch return a "disabled by the user" error.
+// `currentCwd` is the calling thread's folder: relative paths resolve
+// against it and bash runs there (the process cwd is never used).
 std::string DispatchTool(const std::string& name,
                          const nlohmann::json& args,
                          ToolCancelToken* token,
