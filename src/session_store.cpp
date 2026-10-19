@@ -8,6 +8,7 @@
 #include <filesystem>
 #include <fstream>
 #include <functional>
+#include <random>
 
 namespace fs = std::filesystem;
 
@@ -70,10 +71,17 @@ void SessionStore::Init() {
     ReadIndex();
 }
 
-bool SessionStore::Load(const std::string& cwd,
+std::string SessionStore::NewThreadId() {
+    static std::mt19937_64 rng{std::random_device{}()};
+    char buf[17];
+    std::snprintf(buf, sizeof(buf), "%016llx", (unsigned long long)rng());
+    return std::string(buf, 16);
+}
+
+bool SessionStore::Load(const std::string& id,
                         std::vector<nlohmann::json>& outHistory) const {
     PERF_SCOPE("SessionStore::Load");
-    std::string path = sessionsDir_ + "/" + IdForCwd(cwd) + ".json";
+    std::string path = sessionsDir_ + "/" + id + ".json";
     std::ifstream f(path);
     if (!f.good()) return false;
     nlohmann::json j;
@@ -101,64 +109,39 @@ std::string SessionStore::NowIso() {
     return buf;
 }
 
-void SessionStore::Save(const std::string& cwd,
-                        const std::vector<nlohmann::json>& history) {
+void SessionStore::Save(Entry e, const std::vector<nlohmann::json>& history) {
     PERF_SCOPE("SessionStore::Save");
-    std::string lastUsed = NowIso();
-    WriteSessionFile(cwd, history, lastUsed);
-    UpdateIndex(cwd, lastUsed);
+    e.lastUsed = NowIso();
+    WriteSessionFile(e, history);
+    UpdateIndex(e);
 }
 
-void SessionStore::WriteSessionFile(const std::string& cwd,
-                                    const std::vector<nlohmann::json>& history,
-                                    const std::string& lastUsed) const {
-    std::string id = IdForCwd(cwd);
+void SessionStore::WriteSessionFile(const Entry& e,
+                                    const std::vector<nlohmann::json>& history) const {
     nlohmann::json j;
-    j["id"] = id;
-    j["cwd"] = cwd;
-    j["lastUsed"] = lastUsed;
+    j["id"] = e.id;
+    j["cwd"] = e.cwd;
+    j["lastUsed"] = e.lastUsed;
+    if (!e.title.empty()) j["title"] = e.title;
+    if (!e.parent.empty()) j["parent"] = e.parent;
     j["messages"] = history;
 
     std::string body = j.dump(2, ' ', false,
                               nlohmann::json::error_handler_t::replace);
-    AtomicWrite(sessionsDir_ + "/" + id + ".json", body);
+    AtomicWrite(sessionsDir_ + "/" + e.id + ".json", body);
 }
 
-void SessionStore::UpdateIndex(const std::string& cwd,
-                               const std::string& lastUsed) {
-    std::string id = IdForCwd(cwd);
-    bool found = false;
-    for (auto& e : entries_) {
-        if (e.cwd == cwd) {
-            e.lastUsed = lastUsed;
-            e.id = id;
-            found = true;
-            break;
-        }
-    }
-    if (!found) entries_.push_back({id, cwd, lastUsed});
+void SessionStore::UpdateIndex(const Entry& e) {
+    auto it = std::ranges::find(entries_, e.id, &Entry::id);
+    if (it != entries_.end()) *it = e;
+    else entries_.push_back(e);
     SortEntries();
     WriteIndex();
 }
 
-void SessionStore::SetLastActiveCwd(const std::string& cwd) {
+void SessionStore::SetLastActive(const std::string& cwd, const std::string& threadId) {
     lastActiveCwd_ = cwd;
-    WriteIndex();
-}
-
-void SessionStore::RegisterCwd(const std::string& cwd) {
-    std::string id = IdForCwd(cwd);
-    std::string lastUsed = NowIso();
-    bool found = false;
-    for (auto& e : entries_) {
-        if (e.cwd == cwd) {
-            e.lastUsed = lastUsed;
-            found = true;
-            break;
-        }
-    }
-    if (!found) entries_.push_back({id, cwd, lastUsed});
-    SortEntries();
+    lastActiveThread_ = threadId;
     WriteIndex();
 }
 
@@ -172,14 +155,23 @@ void SessionStore::SortEntries() {
 void SessionStore::WriteIndex() const {
     nlohmann::json j;
     j["sessions"] = nlohmann::json::array();
+    j["threads"] = nlohmann::json::array();
     for (const auto& e : entries_) {
-        j["sessions"].push_back({
+        nlohmann::json row = {
             {"id", e.id},
             {"cwd", e.cwd},
             {"lastUsed", e.lastUsed},
-        });
+        };
+        if (!e.title.empty()) row["title"] = e.title;
+        if (e.id == IdForCwd(e.cwd)) {
+            j["sessions"].push_back(std::move(row));
+        } else {
+            if (!e.parent.empty()) row["parent"] = e.parent;
+            j["threads"].push_back(std::move(row));
+        }
     }
     if (lastActiveCwd_) j["lastActiveCwd"] = *lastActiveCwd_;
+    if (lastActiveThread_) j["lastActiveThread"] = *lastActiveThread_;
     std::string body = j.dump(2, ' ', false,
                               nlohmann::json::error_handler_t::replace);
     AtomicWrite(indexPath_, body);
@@ -188,28 +180,56 @@ void SessionStore::WriteIndex() const {
 void SessionStore::ReadIndex() {
     entries_.clear();
     lastActiveCwd_.reset();
+    lastActiveThread_.reset();
+
+    auto addEntry = [this](const nlohmann::json& e) {
+        if (!e.is_object()) return;
+        Entry ent;
+        ent.id = e.value("id", std::string{});
+        ent.cwd = e.value("cwd", std::string{});
+        ent.lastUsed = e.value("lastUsed", std::string{});
+        ent.title = e.value("title", std::string{});
+        ent.parent = e.value("parent", std::string{});
+        if (ent.cwd.empty()) return;
+        // Backfill id if older index lacks it.
+        if (ent.id.empty()) ent.id = IdForCwd(ent.cwd);
+        if (std::ranges::find(entries_, ent.id, &Entry::id) != entries_.end()) return;
+        entries_.push_back(std::move(ent));
+    };
 
     std::ifstream f(indexPath_);
-    if (!f.good()) return;
     nlohmann::json j;
-    try { f >> j; } catch (...) { return; }
-    if (!j.is_object()) return;
-
-    if (j.contains("sessions") && j["sessions"].is_array()) {
-        for (const auto& e : j["sessions"]) {
-            if (!e.is_object()) continue;
-            Entry ent;
-            ent.id = e.value("id", std::string{});
-            ent.cwd = e.value("cwd", std::string{});
-            ent.lastUsed = e.value("lastUsed", std::string{});
-            if (ent.cwd.empty()) continue;
-            // Backfill id if older index lacks it.
-            if (ent.id.empty()) ent.id = IdForCwd(ent.cwd);
-            entries_.push_back(std::move(ent));
-        }
+    if (f.good()) {
+        try { f >> j; } catch (...) { j = nullptr; }
     }
-    if (j.contains("lastActiveCwd") && j["lastActiveCwd"].is_string()) {
-        lastActiveCwd_ = j["lastActiveCwd"].get<std::string>();
+    if (j.is_object()) {
+        for (const char* key : {"sessions", "threads"}) {
+            if (j.contains(key) && j[key].is_array())
+                for (const auto& e : j[key]) addEntry(e);
+        }
+        if (j.contains("lastActiveCwd") && j["lastActiveCwd"].is_string())
+            lastActiveCwd_ = j["lastActiveCwd"].get<std::string>();
+        if (j.contains("lastActiveThread") && j["lastActiveThread"].is_string())
+            lastActiveThread_ = j["lastActiveThread"].get<std::string>();
+    }
+
+    // Session files the index doesn't list: 0.5.x rewrites the index with
+    // only `sessions`, dropping `threads`. Their headers (id, cwd, lastUsed,
+    // title, parent) are enough; the messages are skipped while parsing.
+    std::error_code ec;
+    for (const auto& file : fs::directory_iterator(sessionsDir_, ec)) {
+        if (file.path().extension() != ".json") continue;
+        const std::string id = file.path().stem().string();
+        if (std::ranges::find(entries_, id, &Entry::id) != entries_.end()) continue;
+        std::ifstream sf(file.path());
+        auto skipMessages = [](int depth, nlohmann::json::parse_event_t ev,
+                               nlohmann::json& v) {
+            return !(depth == 1 && ev == nlohmann::json::parse_event_t::key
+                     && v == "messages");
+        };
+        nlohmann::json header = nlohmann::json::parse(sf, skipMessages, false);
+        if (header.is_object() && header.value("id", std::string{}) == id)
+            addEntry(header);
     }
     SortEntries();
 }

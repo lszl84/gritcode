@@ -9,6 +9,9 @@ Usage:
     python3 scripts/grit.py last                # last assistant text
     python3 scripts/grit.py conversation        # full history JSON
     python3 scripts/grit.py cancel              # cancel in-flight request
+    python3 scripts/grit.py threads             # threads, all folders
+    python3 scripts/grit.py newthread [cwd]     # new thread (active folder by default)
+    python3 scripts/grit.py thread <id>         # make thread <id> active
 """
 
 import json
@@ -85,6 +88,15 @@ class Grit:
     def new_session(self):
         return self._call("newSession")
 
+    def list_threads(self):
+        return self._call("listThreads")
+
+    def new_thread(self, cwd=""):
+        return self._call("newThread", {"cwd": cwd})
+
+    def select_thread(self, thread_id):
+        return self._call("selectThread", {"id": thread_id})
+
     def set_model(self, idx):
         return self._call("setModel", {"index": idx})
 
@@ -139,6 +151,16 @@ def main():
         print(json.dumps(g.switch_session(sys.argv[2]), indent=2))
     elif cmd == "new":
         print(json.dumps(g.new_session(), indent=2))
+    elif cmd == "threads":
+        print(json.dumps(g.list_threads(), indent=2))
+    elif cmd == "newthread":
+        print(json.dumps(g.new_thread(sys.argv[2] if len(sys.argv) > 2 else ""), indent=2))
+    elif cmd == "thread":
+        if len(sys.argv) < 3:
+            print("usage: thread <id>")
+            sys.exit(1)
+        print(json.dumps(g.select_thread(sys.argv[2]), indent=2))
+
     elif cmd == "model":
         if len(sys.argv) < 3:
             print("usage: model <index>  (0=OpenCode Free, 1=DeepSeek Flash, 2=DeepSeek Pro)")
