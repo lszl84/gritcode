@@ -691,14 +691,10 @@ std::string ToolWebSearch(const nlohmann::json& args) {
     auto r = RequestSync(std::move(spec));
     if (!r.ok) return "Error: " + r.error;
 
-    // Walk SSE events, find the first `data: {...}` line and extract
+    // Walk SSE events, find the first `data: {...}` one and extract
     // result.content[0].text.
-    std::istringstream stream(r.body);
-    std::string line;
-    while (std::getline(stream, line)) {
-        if (!line.empty() && line.back() == '\r') line.pop_back();
-        if (line.rfind("data: ", 0) != 0) continue;
-        std::string payload = line.substr(6);
+    std::string sseBuf;
+    for (const std::string& payload : TakeSseEvents(sseBuf, r.body, /*streamEnded=*/true)) {
         try {
             auto j = nlohmann::json::parse(payload);
             if (j.contains("result") && j["result"].contains("content")

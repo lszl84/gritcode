@@ -529,10 +529,11 @@ private:
     int imgFile_ = -1;
 
     // Streaming HTTP callbacks (delivered on the GUI thread via CallAfter).
-    // OnStreamData appends to t.sseBuf and parses any complete SSE events.
+    // OnStreamData appends to t.sseBuf and parses any complete SSE events
+    // (with `streamEnded`, also an unterminated last one).
     // OnStreamDone fires once with the final WebResponse and runs the same
     // post-stream finalization as the old OnWebRequestState handler did.
-    void OnStreamData(Thread& t, std::string_view chunk);
+    void OnStreamData(Thread& t, std::string_view chunk, bool streamEnded = false);
     void OnStreamDone(Thread& t, WebResponse resp);
 
     void OnToolBatchDone(Thread& t, std::vector<ToolBatchEntry> results);
@@ -603,7 +604,7 @@ private:
     // Summary stream callbacks (separate from the main OnStreamData /
     // OnStreamDone — the summary response is private to the compaction
     // path and never lands in canvas blocks).
-    void OnSummaryStreamData(Thread& t, std::string_view chunk);
+    void OnSummaryStreamData(Thread& t, std::string_view chunk, bool streamEnded = false);
     void OnSummaryStreamDone(Thread& t, WebResponse resp);
     // Replace t.history[0..splitIdx) with a single isSummary user message
     // carrying `summary`, persist, then resume the real request. Falls
