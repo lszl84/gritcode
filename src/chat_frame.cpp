@@ -355,6 +355,14 @@ int ModelIndexForRow(int row, const std::vector<std::string>& remoteModels) {
     return kClaudeIndexBase + (row - 1 - dsCount);
 }
 
+// The free model's endpoint. GRIT_FREE_MODEL_URL overrides it: a test/dev
+// hook that lets the smoke tests use a local fake model
+// (scripts/smoke/fake_model.py) instead of the flaky shared free tier.
+const char* FreeModelUrl() {
+    const char* url = std::getenv("GRIT_FREE_MODEL_URL");
+    return url && *url ? url : "https://api.kilo.ai/api/gateway/chat/completions";
+}
+
 ModelRoute RouteForIndex(int idx, const std::vector<std::string>& remoteModels) {
     if (idx == kModelKiloFree) {
         // Kilo Gateway free tier: kilo-auto/free auto-routes to whichever
@@ -362,7 +370,7 @@ ModelRoute RouteForIndex(int idx, const std::vector<std::string>& remoteModels) 
         // 256K context, anonymous rate limit 200 requests/hour/IP. Free
         // models are shared-pool and best-effort, so this is the no-key
         // default, not a replacement for a DeepSeek key.
-        return {"https://api.kilo.ai/api/gateway/chat/completions",
+        return {FreeModelUrl(),
                 "kilo-auto/free", false, Preferences::Provider::DeepSeek,
                 kOutputTokenMax, 256000};
     }
@@ -386,7 +394,7 @@ ModelRoute RouteForIndex(int idx, const std::vector<std::string>& remoteModels) 
     }
 
     // Unknown/stale index — fall back to the no-key free provider.
-    return {"https://api.kilo.ai/api/gateway/chat/completions",
+    return {FreeModelUrl(),
             "kilo-auto/free", false, Preferences::Provider::DeepSeek,
             32000, 256000};
 }
