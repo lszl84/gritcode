@@ -26,6 +26,7 @@
 #include <deque>
 #include <map>
 #include <memory>
+#include <optional>
 #include <set>
 #include <string>
 #include <thread>
@@ -141,6 +142,14 @@ private:
         // natural turn end the front auto-dispatches; on error/cancel we land
         // in idle-queue mode.
         std::vector<QueuedMessage> pendingQueue;
+        // The current turn's user text as typed (without hidden instructions).
+        std::string turnPrompt;
+        // A turn that failed while the thread wasn't shown: its notice, and its
+        // prompt when the failure rolled that out of history. Switching to the
+        // thread shows the notice and puts the prompt back into the input, so
+        // a background failure never vanishes silently.
+        std::optional<Block> failureNotice;
+        std::string failedPrompt;
 
         // Model index the current turn started with. A switch to Claude in the
         // middle of an OpenAI-style tool loop can't take over that loop, so the
@@ -439,8 +448,8 @@ private:
     // "Open folder…", and select the active thread.
     void RefreshSessionChoice();
 
-    // CreateNewSession pops a directory dialog and switches to that folder's
-    // first thread. SwitchToCwd opens the first thread of `cwd` (loading it,
+    // CreateNewSession pops a directory dialog and switches to that folder.
+    // SwitchToCwd opens the most recently used thread of `cwd` (loading it,
     // or seeding a fresh one). NewThread adds an empty thread in `cwd`.
     // SelectThread shows thread `id`, loading it from disk when needed; false
     // when it doesn't exist or the user cancelled (unsaved editor changes).
@@ -626,9 +635,12 @@ private:
     void RenderErrorBlock(Thread& t, const wxString& msg);
     // "Waiting for <thread> to finish" while t.waiting.
     void RenderWaitingNotice(Thread& t);
+    // A failed turn's notice: drawn now when `t` is shown, otherwise kept on
+    // the thread (with the prompt when it was rolled back) until viewed.
+    void ShowTurnFailure(Thread& t, Block notice, bool promptRolledBack);
     // Inline notice for when the no-key free model stalls: explains it's the
     // free tier, recommends DeepSeek, and links to Settings.
-    void RenderFreeModelStallNotice(Thread& t);
+    static Block FreeModelStallNotice();
     // Append a thinking block to the canvas. Always starts collapsed.
     // Empty text is a no-op (a model can advertise reasoning_content but
     // send nothing).
