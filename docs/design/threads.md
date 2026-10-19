@@ -41,9 +41,10 @@ bash `chdir`s in the forked child. The process-wide `ChdirToCwd` goes away.
 
 ## Write safety
 
-One running turn per folder. Starting a turn while another thread in the same
-folder is running queues it (shown as "waiting for <thread>"). Real parallel
-writing in one folder comes later with worktrees.
+One running turn per working folder. Starting a turn while another thread in
+the same folder is running queues it (shown as "waiting for <thread>"). A
+worktree thread's checkout is a working folder of its own (`Thread::workDir`,
+see "Worktree threads"), so it runs alongside the project folder's threads.
 
 A thread and its subagents count as one owner of the folder, so a subagent
 never waits for its own parent. Subagents are read-only: `write_file`,
@@ -79,7 +80,10 @@ under its parent in the dropdown and linked from the parent's tool block.
 ## Storage (no migration)
 
 Session files keep their format: `sessions/<id>.json` with `id`, `cwd`,
-`lastUsed`, `messages`, plus optional `title` and `parent`. The existing
+`lastUsed`, `messages`, plus optional `title`, `parent`, and for worktree
+threads `worktree` (the checkout's root) and `branch`; the index's `threads`
+rows carry the same optional fields. Old versions ignore them and show a
+worktree thread as an ordinary thread of its folder. The existing
 session of a folder (id = hash of cwd) simply becomes its first thread. The
 index keeps `sessions` (one entry per folder, exactly what 0.5.x reads) and
 adds `threads` for additional threads, which 0.5.x ignores. Downgrading keeps
@@ -129,11 +133,69 @@ indexed by 0.5.x or before this step) shows no title until its next save or
 a `--reindex`. Nothing is deleted except a session's own rows on its
 rebuild, as before; turns of sessions with no file any more stay searchable.
 
+## Worktree threads
+
+A worktree thread writes in its own git checkout, so several threads can
+change one project at once. "New thread in worktree" (dropdown entry and pane
+button, offered only when the folder is in a git repo) runs
+`git worktree add -b grit/<first 8 of the id> <data dir>/worktrees/<id> HEAD`:
+the checkout lives outside the user's repo and holds the committed state (the
+creation notice says that uncommitted changes aren't in it). The thread still
+belongs to its folder (`cwd`, listed there, same brief and AGENTS.md), while
+its tools, bash and Claude Code run in `workDir`, the same subfolder of the
+worktree as the folder is of the repo. Its subagents get its `workDir`, so the
+family rule holds as before. Its system prompt adds that it works in an
+isolated worktree of the project on its branch. History search's "folder"
+scope stays the project folder. It is saved as soon as it is created, so its
+checkout is never unlisted.
+
+Its canvas starts with a header (branch, "Review changes", "Merge into
+<branch>", "Discard worktree"), the pane and dropdown rows show the branch,
+and the pane's right-click menu offers the same actions. The git work is a
+few free functions in `git_worktree.{h,cpp}` that run git synchronously with
+an argv (fork/exec, no shell); they are quick, and run only on the user's
+click.
+
+- Review: `git add -A` in the worktree (its index is the thread's), then
+  `git diff --cached <merge-base of the worktree and the project's HEAD>`:
+  committed and uncommitted changes, new files included, as a stat notice and
+  a diff code block in the canvas (not in history, so the model doesn't see
+  it).
+- Merge: refused while the thread (or a thread in the project folder) runs,
+  when the project checkout has uncommitted changes to tracked files, or when
+  it is on no branch. Otherwise the worktree's uncommitted changes are
+  committed on its branch with the thread's title as the message, then
+  `git merge --no-ff grit/<id>` in the project checkout. A conflict is
+  aborted with `git merge --abort`; the notice names the files and suggests
+  merging the project's branch into the worktree branch in the thread
+  (conflicts are then resolved in its isolated checkout). Every outcome,
+  including the commit message used, shows as a notice; if the abort itself
+  fails, the notice says the repo is mid-merge and what to run.
+- Why a merge commit rather than applying the diff as uncommitted changes:
+  the merge is refused unless the checkout is clean, so the user's own work
+  is never mixed in; a conflict aborts back to exactly the previous state
+  (`git apply --3way` would leave conflict markers among the user's files);
+  and the result is one commit, easy to inspect and undo
+  (`git reset --hard HEAD~1` or `git revert -m 1`). The worktree stays, so
+  the thread can go on and be merged again.
+- Discard: refused while the thread runs. When the branch has commits not
+  in the project's HEAD, or the worktree has uncommitted changes (or git
+  can't tell), it asks first and names what would be lost. Then
+  `git worktree remove --force` (or `git worktree prune` when the checkout is
+  already gone) and `git branch -D`. The thread stays, as a thread of the
+  folder itself.
+- A worktree deleted by hand: the header says so and offers Discard (which
+  prunes it and deletes the branch); sending a message is refused with a
+  notice.
+
+There is no "delete thread" yet; when there is, it must discard the
+worktree the same way.
+
 ## UI
 
 The session dropdown lists the current folder's threads (running ones marked,
-subagents indented under their parent) plus "New thread", "Project brief…"
-and "Open folder…".
+subagents indented under their parent) plus "New thread", "New thread in
+worktree" (git repos only), "Project brief…" and "Open folder…".
 
 The thread pane (toolbar toggle, remembered in preferences) shows the same
 rows at the far left: a "New thread" button, then per thread a state mark
@@ -167,7 +229,7 @@ like the other panes. The agent map and the decision tray come later (see
 5. Thread pane: an optional left list of the folder's threads and their child
    threads with state (running, waiting, failed, done). (done)
 6. Worktree threads: a thread can run in its own git worktree, so several
-   threads write in one project at once; diff and merge back.
+   threads write in one project at once; diff and merge back. (done)
 7. Project-scoped history search for the memory tool. (done)
 
 The orchestrator ideas (`orchestrator-conversation.md`) build on 2 and 5.
