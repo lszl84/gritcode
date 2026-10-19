@@ -2,8 +2,15 @@
 #include <cstdlib>
 #include <ctime>
 #include <fstream>
+#include <mutex>
 
 namespace fs = std::filesystem;
+
+namespace {
+// Threads run tools at once, so Get/Set/Forget go through this lock: without
+// it two read-modify-writes at once lose one of the entries.
+std::mutex gFileMutex;
+}  // namespace
 
 std::string RunConfigStore::StoragePath() {
     // Match the DataRoot() convention from session_store.cpp:
@@ -53,11 +60,21 @@ void RunConfigStore::Save(const std::map<std::string, Config>& map) {
             {"lastUsed", c.lastUsed}
         };
     }
-    std::ofstream f(path);
-    if (f.is_open()) f << j.dump(2);
+    // Write a temp file and rename it over the old one, so a reader never
+    // sees a half-written file (another gritcode process may read it).
+    std::string tmp = path + ".tmp";
+    {
+        std::ofstream f(tmp);
+        if (!f.is_open()) return;
+        f << j.dump(2);
+        if (!f) return;
+    }
+    std::error_code ec;
+    fs::rename(tmp, path, ec);
 }
 
 std::optional<RunConfigStore::Config> RunConfigStore::Get(const std::string& cwd) {
+    std::lock_guard lock(gFileMutex);
     auto map = Load();
     auto it = map.find(cwd);
     if (it != map.end()) return it->second;
@@ -66,6 +83,7 @@ std::optional<RunConfigStore::Config> RunConfigStore::Get(const std::string& cwd
 
 void RunConfigStore::Set(const std::string& cwd, const std::string& command,
                          const std::string& discoveredBy) {
+    std::lock_guard lock(gFileMutex);
     auto map = Load();
     Config c;
     c.command = command;
@@ -80,6 +98,7 @@ void RunConfigStore::Set(const std::string& cwd, const std::string& command,
 }
 
 void RunConfigStore::Forget(const std::string& cwd) {
+    std::lock_guard lock(gFileMutex);
     auto map = Load();
     map.erase(cwd);
     Save(map);

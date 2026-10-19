@@ -16,12 +16,6 @@ public:
         std::string lastUsed;      // ISO-8601 timestamp
     };
 
-    // Load from disk. Returns an empty map if the file doesn't exist.
-    static std::map<std::string, Config> Load();
-
-    // Save to disk.
-    static void Save(const std::map<std::string, Config>& map);
-
     // Get the config for a project dir. Returns nullopt if none.
     static std::optional<Config> Get(const std::string& cwd);
 
@@ -33,4 +27,12 @@ public:
     static void Forget(const std::string& cwd);
 
     static std::string StoragePath();
+
+private:
+    // Load from disk. Returns an empty map if the file doesn't exist.
+    // Callers hold the file lock (see run_config_store.cpp).
+    static std::map<std::string, Config> Load();
+
+    // Save to disk. Callers hold the file lock.
+    static void Save(const std::map<std::string, Config>& map);
 };
