@@ -82,3 +82,13 @@ public:
 private:
     std::unique_ptr<StreamingRequestImpl> impl_;
 };
+
+// Server-sent events, the chat APIs' streaming format. Appends `chunk` to
+// `buf`, takes each complete event off the front and returns its data (the
+// event's `data:` lines joined by '\n'); events without data, such as
+// comments and keepalives, are skipped. Lines end in "\n", "\r\n" or "\r",
+// and a blank line ends an event. An unfinished event stays in `buf` (so a
+// non-SSE error body stays whole there) until `streamEnded`, when what is
+// left counts as a last event even without the blank line.
+std::vector<std::string> TakeSseEvents(std::string& buf, std::string_view chunk,
+                                       bool streamEnded = false);

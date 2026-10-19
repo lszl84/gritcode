@@ -277,3 +277,67 @@ bool StreamingWebRequest::IsActive() const noexcept {
 void StreamingWebRequest::Cancel() noexcept {
     if (impl_) impl_->cancelled.store(true);
 }
+
+namespace {
+
+// Length of the line ending at s[i] ("\n", "\r\n" or "\r"), 0 if none.
+size_t LineEndAt(std::string_view s, size_t i) {
+    if (i >= s.size()) return 0;
+    if (s[i] == '\n') return 1;
+    if (s[i] == '\r') return i + 1 < s.size() && s[i + 1] == '\n' ? 2 : 1;
+    return 0;
+}
+
+// The data of one event: its `data:` lines (one optional space after the
+// colon dropped) joined by '\n'. Other fields and comments are ignored.
+std::string SseEventData(std::string_view event) {
+    std::string data;
+    bool first = true;
+    while (!event.empty()) {
+        size_t end = event.find_first_of("\r\n");
+        std::string_view line = event.substr(0, end);
+        event.remove_prefix(end == std::string_view::npos
+                                ? event.size() : end + LineEndAt(event, end));
+        if (!line.starts_with("data:")) continue;
+        line.remove_prefix(5);
+        if (line.starts_with(' ')) line.remove_prefix(1);
+        if (!first) data += '\n';
+        data += line;
+        first = false;
+    }
+    return data;
+}
+
+}  // namespace
+
+std::vector<std::string> TakeSseEvents(std::string& buf, std::string_view chunk,
+                                       bool streamEnded) {
+    // A blank line is at most 4 bytes ("\r\n\r\n") and `buf` held none, so
+    // only its last 3 bytes can start one: don't rescan the rest.
+    size_t pos = buf.size() < 3 ? 0 : buf.size() - 3;
+    buf.append(chunk);
+
+    std::vector<std::string> events;
+    size_t start = 0;  // where the current event begins
+    while ((pos = buf.find_first_of("\r\n", pos)) != std::string::npos) {
+        size_t next = pos + LineEndAt(buf, pos);
+        // A line ending followed by another one is a blank line, which ends
+        // the event. At the end of `buf` that is still unknown: wait.
+        size_t blank = LineEndAt(buf, next);
+        if (blank == 0) {
+            pos = next;
+            continue;
+        }
+        std::string data = SseEventData(std::string_view(buf).substr(start, pos - start));
+        if (!data.empty()) events.push_back(std::move(data));
+        start = pos = next + blank;
+    }
+    buf.erase(0, start);
+
+    if (streamEnded && !buf.empty()) {
+        std::string data = SseEventData(buf);
+        if (!data.empty()) events.push_back(std::move(data));
+        buf.clear();
+    }
+    return events;
+}
