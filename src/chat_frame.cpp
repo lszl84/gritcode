@@ -1446,6 +1446,7 @@ ChatFrame::ChatFrame()
                 {"historyLen", (int)t.history.size()},
                 {"pendingQueue", std::move(queue)},
                 {"continueQueueVisible", continueQueueBtn_->IsShown()},
+                {"input", input_->GetValue().utf8_string()},
             };
         });
     };
@@ -1530,6 +1531,7 @@ ChatFrame::ChatFrame()
                     {"lastUsed", lastUsed}, {"loaded", t != nullptr},
                     {"running", t && t->streaming && !t->waiting},
                     {"waiting", t && t->waiting},
+                    {"failed", t && t->failureNotice.has_value()},
                 });
             };
             for (const Thread& t : threads_) add(t.id, t.cwd, t.title, t.lastUsed, &t);
@@ -2204,6 +2206,8 @@ void ChatFrame::RefreshSessionChoice() {
         if (t.cwd != activeCwd_) continue;
         wxString label = ThreadLabel(t.id, t.cwd, t.title);
         if (t.streaming) label = wxString::FromUTF8("\xE2\x97\x8F ") + label;  // "● "
+        else if (t.failureNotice && !Shown(t))
+            label = wxString::FromUTF8("\xE2\x9A\xA0 ") + label;  // "⚠ ", until viewed
         rows.push_back({t.id, label, t.lastUsed});
     }
     for (const auto& e : store_.List()) {
@@ -2251,9 +2255,22 @@ void ChatFrame::CreateNewSession() {
 }
 
 bool ChatFrame::SwitchToCwd(const std::string& cwd) {
-    // A folder opens on its first thread, the one older versions knew as the
-    // folder's session.
-    const std::string id = SessionStore::IdForCwd(cwd);
+    // A folder opens on its most recently used thread. One never used before
+    // starts on its first thread, whose id derives from the folder.
+    std::string id = SessionStore::IdForCwd(cwd);
+    std::string lastUsed;
+    for (const Thread& t : threads_) {
+        if (t.cwd == cwd && t.lastUsed > lastUsed) {
+            id = t.id;
+            lastUsed = t.lastUsed;
+        }
+    }
+    for (const auto& e : store_.List()) {
+        if (e.cwd == cwd && e.lastUsed > lastUsed) {
+            id = e.id;
+            lastUsed = e.lastUsed;
+        }
+    }
     if (!Find(id)) OpenThread(id, cwd);
     return ShowThread(id);
 }
@@ -2325,6 +2342,11 @@ bool ChatFrame::ShowThread(const std::string& id) {
     RestoreCanvasMaybeDeferred();
     canvas_->SetThinking(t.streaming);
     UpdateQueueUI();
+    // The prompt of a turn that failed in the background goes back into the
+    // input, unless the user is already typing something else there.
+    if (!t.failedPrompt.empty() && input_->IsEmpty())
+        input_->SetValue(wxString::FromUTF8(t.failedPrompt));
+    t.failedPrompt.clear();
     RefreshSessionChoice();
     if (otherFolder) {
         PopulateEditorTree();
@@ -2479,6 +2501,11 @@ void ChatFrame::RestoreCanvasFromHistory() {
     // in the order it streamed. A fresh markdown stream, fed the partial
     // text, carries the rest of the reply on this canvas.
     t.liveThinkingIdx = -1;
+    // A turn that failed in the background: its notice, seen now.
+    if (t.failureNotice) {
+        canvas_->AddBlock(std::move(*t.failureNotice));
+        t.failureNotice.reset();
+    }
     if (t.streaming) {
         if (t.waiting) RenderWaitingNotice(t);
         if (t.thinkingEmitted) RenderThinkingBlock(t, wxString::FromUTF8(t.activeReasoning));
@@ -3944,7 +3971,8 @@ void ChatFrame::StartTurn(Thread& t, const wxString& userText,
         userMsg["images"] = std::move(arr);
     }
     t.history.push_back(std::move(userMsg));
-    if (t.title.empty()) t.title = DefaultTitle(userText.utf8_string());
+    t.turnPrompt = userText.utf8_string();
+    if (t.title.empty()) t.title = DefaultTitle(t.turnPrompt);
 
     t.streaming = true;
     t.toolIter = 0;
@@ -4303,10 +4331,10 @@ void ChatFrame::DoSendActualRequest(Thread& t) {
     if (route.needsApiKey) {
         apiKey = Preferences::GetApiKey(route.provider);
         if (apiKey.IsEmpty()) {
-            RenderErrorBlock(t, 
+            // A failed turn like any other: the unsent message is rolled back.
+            HandleCompletion(t,
                 "No API key configured for the selected model. "
                 "Open Settings (gear icon) to add one.");
-            FinalizeTurn(t, true);
             return;
         }
     }
@@ -4574,8 +4602,9 @@ void ChatFrame::HandleCompletion(Thread& t, const wxString& errorIfFailed,
     EmitPendingThinking(t);
 
     if (!errorIfFailed.IsEmpty() || freeModelStall) {
-        if (freeModelStall) RenderFreeModelStallNotice(t);
-        else RenderErrorBlock(t, errorIfFailed);
+        ShowTurnFailure(t, freeModelStall ? FreeModelStallNotice()
+                                          : NoticeBlock(errorIfFailed),
+                        /*promptRolledBack=*/true);
         // Roll back the failed turn from t.history: drop any tool messages plus
         // the trailing user message that triggered this turn. Without this,
         // every retry would carry a growing tail of orphan user messages and
@@ -4847,8 +4876,16 @@ void ChatFrame::RenderErrorBlock(Thread& t, const wxString& msg) {
     if (Shown(t)) canvas_->AddBlock(NoticeBlock(msg));
 }
 
-void ChatFrame::RenderFreeModelStallNotice(Thread& t) {
-    if (!Shown(t)) return;
+void ChatFrame::ShowTurnFailure(Thread& t, Block notice, bool promptRolledBack) {
+    if (Shown(t)) {
+        canvas_->AddBlock(std::move(notice));
+        return;
+    }
+    t.failureNotice = std::move(notice);
+    t.failedPrompt = promptRolledBack ? t.turnPrompt : std::string();
+}
+
+Block ChatFrame::FreeModelStallNotice() {
     wxString text =
         "The free model stopped responding. Free models can lose their "
         "connection from time to time. For a reliable experience, set up "
@@ -4870,8 +4907,7 @@ void ChatFrame::RenderFreeModelStallNotice(Thread& t) {
     r2.bold = true;
     r2.link = "gritcode://settings";
     b.runs.push_back(r2);
-
-    canvas_->AddBlock(std::move(b));
+    return b;
 }
 
 void ChatFrame::RenderThinkingBlock(Thread& t, const wxString& text) {
@@ -5534,8 +5570,9 @@ void ChatFrame::StartClaudeTurn(Thread& t, bool fresh) {
         b.runs.push_back(link);
         b.rawText += linkText;
         b.visibleText += linkText;
-        if (Shown(t)) canvas_->AddBlock(std::move(b));
-        if (!t.history.empty() && IsUserTurn(t.history.back())) t.history.pop_back();
+        const bool rolledBack = !t.history.empty() && IsUserTurn(t.history.back());
+        if (rolledBack) t.history.pop_back();
+        ShowTurnFailure(t, std::move(b), rolledBack);
         FinalizeTurn(t, true);
         return;
     }
@@ -6017,12 +6054,11 @@ void ChatFrame::FailClaudeTurn(Thread& t, const std::string& detail) {
     } else {
         msg = "Claude Code error: " + wxString::FromUTF8(shown);
     }
-    RenderErrorBlock(t, msg);
-
     // Nothing from this turn was recorded: drop the unanswered user message,
     // as the HTTP error path does, so it isn't sent again with the next one.
-    if (t.history.size() == t.claudeTurnHistoryStart && !t.history.empty()
-        && IsUserTurn(t.history.back()))
-        t.history.pop_back();
+    const bool rolledBack = t.history.size() == t.claudeTurnHistoryStart
+                            && !t.history.empty() && IsUserTurn(t.history.back());
+    if (rolledBack) t.history.pop_back();
+    ShowTurnFailure(t, NoticeBlock(msg), rolledBack);
     FinalizeTurn(t, true);
 }
