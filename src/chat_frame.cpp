@@ -4926,7 +4926,7 @@ void ChatFrame::FinalizeTurn(Thread& t, bool wasCancelledOrError) {
     // for its `task` subagents, so those are done by now.
     for (Thread& c : threads_) {
         if (c.parent == t.id && c.streaming)
-            FinishClaudeSubagent(c, "Stopped: the parent's turn ended before this subagent finished.");
+            FinishClaudeSubagent(c, "The subagent was stopped: its parent's turn ended first.");
     }
     // A cancelled/failed round may never reach EmitPendingThinking; don't
     // leave its Thinking block live with stale text.
@@ -4942,6 +4942,10 @@ void ChatFrame::FinalizeTurn(Thread& t, bool wasCancelledOrError) {
     t.activeReasoning.clear();
     t.activeToolCalls.clear();
     t.mdStream.reset();
+    // A subagent cancelled in the background keeps saying so until viewed,
+    // as a failure does (cancelling drew "Cancelled." only if shown).
+    if (!t.parent.empty() && wasCancelledOrError && t.failure.empty() && !Shown(t))
+        t.failureNotice = NoticeBlock("Cancelled.");
     Persist(t);
     // Title and running mark changed — refresh the dropdown so the new
     // label shows up.
@@ -5054,8 +5058,21 @@ void ChatFrame::FinishClaudeSubagent(Thread& c, const std::string& failure) {
     c.mdStream.reset();
     EmitPendingThinking(c);
     FlushClaudePendingMessage(c);
-    if (!failure.empty())
+    if (!failure.empty()) {
         ShowTurnFailure(c, NoticeBlock(wxString::FromUTF8(failure)), false);
+        // The parent shows it as well, and records it with its Agent call's
+        // result (which, for a background subagent, only said it started).
+        if (Thread* p = Find(c.parent)) {
+            for (auto& m : p->history) {
+                if (StringField(m, "role") == "tool"
+                    && StringField(m, "tool_call_id") == c.parentToolId)
+                    m["content"] = StringField(m, "content") + "\n\n" + failure;
+            }
+            if (Shown(*p))
+                canvas_->AddBlock(ThreadLinkBlock(wxString::FromUTF8(failure + " Open: "),
+                                                  c.id, ThreadLabelOf(c.id)));
+        }
+    }
     FinalizeTurn(c, !failure.empty());
 }
 
