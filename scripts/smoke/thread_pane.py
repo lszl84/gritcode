@@ -83,7 +83,7 @@ try:
             break
         except OSError:
             time.sleep(0.2)
-    g = Grit(base_port=PORT)
+    g = Grit(port=PORT)
 
     print("-- rows")
     p = panes(g)
