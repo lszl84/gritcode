@@ -45,6 +45,37 @@ One running turn per folder. Starting a turn while another thread in the same
 folder is running queues it (shown as "waiting for <thread>"). Real parallel
 writing in one folder comes later with worktrees.
 
+A thread and its subagents count as one owner of the folder, so a subagent
+never waits for its own parent. Subagents are read-only: `write_file`,
+`edit_file` and `run_project` are neither offered to them nor run for them,
+and their prompt tells them to use bash only to inspect (a convention, not
+enforced). The parent makes the edits from their reports, so concurrent
+subagents never write under each other.
+
+## Subagents
+
+A subagent is a child thread (`parent` set), one level deep, view-only, listed
+under its parent in the dropdown and linked from the parent's tool block.
+
+- DeepSeek/Kilo: top-level threads get a `task` tool (description, prompt).
+  Each call opens a child thread in the same folder with a fresh context (base
+  system prompt plus a subagent note) that runs headless. A Pro parent's child
+  uses the matching Flash model, otherwise the parent's model. The calls of
+  one batch run at once, alongside the batch's other tools; the batch ends when
+  the tool worker and all children are done, and the results go into the
+  parent's history in call order: the child's final message, or the failure.
+  Cancelling the parent cancels its children; cancelling a child alone gives
+  its parent an error result. A failed child keeps its history.
+- Claude Code: an `Agent` (older CLIs: `Task`) tool call opens a child thread
+  titled by its description, and events with that `parent_tool_use_id` are
+  assembled into it by the same code as the top level. It ends with the call's
+  result, or, for a background agent (the result only says it started), with
+  `system/task_notification`; a failure is also appended to the parent's
+  recorded result. Cancelling a child cancels the parent's Claude Code run;
+  children still running when that run ends are marked stopped.
+- The child's id is recorded on the parent's tool call (`"thread"`, kept off
+  the wire), so restored parents still link to their children.
+
 ## Storage (no migration)
 
 Session files keep their format: `sessions/<id>.json` with `id`, `cwd`,
@@ -56,8 +87,8 @@ working: old versions see every folder's first thread with full history.
 
 ## UI
 
-The session dropdown lists the current folder's threads (running ones marked)
-plus "New thread" and "Open folder…". A left thread pane, the agent map and
+The session dropdown lists the current folder's threads (running ones marked,
+subagents indented under their parent) plus "New thread" and "Open folder…". A left thread pane, the agent map and
 the decision tray come later (see `orchestrator-conversation.md`).
 
 ## Steps
@@ -65,7 +96,7 @@ the decision tray come later (see `orchestrator-conversation.md`).
 1. Threads: struct, multi-thread runtime, store, per-thread cwd, write queue,
    dropdown. (done)
 2. Subagents: a DeepSeek `task` tool running a child thread headless, and
-   Claude Code subagent events shown as child threads.
+   Claude Code subagent events shown as child threads. (done)
 3. Fixes that matter once threads run at once (found on the old branch): a
    bash timeout that kills the whole process group, a lock around run-config
    read-modify-write, SSE parsing of CRLF streams / a final event without a
