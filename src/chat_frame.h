@@ -106,7 +106,7 @@ private:
     };
 
     // Worker-thread tool dispatch result (one entry per tool call). Populated
-    // off the GUI thread; consumed in OnToolBatchDone.
+    // off the GUI thread (or by a subagent); consumed in OnToolBatchDone.
     struct ToolBatchEntry {
         std::string id;
         std::string name;
@@ -123,6 +123,13 @@ private:
         std::string title;     // from the first user message
         std::string parent;    // parent thread id, empty for top-level threads
         std::string lastUsed;  // ISO 8601, orders the dropdown
+        // A thread with a parent is a subagent: a `task` call run headless, or
+        // a Claude Code subagent shown from its parent's stream. It is
+        // view-only. parentToolId is the parent's tool call it answers (known
+        // while this run has it open); failure is why its turn failed, which
+        // the parent gets as that call's result.
+        std::string parentToolId;
+        std::string failure;
         // Bumped whenever the thread's request, Claude process or tool worker
         // is replaced. Async callbacks capture (id, gen) and are dropped when
         // the gen no longer matches (see Find).
@@ -203,6 +210,11 @@ private:
         // cancel and join it — otherwise a long-running bash invocation could
         // outlive the frame.
         std::thread toolWorker;
+        bool toolWorkerRunning = false;
+        // The current tool batch in call order. The worker fills in the
+        // ordinary calls and each `task` call's child thread its own; the
+        // batch ends (OnToolBatchDone) once the worker and the children are done.
+        std::vector<ToolBatchEntry> toolBatch;
 
         // ---- Context compaction ----
         // historyCompactBaseCount: message count immediately after the last
@@ -268,6 +280,8 @@ private:
     // Dropdown label: title, or a placeholder for untitled threads.
     static wxString ThreadLabel(const std::string& id, const std::string& cwd,
                                 const std::string& title);
+    // The label of thread `id`, open or not.
+    wxString ThreadLabelOf(const std::string& id);
 
     // On-disk persistence: one session file per thread. The dropdown lists
     // the active folder's threads (rows map to ids in threadRowIds_), then
@@ -535,7 +549,32 @@ private:
     void OnStreamData(Thread& t, std::string_view chunk);
     void OnStreamDone(Thread& t, WebResponse resp);
 
-    void OnToolBatchDone(Thread& t, std::vector<ToolBatchEntry> results);
+    // Ends t's tool batch once its worker and subagents are done: records
+    // the results and continues the turn.
+    void OnToolBatchDone(Thread& t);
+
+    // ---- Subagents (child threads, one level deep) ----
+    // Open child of `t` answering tool call `toolId`, if any.
+    Thread* ChildFor(const Thread& t, const std::string& toolId);
+    bool HasRunningChild(const Thread& t) const;
+    // Adds a child thread of `parent` for tool call `toolId`, titled by
+    // `description`, and links to it from the parent's canvas.
+    Thread& OpenChild(Thread& parent, const std::string& toolId,
+                      const std::string& description);
+    // Runs a `task` call: a child thread with a fresh context does `prompt`.
+    void StartSubagent(Thread& parent, const std::string& toolId,
+                       const std::string& description, const std::string& prompt);
+    // A finished `task` child: its report (or failure) becomes the result of
+    // its parent's call.
+    void ReportToParent(Thread& child, bool failed);
+    // A Claude Code subagent (Agent tool call) gets a child thread that shows
+    // its events; FinishClaudeSubagent ends it, with `failure` when it failed.
+    Thread& StartClaudeSubagent(Thread& parent, const std::string& toolId,
+                                const nlohmann::json& input);
+    void FinishClaudeSubagent(Thread& child, const std::string& failure);
+    // Model index thread t's requests use: the dropdown's, except that a
+    // subagent keeps the model it was started with.
+    int ModelIndexFor(const Thread& t) const;
 
     // After a non-2xx response: pull a human-readable error string out of
     // t.sseBuf (which doubles as raw-body capture under Storage_None).
@@ -629,9 +668,11 @@ private:
 
     // Canvas output for thread `t`. These draw only while `t` is shown, so a
     // background thread's turn updates its data and nothing else.
+    // `childId`: the subagent thread that ran the call, linked below it.
     void RenderToolBlock(Thread& t, const std::string& name,
                          const std::string& argsJson,
-                         const std::string& result);
+                         const std::string& result,
+                         const std::string& childId = std::string());
     void RenderErrorBlock(Thread& t, const wxString& msg);
     // "Waiting for <thread> to finish" while t.waiting.
     void RenderWaitingNotice(Thread& t);
