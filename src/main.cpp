@@ -63,9 +63,9 @@ LONG WINAPI SehCrashFilter(EXCEPTION_POINTERS* ep) {
 namespace fs = std::filesystem;
 using json = nlohmann::json;
 
-// One-shot --reindex: walk every session file on disk and re-index its
-// turns into the FTS5 database. Safe to re-run (RebuildSession deletes and
-// re-inserts the session's rows).
+// One-shot --reindex: walk every session file on disk (each thread has its
+// own) and re-index its turns, title and parent into the FTS5 database. Safe
+// to re-run (RebuildSession deletes and re-inserts the session's rows).
 static int RunReindex() {
     MemoryDB memory;
     if (!memory.Open(MemoryDB::DefaultPath())) {
@@ -102,7 +102,8 @@ static int RunReindex() {
         const json& messages = j.contains("messages") && j["messages"].is_array()
                                ? j["messages"] : json::array();
 
-        if (!memory.RebuildSession(sessionId, cwd, messages, timestamp)) {
+        if (!memory.RebuildSession(sessionId, cwd, j.value("title", ""),
+                                   j.value("parent", ""), messages, timestamp)) {
             std::fprintf(stderr, "  skip (index error): %s\n",
                          entry.path().c_str());
             skipped++;

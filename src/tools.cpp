@@ -1056,21 +1056,28 @@ nlohmann::json GetToolDefinitions(bool includeGritHistory, bool subagent) {
         tools.push_back(ToolDef(
             "grit_history_search",
             "Search the transcripts of past gritcode conversations across "
-            "every project the user has worked on, including the current "
-            "session (the current session is NOT excluded - use it to "
-            "recover details that context compaction hid from view). "
+            "every project the user has worked on. The current thread is "
+            "excluded (its history is already in your context) unless context "
+            "compaction summarised part of it away; the other "
+            "threads of this folder are included, and they are where work "
+            "on this project that you don't see here happened - search them "
+            "with scope \"folder\" before redoing or guessing at it. "
             "This is the AUTHORITATIVE source of prior-conversation recall - use "
             "it first whenever the user references any past work (\"last time\", "
             "\"once again\", \"we had\", \"how did we\", \"in <project>\"). "
             "Query budget: typically 1-3 searches per user question. Start with "
             "ONE broad keyword query; only run more if the first returned strong "
-            "hits. Returns short snippets (~20-token window) with session_id, "
-            "turn_index, and full_chars - follow up with grit_history_fetch.",
+            "hits. Returns short snippets (~20-token window) with the thread "
+            "title, session_id, turn_index, and full_chars - follow up with "
+            "grit_history_fetch.",
             {{"type", "object"},
              {"properties", {
                  {"query", StrParam("2-5 keywords. FTS5 MATCH expression (phrases in quotes, AND/OR/NOT, prefix*).")},
                  {"limit", {{"type", "integer"},
                             {"description", "Max results (default 5, max 20)."}}},
+                 {"scope", {{"type", "string"}, {"enum", nlohmann::json::array({"all", "folder"})},
+                            {"description", "\"all\" (default): every project. "
+                                            "\"folder\": only this folder's threads."}}},
              }},
              {"required", {"query"}}}));
 
@@ -1290,7 +1297,8 @@ std::string ToolRunProject(const nlohmann::json& args, const std::string& curren
     return "Error: unknown action '" + action + "'. Use get, set, forget, or detect.";
 }
 
-std::string ToolGritHistorySearch(const nlohmann::json& args, MemoryDB* memory) {
+std::string ToolGritHistorySearch(const nlohmann::json& args, MemoryDB* memory,
+                                  const std::string& cwd, const std::string& threadId) {
     if (!memory || !memory->IsOpen()) return "Memory index is not available.";
     std::string query = GetStringArg(args, "query");
     if (query.empty()) return "Error: 'query' is required.";
@@ -1299,7 +1307,12 @@ std::string ToolGritHistorySearch(const nlohmann::json& args, MemoryDB* memory) 
         limit = args["limit"].get<int>();
     if (limit < 1) limit = 1;
     if (limit > 20) limit = 20;
-    auto hits = memory->Search(query, limit, std::string{});
+    const std::string scope = GetStringArg(args, "scope");
+    if (!scope.empty() && scope != "all" && scope != "folder")
+        return "Error: 'scope' must be \"all\" or \"folder\".";
+    if (scope == "folder" && cwd.empty())
+        return "Error: scope \"folder\" needs a current folder.";
+    auto hits = memory->Search(query, limit, threadId, scope == "folder" ? cwd : "");
     return MemoryDB::FormatSearchHits(hits);
 }
 
@@ -1327,7 +1340,8 @@ std::string DispatchTool(const std::string& name, const nlohmann::json& args,
                          ToolCancelToken* token,
                          MemoryDB* memory,
                          const std::string& currentCwd,
-                         bool enableGritHistory) {
+                         bool enableGritHistory,
+                         const std::string& threadId) {
     if (token && token->cancelled.load()) return "[cancelled]";
     try {
         if (name == "read_file")     return CapOutput(ToolReadFile(args, currentCwd));
@@ -1345,7 +1359,7 @@ std::string DispatchTool(const std::string& name, const nlohmann::json& args,
                        " is disabled by the user (Settings -> "
                        "Enable Grit History tools).";
             if (name == "grit_history_search")
-                return ToolGritHistorySearch(args, memory);
+                return ToolGritHistorySearch(args, memory, currentCwd, threadId);
             return ToolGritHistoryFetch(args, memory);
         }
         if (name == "run_project")

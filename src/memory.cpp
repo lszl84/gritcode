@@ -88,6 +88,12 @@ bool MemoryDB::EnsureSchema() {
     //
     // tokenize=porter+unicode61: porter stemming so "compacting"/"compact"
     // collide; unicode61 normalizes case + diacritics.
+    //
+    // `threads` (title and parent per session id) was added with threads.
+    // It is a separate plain table so `turns` keeps the exact schema 0.5.x
+    // creates and reads; old versions ignore it. Sessions indexed before it
+    // existed (or by 0.5.x) have no row until their next save or a
+    // --reindex, and their hits just show no title.
     return Exec(
         "CREATE VIRTUAL TABLE IF NOT EXISTS turns USING fts5("
         "    cwd, text,"
@@ -96,6 +102,12 @@ bool MemoryDB::EnsureSchema() {
         "    turn_index UNINDEXED,"
         "    timestamp UNINDEXED,"
         "    tokenize = 'porter unicode61'"
+        ")")
+        && Exec(
+        "CREATE TABLE IF NOT EXISTS threads("
+        "    session_id TEXT PRIMARY KEY,"
+        "    title TEXT NOT NULL DEFAULT '',"
+        "    parent TEXT NOT NULL DEFAULT ''"
         ")");
 }
 
@@ -178,6 +190,8 @@ static std::string TextForMessage(const nlohmann::json& m) {
 
 bool MemoryDB::RebuildSession(const std::string& session_id,
                               const std::string& cwd,
+                              const std::string& title,
+                              const std::string& parent,
                               const nlohmann::json& messages,
                               const std::string& timestamp) {
     PERF_SCOPE("MemoryDB::RebuildSession");
@@ -193,6 +207,18 @@ bool MemoryDB::RebuildSession(const std::string& session_id,
             sqlite3_bind_text(del, 1, session_id.c_str(), -1, SQLITE_TRANSIENT);
             sqlite3_step(del);
             sqlite3_finalize(del);
+        }
+    }
+    {
+        sqlite3_stmt* thr = nullptr;
+        if (sqlite3_prepare_v2(db_,
+            "INSERT OR REPLACE INTO threads(session_id, title, parent) VALUES (?, ?, ?)",
+            -1, &thr, nullptr) == SQLITE_OK) {
+            sqlite3_bind_text(thr, 1, session_id.c_str(), -1, SQLITE_TRANSIENT);
+            sqlite3_bind_text(thr, 2, title.c_str(), -1, SQLITE_TRANSIENT);
+            sqlite3_bind_text(thr, 3, parent.c_str(), -1, SQLITE_TRANSIENT);
+            sqlite3_step(thr);
+            sqlite3_finalize(thr);
         }
     }
 
@@ -257,6 +283,9 @@ std::string MemoryDB::FormatSearchHits(const std::vector<Hit>& hits) {
         std::string entry;
         entry += "### [" + std::to_string(i + 1) + "] " + h.cwd +
                  " (" + h.role + ", " + h.timestamp + ")\n";
+        if (!h.title.empty() || h.subagent)
+            entry += "thread: " + (h.title.empty() ? "(untitled)" : h.title) +
+                     (h.subagent ? " (subagent)" : "") + "\n";
         entry += "session_id: " + h.session_id +
                  "  turn_index: " + std::to_string(h.turn_index) +
                  "  full_chars: " + std::to_string(h.full_chars) + "\n";
@@ -304,7 +333,8 @@ std::string MemoryDB::FormatFetchHits(const std::vector<Hit>& hits) {
 
 std::vector<MemoryDB::Hit> MemoryDB::Search(const std::string& query,
                                             int limit,
-                                            const std::string& exclude_session_id) {
+                                            const std::string& exclude_session_id,
+                                            const std::string& cwd) {
     std::vector<Hit> out;
     std::lock_guard<std::mutex> lk(mu_);
     if (!db_ || query.empty()) return out;
@@ -314,14 +344,16 @@ std::vector<MemoryDB::Hit> MemoryDB::Search(const std::string& query,
     // can see what actually matched. length(text) exposes the full turn size
     // so the agent can decide whether grit_history_fetch is worth it.
     std::string sql =
-        "SELECT cwd, role, "
+        "SELECT turns.cwd, role, "
         "       snippet(turns, 1, '[', ']', '…', 20) AS snip, "
-        "       session_id, turn_index, timestamp, "
+        "       turns.session_id, turn_index, timestamp, "
         "       bm25(turns) AS score, "
-        "       length(text) AS full_chars "
-        "FROM turns "
+        "       length(text) AS full_chars, "
+        "       threads.title, threads.parent "
+        "FROM turns LEFT JOIN threads ON threads.session_id = turns.session_id "
         "WHERE turns MATCH ? ";
-    if (!exclude_session_id.empty()) sql += "AND session_id != ? ";
+    if (!exclude_session_id.empty()) sql += "AND turns.session_id != ? ";
+    if (!cwd.empty()) sql += "AND turns.cwd = ? ";
     sql += "ORDER BY bm25(turns) LIMIT ?";
 
     sqlite3_stmt* stmt = nullptr;
@@ -331,6 +363,8 @@ std::vector<MemoryDB::Hit> MemoryDB::Search(const std::string& query,
     sqlite3_bind_text(stmt, idx++, query.c_str(), -1, SQLITE_TRANSIENT);
     if (!exclude_session_id.empty())
         sqlite3_bind_text(stmt, idx++, exclude_session_id.c_str(), -1, SQLITE_TRANSIENT);
+    if (!cwd.empty())
+        sqlite3_bind_text(stmt, idx++, cwd.c_str(), -1, SQLITE_TRANSIENT);
     sqlite3_bind_int(stmt, idx, limit > 0 ? limit : 5);
 
     while (sqlite3_step(stmt) == SQLITE_ROW) {
@@ -347,6 +381,8 @@ std::vector<MemoryDB::Hit> MemoryDB::Search(const std::string& query,
         h.timestamp  = sv(5);
         h.score      = sqlite3_column_double(stmt, 6);
         h.full_chars = sqlite3_column_int(stmt, 7);
+        h.title      = sv(8);
+        h.subagent   = !sv(9).empty();
         out.push_back(std::move(h));
     }
     sqlite3_finalize(stmt);

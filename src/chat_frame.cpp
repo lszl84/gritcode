@@ -2495,7 +2495,8 @@ void ChatFrame::Persist(Thread& t) {
     persistWorker_ = std::thread([this, entry, msgs = std::move(msgs)]() {
         store_.WriteSessionFile(entry, msgs);
         if (memory_.IsOpen())
-            memory_.RebuildSession(entry.id, entry.cwd, msgs, entry.lastUsed);
+            memory_.RebuildSession(entry.id, entry.cwd, entry.title, entry.parent,
+                                   msgs, entry.lastUsed);
     });
 }
 
@@ -2553,7 +2554,8 @@ std::string ChatFrame::FolderContext(const Thread& t) const {
     if (!list.empty()) {
         if (!out.empty()) out += "\n\n";
         out += "Other threads in this folder: separate conversations whose "
-               "history isn't available here." + list;
+               "history isn't available here; grit_history_search with scope "
+               "\"folder\" finds what was said and done in them." + list;
     }
     return out;
 }
@@ -4943,8 +4945,15 @@ void ChatFrame::HandleCompletion(Thread& t, const wxString& errorIfFailed,
     // detaching (detach makes destructor cleanup impossible).
     if (t.toolWorker.joinable()) t.toolWorker.join();
     bool enableGrit = Preferences::GetEnableGritHistory();
+    // History search leaves out this thread (it's in context), unless
+    // compaction summarised part of it away: then its old turns are worth
+    // finding again.
+    const bool compacted = std::ranges::any_of(t.history, [](const nlohmann::json& m) {
+        return m.is_object() && m.value("isSummary", false);
+    });
     ++t.gen;
     t.toolWorker = std::thread([this, jobs, token, cwd = t.cwd, enableGrit,
+                                searchExclude = compacted ? std::string() : t.id,
                                 id = t.id, gen = t.gen]() {
         std::vector<ToolBatchEntry> results;
         results.reserve(jobs->size());
@@ -4956,7 +4965,7 @@ void ChatFrame::HandleCompletion(Thread& t, const wxString& errorIfFailed,
                 r = std::move(job.parseError);
             } else {
                 r = DispatchTool(job.name, job.argsParsed, token.get(),
-                                 &memory_, cwd, enableGrit);
+                                 &memory_, cwd, enableGrit, searchExclude);
             }
             results.push_back({std::move(job.id), std::move(job.name),
                                std::move(job.argsJson), std::move(r)});

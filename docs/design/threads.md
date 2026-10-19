@@ -110,6 +110,25 @@ red and restore the previous text. Nothing is generated unasked: a new thread
 in a folder with other threads and no brief only shows a one-line hint
 linking to the dialog.
 
+## History search
+
+Every thread's turns are indexed in `memory.db` under its own id when it is
+saved, and `--reindex` walks every session file. `grit_history_search` leaves
+out the calling thread (its history is already in context), takes `scope:
+"folder"` to keep to the thread's folder (default: all folders), and shows
+each hit's thread title, marking subagents. Over `--mcp-stdio` the folder is
+the server's working directory and nothing is excluded. The tool description
+and the "other threads" list in the prompt point a fresh thread at its
+folder's other threads.
+
+Storage: titles and parents live in a new plain table `threads(session_id,
+title, parent)` next to the FTS5 `turns` table, which keeps the exact 0.5.x
+schema. 0.5.x only creates, reads and writes `turns`, so it ignores the new
+table, and old rows need no rebuild: a session without a `threads` row (one
+indexed by 0.5.x or before this step) shows no title until its next save or
+a `--reindex`. Nothing is deleted except a session's own rows on its
+rebuild, as before; turns of sessions with no file any more stay searchable.
+
 ## UI
 
 The session dropdown lists the current folder's threads (running ones marked,
@@ -135,6 +154,6 @@ the decision tray come later (see `orchestrator-conversation.md`).
    threads with state (running, waiting, failed, done).
 6. Worktree threads: a thread can run in its own git worktree, so several
    threads write in one project at once; diff and merge back.
-7. Project-scoped history search for the memory tool.
+7. Project-scoped history search for the memory tool. (done)
 
 The orchestrator ideas (`orchestrator-conversation.md`) build on 2 and 5.
