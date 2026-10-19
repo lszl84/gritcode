@@ -5025,14 +5025,11 @@ void ChatFrame::ReportToParent(Thread& child, bool failed) {
             ? "Error: the subagent was cancelled."
             : "Error: the subagent failed: " + child.failure;
     } else {
-        auto last = std::ranges::find_if(child.history.rbegin(), child.history.rend(),
-            [](const nlohmann::json& m) {
-                return StringField(m, "role") == "assistant"
-                       && !StringField(m, "content").empty();
-            });
-        e->result = last != child.history.rend()
-            ? Truncated(StringField(*last, "content"), 30'000)
-            : "The subagent finished without a report.";
+        const auto& last = child.history.back();
+        const std::string report = StringField(last, "role") == "assistant"
+                                       ? StringField(last, "content") : std::string();
+        e->result = report.empty() ? "The subagent finished without a report."
+                                   : Truncated(report, 30'000);
     }
     OnToolBatchDone(*p);
 }
