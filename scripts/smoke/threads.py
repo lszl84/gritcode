@@ -15,6 +15,7 @@ import json
 import os
 import random
 import shutil
+import socket
 import subprocess
 import sys
 import tempfile
@@ -41,12 +42,12 @@ def launch():
     env = dict(os.environ, GRIT_TEST_DATA=DATA)
     out = subprocess.check_output([LAUNCHER, BIN, f"GRIT_MCP_PORT={PORT}", *MODEL_ENV],
                                   env=env, stderr=subprocess.DEVNULL)
-    pid, g = int(out), Grit(port=PORT)
+    # Wait for this instance's own port before sending anything.
     for _ in range(100):
         try:
-            g.status()
-            return pid, g
-        except (ConnectionError, OSError):
+            socket.create_connection(("127.0.0.1", PORT), timeout=1).close()
+            return int(out), Grit(port=PORT)
+        except OSError:
             time.sleep(0.2)
     sys.exit("gritcode did not start")
 

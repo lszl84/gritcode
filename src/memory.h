@@ -25,6 +25,8 @@ public:
         double score = 0;         // BM25 score (lower = better); 0 for Fetch rows
         int full_chars = 0;       // byte size of the full turn text — lets the
                                   // agent decide whether a Fetch is worth it
+        std::string title;        // thread title (Search only; empty if unknown)
+        bool subagent = false;    // the thread is a subagent's (Search only)
     };
 
     MemoryDB() = default;
@@ -53,9 +55,12 @@ public:
     // Bulk re-index every turn of a session. Wraps a transaction around
     // ClearSession + IndexTurn calls. `messages` is a JSON array of
     // {role, content, ...} entries (gritcode's wire format). System
-    // messages and tool messages with no content are skipped.
+    // messages and tool messages with no content are skipped. The thread's
+    // title and parent go into the `threads` side table.
     bool RebuildSession(const std::string& session_id,
                         const std::string& cwd,
+                        const std::string& title,
+                        const std::string& parent,
                         const nlohmann::json& messages,
                         const std::string& timestamp);
 
@@ -64,10 +69,12 @@ public:
     // unmodified. Bad queries (FTS5 syntax errors) return an empty vector.
     // If exclude_session_id is non-empty, rows with that session_id are
     // excluded from results — used to keep the agent from re-surfacing
-    // turns from the very session it's currently in.
+    // turns from the very session it's currently in. A non-empty `cwd`
+    // keeps only that folder's turns (all of its threads).
     std::vector<Hit> Search(const std::string& query,
                             int limit,
-                            const std::string& exclude_session_id);
+                            const std::string& exclude_session_id,
+                            const std::string& cwd = {});
 
     // Return a window of consecutive turns around a given (session_id,
     // turn_index). Full turn text is returned (no snippetting) — this is the

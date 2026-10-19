@@ -35,18 +35,21 @@ struct ToolCancelToken {
 //
 // `token` may be null for callers that don't support cancellation; when set,
 // long-running tools (bash) periodically check it and abort cleanly.
-// `memory` + `currentSessionId` back the grit_history_search/fetch tools.
+// `memory` backs the grit_history_search/fetch tools.
 // Pass nullptr for `memory` if the index isn't open (those tools return a
 // "Memory index unavailable" string in that case). When enableGritHistory is
 // false, grit_history_search/fetch return a "disabled by the user" error.
 // `currentCwd` is the calling thread's folder: relative paths resolve
-// against it and bash runs there (the process cwd is never used).
+// against it and bash runs there (the process cwd is never used); it is also
+// the folder of grit_history_search's scope "folder". `threadId` (the
+// calling thread, or empty) is left out of grit_history_search results.
 std::string DispatchTool(const std::string& name,
                          const nlohmann::json& args,
                          ToolCancelToken* token,
                          MemoryDB* memory,
                          const std::string& currentCwd,
-                         bool enableGritHistory);
+                         bool enableGritHistory,
+                         const std::string& threadId = {});
 
 // Run a shell command without the 30s timeout. Used by the Play button for
 // long-running builds. Same cancellation semantics as ToolBash (SIGTERM on
