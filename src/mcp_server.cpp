@@ -193,8 +193,8 @@ json MCPServer::HandleRequest(const json& request) {
     if (method == "togglePanel") {
         if (!cb_.togglePanel) return err(-32603, "not ready");
         std::string panel = params.value("panel", std::string());
-        if (panel != "editor" && panel != "import")
-            return err(-32602, "'panel' must be \"editor\" or \"import\"");
+        if (panel != "editor" && panel != "import" && panel != "threads")
+            return err(-32602, "'panel' must be \"editor\", \"import\" or \"threads\"");
         return okResult(cb_.togglePanel(panel));
     }
     if (method == "getPanes") {

@@ -100,12 +100,13 @@ struct MCPCallbacks {
     // {started: false, reason: "streaming"} while a turn is in flight.
     std::function<nlohmann::json()> play;
 
-    // Toggle a side panel ("editor" or "import") as its toolbar button would,
-    // then return getPanes().
+    // Toggle a side panel ("editor", "import" or "threads") as its toolbar
+    // button would, then return getPanes().
     std::function<nlohmann::json(const std::string&)> togglePanel;
 
     // Pixel widths of the window client area and each visible pane:
-    // {window, import, chat, editor} (0 for a hidden pane).
+    // {window, threads, import, chat, editor} (0 for a hidden pane), and the
+    // thread pane's rows (threadRows: id, title, detail, child).
     std::function<nlohmann::json()> getPanes;
 
     // Scroll the chat so block `index` is at the top; returns {ok}.
