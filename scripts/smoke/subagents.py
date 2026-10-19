@@ -3,13 +3,14 @@
 Smoke test for subagents: drives a hidden gritcode over the control API.
 
 Usage:
-    python3 scripts/smoke/subagents.py build/gritcode
+    python3 scripts/smoke/subagents.py [--live] build/gritcode
 
 Runs the app only through ~/.local/share/grit-dev/run-hidden.sh (invisible
 Xvfb, temp HOME and data dir). Claude Code subagents are checked against a
 fake `claude` that replays a few events in the shape the real CLI sends. The
-`task` tool needs a live model: the free one (Kilo Free) is flaky, so those
-results are informational, and DeepSeek is skipped without an API key.
+`task` tool is checked on the free model (Kilo Free) pointed at a local fake
+(fake_model.py). With --live it uses the real Kilo Free, which is flaky, so
+those results are informational, plus DeepSeek when an API key is set.
 """
 
 import json
@@ -22,12 +23,17 @@ import sys
 import tempfile
 import time
 
-sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
+HERE = os.path.dirname(os.path.abspath(__file__))
+sys.path[:0] = [HERE, os.path.join(HERE, "..")]
+from fake_model import serve  # noqa: E402
 from grit import Grit  # noqa: E402
 
 LAUNCHER = os.path.expanduser("~/.local/share/grit-dev/run-hidden.sh")
 STUBS = os.path.expanduser("~/.local/share/grit-dev/stubs")
-BIN = os.path.abspath(sys.argv[1] if len(sys.argv) > 1 else "build/gritcode")
+LIVE = "--live" in sys.argv
+ARGS = [a for a in sys.argv[1:] if a != "--live"]
+BIN = os.path.abspath(ARGS[0] if ARGS else "build/gritcode")
+MODEL_ENV = [] if LIVE else [f"GRIT_FREE_MODEL_URL={serve()}"]
 DATA = tempfile.mkdtemp(prefix="grit-subagents-")
 FAKE = os.path.join(DATA, "fakebin")
 PORT = random.randint(18900, 18999)
@@ -51,7 +57,7 @@ with open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "events.jsonl
 def launch():
     env = dict(os.environ, GRIT_TEST_DATA=DATA)
     path = f"PATH={FAKE}:{STUBS}:{os.environ['PATH']}"
-    out = subprocess.check_output([LAUNCHER, BIN, f"GRIT_MCP_PORT={PORT}", path],
+    out = subprocess.check_output([LAUNCHER, BIN, f"GRIT_MCP_PORT={PORT}", path, *MODEL_ENV],
                                   env=env, stderr=subprocess.DEVNULL)
     pid, g = int(out), Grit(base_port=PORT)
     for _ in range(100):
@@ -115,6 +121,24 @@ def text(g):
 
 def blocks(g):
     return " | ".join(b["preview"] for b in g.blocks())
+
+
+def tool_results(g, name):
+    return [m["content"] for m in g.conversation() if m["role"] == "tool" and m.get("name") == name]
+
+
+# ---- prompts the fake model (fake_model.py) acts on ----
+
+def bash(cmd):
+    return f"Call the bash tool now with exactly this command: {cmd}"
+
+
+def call_tools(*calls):
+    return "Call these tools now: " + json.dumps(calls)
+
+
+def task(description, prompt):
+    return ("task", {"description": description, "prompt": prompt})
 
 
 # ---- fake Claude Code events ----
@@ -237,26 +261,71 @@ check(set(kids) == {"Count files", "Old style task"}, "child threads restored wi
 g.select_thread(top)
 check("Subagent thread: Count files" in blocks(g), "the restored parent links to the child")
 
-print("-- task tool (live, informational)")
-models = [(0, "Kilo Free")]
-if g.preferences().get("hasDeepseekKey"):
-    models.append((2, "DeepSeek"))
+if LIVE:
+    print("-- task tool (live, informational)")
+    models = [(0, "Kilo Free")]
+    if g.preferences().get("hasDeepseekKey"):
+        models.append((2, "DeepSeek"))
+    else:
+        print("skip  DeepSeek subagents (no API key)")
+    for row, name in models:
+        g.set_model(row)
+        p = g.new_thread(A)["threadId"]
+        g.send("Call the task tool twice in one response, so both run in parallel: "
+               "first with description 'Echo one' and prompt 'Run the bash command "
+               "echo SUB-ONE and report its output.', then with description 'Echo two' "
+               "and prompt 'Run the bash command echo SUB-TWO and report its output.' "
+               "Then tell me what they reported.")
+        info(wait_idle(g, 300), f"[{name}] the turn finished")
+        kids = children(g, p)
+        info(len(kids) == 2, f"[{name}] two child threads")
+        tools = [m for m in g.conversation() if m["role"] == "tool" and m.get("name") == "task"]
+        info([("SUB-ONE" in t["content"], "SUB-TWO" in t["content"]) for t in tools]
+             == [(True, False), (False, True)], f"[{name}] reports in call order")
 else:
-    print("skip  DeepSeek subagents (no API key)")
-for row, name in models:
-    g.set_model(row)
+    print("-- task tool")
+    g.set_model(0)
     p = g.new_thread(A)["threadId"]
-    g.send("Call the task tool twice in one response, so both run in parallel: "
-           "first with description 'Echo one' and prompt 'Run the bash command "
-           "echo SUB-ONE and report its output.', then with description 'Echo two' "
-           "and prompt 'Run the bash command echo SUB-TWO and report its output.' "
-           "Then tell me what they reported.")
-    info(wait_idle(g, 300), f"[{name}] the turn finished")
-    kids = children(g, p)
-    info(len(kids) == 2, f"[{name}] two child threads")
-    tools = [m for m in g.conversation() if m["role"] == "tool" and m.get("name") == "task"]
-    info([("SUB-ONE" in t["content"], "SUB-TWO" in t["content"]) for t in tools]
-         == [(True, False), (False, True)], f"[{name}] reports in call order")
+    g.send(call_tools(task("Echo one", bash("sleep 3; echo SUB-ONE")),
+                      task("Echo two", bash("echo SUB-TWO"))))
+    check(wait_for(lambda: sum(t["running"] for t in children(g, p)) == 2),
+          "two task calls in one batch run at once")
+    check(wait_idle(g), "the turn finished")
+    check(sorted(t["title"] for t in children(g, p)) == ["Echo one", "Echo two"],
+          "two child threads")
+    reports = tool_results(g, "task")
+    check([("SUB-ONE" in r, "SUB-TWO" in r) for r in reports] == [(True, False), (False, True)],
+          "reports in call order, though the second finished first")
+    last = g.conversation()[-1]
+    check(last["role"] == "assistant" and "SUB-ONE" in last["content"],
+          "the parent continues with the reports")
+
+    p = g.new_thread(A)["threadId"]
+    g.send(call_tools(task("Fails", "FAIL-500")))
+    check(wait_idle(g), "[failing child] the turn finished")
+    check([t["failed"] for t in children(g, p)] == [True], "[failing child] the child failed")
+    reports = tool_results(g, "task")
+    check(len(reports) == 1 and reports[0].startswith("Error: the subagent failed")
+          and "HTTP 500" in reports[0], "[failing child] the parent gets an error result")
+
+    p = g.new_thread(A)["threadId"]
+    g.send(call_tools(task("Writes", call_tools(("write_file", {"path": "w.txt", "content": "x"})))))
+    check(wait_idle(g), "[write_file] the turn finished")
+    check(not os.path.exists(os.path.join(A, "w.txt")), "[write_file] the child wrote nothing")
+    for t in children(g, p):
+        g.select_thread(t["id"])
+    refused = tool_results(g, "write_file")
+    check(len(refused) == 1 and "read-only" in refused[0], "[write_file] the child's call is refused")
+
+    p = g.new_thread(A)["threadId"]
+    g.send(call_tools(task("Sleeps", bash("sleep 5; touch late.txt"))))
+    check(wait_for(lambda: any(t["running"] for t in children(g, p))), "[cancel] the child runs")
+    time.sleep(2)  # into the child's bash call
+    g.cancel()
+    check(wait_idle(g, 5), "[cancel] cancelling the parent stops the child")
+    check([t["failed"] for t in children(g, p)] == [True], "[cancel] the child is marked as failed")
+    time.sleep(5)
+    check(not os.path.exists(os.path.join(A, "late.txt")), "[cancel] the child's bash was killed")
 stop(pid)
 
 print(f"{failures} failure(s); data in {DATA}" if failures else "all ok")

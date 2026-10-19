@@ -3,11 +3,12 @@
 Smoke test for threads: drives a hidden gritcode over the control API.
 
 Usage:
-    python3 scripts/smoke/threads.py build/gritcode
+    python3 scripts/smoke/threads.py [--live] build/gritcode
 
 Runs the app only through ~/.local/share/grit-dev/run-hidden.sh (invisible
-Xvfb, temp HOME and data dir). Turns use the free model (Kilo Free), so a run
-can fail on model errors (HTTP 503) rather than on gritcode.
+Xvfb, temp HOME and data dir). Turns use the free model (Kilo Free), pointed
+at a local fake (fake_model.py) unless --live: the real one is flaky, so a
+live run can fail on model errors rather than on gritcode.
 """
 
 import json
@@ -19,11 +20,16 @@ import sys
 import tempfile
 import time
 
-sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
+HERE = os.path.dirname(os.path.abspath(__file__))
+sys.path[:0] = [HERE, os.path.join(HERE, "..")]
+from fake_model import serve  # noqa: E402
 from grit import Grit  # noqa: E402
 
 LAUNCHER = os.path.expanduser("~/.local/share/grit-dev/run-hidden.sh")
-BIN = os.path.abspath(sys.argv[1] if len(sys.argv) > 1 else "build/gritcode")
+LIVE = "--live" in sys.argv
+ARGS = [a for a in sys.argv[1:] if a != "--live"]
+BIN = os.path.abspath(ARGS[0] if ARGS else "build/gritcode")
+MODEL_ENV = [] if LIVE else [f"GRIT_FREE_MODEL_URL={serve()}"]
 DATA = tempfile.mkdtemp(prefix="grit-threads-")
 PORT = int(os.environ.get("GRIT_MCP_PORT") or random.randint(18800, 18899))
 INDEX = os.path.join(DATA, "gritcode", "sessions.json")
@@ -33,7 +39,7 @@ failures = 0
 
 def launch():
     env = dict(os.environ, GRIT_TEST_DATA=DATA)
-    out = subprocess.check_output([LAUNCHER, BIN, f"GRIT_MCP_PORT={PORT}"],
+    out = subprocess.check_output([LAUNCHER, BIN, f"GRIT_MCP_PORT={PORT}", *MODEL_ENV],
                                   env=env, stderr=subprocess.DEVNULL)
     pid, g = int(out), Grit(base_port=PORT)
     for _ in range(100):
@@ -128,6 +134,17 @@ check(bool(first and second) and float(second) > float(first),
 print("-- opening a folder")
 g.switch_session(A)
 check(g.switch_session(B).get("threadId") == b2, "it shows the folder's most recent thread")
+
+if not LIVE:
+    print("-- SSE framing")
+    g.select_thread(a)
+    for marker in ("SSE-CRLF", "SSE-UNTERMINATED"):
+        g.send(f"{marker} " + bash(f"echo {marker} > framing.txt"))
+        check(wait_idle(g), f"[{marker}] the turn finished")
+        check(read(os.path.join(A, "framing.txt")) == marker, f"[{marker}] the bash call ran")
+        last = g.conversation()[-1]
+        check(last["role"] == "assistant" and last["content"].startswith("Results:"),
+              f"[{marker}] the reply after it arrived")
 
 print("-- a turn that fails in the background")
 g.select_thread(b)
