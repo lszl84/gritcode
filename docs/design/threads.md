@@ -5,8 +5,8 @@ run at the same time, later with subagents. Small, fast, data-oriented.
 
 Rules: plain structs and free/member functions on data. No new class
 hierarchies, virtual interfaces, managers, executors or event buses. Use C++20
-and the standard library well. Every step has a line budget (net added lines in
-`src/`, tests separate) that is checked before merging.
+and the standard library well. Aim for the simplest clean solution that reads
+naturally; no code golf, and no speculative generality.
 
 ## Data
 
@@ -60,10 +60,10 @@ The session dropdown lists the current folder's threads (running ones marked)
 plus "New thread" and "Open folder…". A left thread pane, the agent map and
 the decision tray come later (see `orchestrator-conversation.md`).
 
-## Steps and budgets
+## Steps
 
 1. Threads: struct, multi-thread runtime, store, per-thread cwd, write queue,
-   dropdown. Budget +700 src, +250 tests.
+   dropdown.
 2. Subagents: a DeepSeek `task` tool running a child thread headless, and
-   Claude Code subagent events shown as child threads. Budget +400 src.
-3. Worktree threads (only when the UI uses them). Budget +250 src.
+   Claude Code subagent events shown as child threads.
+3. Worktree threads (only when the UI uses them).
