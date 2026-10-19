@@ -4,6 +4,7 @@
 
 #include <nlohmann/json.hpp>
 #include <cstdio>
+#include <filesystem>
 #include <iostream>
 #include <string>
 
@@ -31,8 +32,10 @@ static json SearchToolDef() {
          "no clearly relevant hits, STOP and answer from what you have (or "
          "ask the user) - do not fire speculative variant queries. "
          "Query: 2-5 keywords. Returns short snippets (~20-token window) "
-         "with session_id, turn_index, and full_chars. Follow up with "
-         "grit_history_fetch to read the full turn + surrounding context."},
+         "with the thread title, session_id, turn_index, and full_chars. "
+         "Follow up with grit_history_fetch to read the full turn + "
+         "surrounding context. scope \"folder\" keeps only conversations "
+         "in the current working directory: the project's other threads."},
         {"inputSchema", {
             {"type", "object"},
             {"properties", {
@@ -44,6 +47,11 @@ static json SearchToolDef() {
                     {"type", "integer"},
                     {"description", "Max results (default 5, max 20)."},
                     {"default", 5}
+                }},
+                {"scope", {
+                    {"type", "string"},
+                    {"enum", json::array({"all", "folder"})},
+                    {"description", "\"all\" (default): every project. \"folder\": only the current working directory's threads."}
                 }}
             }},
             {"required", json::array({"query"})}
@@ -173,28 +181,13 @@ int RunMcpStdioServer(const std::string& runProjectCwd) {
                 text = DispatchTool(name, args, nullptr, nullptr, runProjectCwd, false);
             } else if (!memory.IsOpen()) {
                 text = "Memory index is not available.";
-            } else if (name == "grit_history_search") {
-                std::string query = args.value("query", "");
-                int limit = args.value("limit", 5);
-                if (limit < 1) limit = 1;
-                if (limit > 20) limit = 20;
-                if (query.empty()) {
-                    text = "Error: 'query' is required.";
-                } else {
-                    auto hits = memory.Search(query, limit, "");
-                    text = MemoryDB::FormatSearchHits(hits);
-                }
-            } else if (name == "grit_history_fetch") {
-                std::string sid = args.value("session_id", "");
-                int ti = args.value("turn_index", -1);
-                int before = args.value("before", 2);
-                int after  = args.value("after", 2);
-                if (sid.empty() || ti < 0) {
-                    text = "Error: 'session_id' and 'turn_index' are required.";
-                } else {
-                    auto hits = memory.Fetch(sid, ti, before, after);
-                    text = MemoryDB::FormatFetchHits(hits);
-                }
+            } else if (name == "grit_history_search" || name == "grit_history_fetch") {
+                // The client starts this server in its project folder, which
+                // is the folder of scope "folder". The calling conversation
+                // isn't known here, so nothing is excluded.
+                std::error_code ec;
+                const std::string cwd = std::filesystem::current_path(ec).string();
+                text = DispatchTool(name, args, nullptr, &memory, cwd, true);
             } else {
                 std::cout << MakeError(id, -32601, "unknown tool: " + name).dump() << "\n";
                 continue;
