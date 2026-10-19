@@ -84,6 +84,7 @@ constexpr int ID_EDITOR_RELOAD      = wxID_HIGHEST + 23;
 constexpr int ID_EDITOR_CLOSE       = wxID_HIGHEST + 24;
 constexpr int ID_EDITOR_SHOW_IN_FILES = wxID_HIGHEST + 25;
 constexpr int ID_MODEL_REFRESH        = wxID_HIGHEST + 26;
+constexpr int ID_THREADS              = wxID_HIGHEST + 29;
 
 // Side-panel widths (pixels). The import pane lives in the outer splitter and
 // the editor pane lives in the inner (chat | editor) splitter, so the window
@@ -93,6 +94,9 @@ constexpr int kFileTreeWidth    = 280;   // fixed (non-resizable) file tree widt
 constexpr int kEditorTextWidth  = kFileTreeWidth * 5 / 2;  // editor text = 2.5x tree
 constexpr int kEditorPaneWidth  = kFileTreeWidth + kEditorTextWidth;  // whole right pane
 constexpr int kMainMinClientW   = 220;   // min chat-pane width with no panels
+// The thread pane sits left of the splitters in the frame sizer, at a fixed
+// width (no sash), so the window grows by exactly this much.
+constexpr int kThreadPaneWidth  = 240;
 // Chat-pane widths below which toolbar items hide, least important first.
 constexpr int kToolbarLabelsW   = 640;   // "Thread:" / "Model:" captions
 constexpr int kToolbarSettingsW = 500;   // settings (and debug Log) button
@@ -811,6 +815,17 @@ std::string BaseSystemPrompt() {
         "what you have rather than firing speculative variants.";
 }
 
+// When a thread was last used, short: "14:32" today, "Oct 12" earlier this
+// year, else the date.
+wxString LastUsedLabel(const std::string& iso) {
+    wxDateTime when;
+    if (!when.ParseISOCombined(wxString::FromUTF8(iso))) return wxString();
+    const wxDateTime now = wxDateTime::Now();
+    if (when.IsSameDate(now)) return when.Format("%H:%M");
+    if (when.GetYear() == now.GetYear()) return when.Format("%b %d");
+    return when.FormatISODate();
+}
+
 // Format an absolute path for display in the dropdown. Replaces $HOME with
 // "~" and drops trailing slashes — matches the typical shell/IDE convention.
 wxString DisplayPath(const std::string& cwd) {
@@ -1137,6 +1152,11 @@ ChatFrame::ChatFrame()
                                         wxBORDER_NONE);
     hamburgerBtn_->SetToolTip(wxString::FromUTF8("Toggle session reference"));
 
+    wxBitmapBundle bbThreads = LoadThemedSvgIcon("threads.svg", kIconSize, accent);
+    threadsBtn_ = new wxBitmapButton(panel, ID_THREADS, bbThreads,
+                                     wxDefaultPosition, kBtnSize, wxBORDER_NONE);
+    threadsBtn_->SetToolTip(wxString::FromUTF8("Toggle thread list"));
+
     sessionLabel_ = new wxStaticText(panel, wxID_ANY, "Thread:");
     sessionChoice_ = new wxChoice(panel, ID_SESSION);
     sessionChoice_->SetMinSize(FromDIP(wxSize(160, -1)));
@@ -1168,6 +1188,7 @@ ChatFrame::ChatFrame()
                                   wxBORDER_NONE);
     playBtn_->SetToolTip(wxString::FromUTF8("Build and run project"));
 
+    toolbarRow->Add(threadsBtn_, 0, wxALIGN_CENTER_VERTICAL | wxRIGHT, 2);
     toolbarRow->Add(hamburgerBtn_, 0, wxALIGN_CENTER_VERTICAL | wxRIGHT, 6);
     toolbarRow->Add(sessionLabel_, 0, wxALIGN_CENTER_VERTICAL | wxRIGHT, 6);
     // Session and model both get a small proportion so they share resize delta;
@@ -1391,6 +1412,31 @@ ChatFrame::ChatFrame()
         e.Skip();
     });
 
+    // Thread pane — left of the splitters, hidden unless toggled on.
+    threadPane_ = new wxPanel(this);
+    {
+        auto* newBtn = new wxButton(threadPane_, wxID_ANY, "New thread");
+        newBtn->Bind(wxEVT_BUTTON, [this](wxCommandEvent&) { NewThread(activeCwd_); });
+        threadList_ = new ThreadList(threadPane_);
+        // Switch after the click is handled: the switch replaces the rows.
+        threadList_->Bind(wxEVT_LISTBOX, [this](wxCommandEvent& e) {
+            const std::string id = threadList_->Rows()[e.GetSelection()].id;
+            CallAfter([this, id] {
+                if (!SelectThread(id)) RefreshSessionChoice();  // snap back
+            });
+        });
+        threadList_->Bind(wxEVT_CONTEXT_MENU, &ChatFrame::OnThreadListContextMenu, this);
+        auto* sizer = new wxBoxSizer(wxVERTICAL);
+        sizer->Add(newBtn, 0, wxEXPAND | wxBOTTOM, 4);
+        sizer->Add(threadList_, 1, wxEXPAND);
+        threadPane_->SetSizer(sizer);
+        threadPane_->SetMinSize(wxSize(kThreadPaneWidth, -1));
+        threadPane_->Show(Preferences::GetShowThreadPane());
+    }
+    threadPaneTimer_.SetOwner(this);
+    Bind(wxEVT_TIMER, [this](wxTimerEvent&) { UpdateThreadPane(FolderRows()); },
+         threadPaneTimer_.GetId());
+
     splitter_->Initialize(innerSplitter_);   // Right pane only at start
     innerSplitter_->Initialize(mainPanel_);  // Editor hidden at start
 
@@ -1398,10 +1444,13 @@ ChatFrame::ChatFrame()
                          &ChatFrame::OnInnerSashChanging, this);
 
     auto* frameSizer = new wxBoxSizer(wxHORIZONTAL);
+    frameSizer->Add(threadPane_, 0, wxEXPAND | wxTOP | wxBOTTOM | wxLEFT, FromDIP(kEdgePad));
     // Top/bottom padding wraps the whole splitter so its sashes are inset
     // from the window edges instead of running edge-to-edge.
     frameSizer->Add(splitter_, 1, wxEXPAND | wxTOP | wxBOTTOM, FromDIP(kEdgePad));
     SetSizer(frameSizer);
+    // A remembered open pane widens the initial window by its width.
+    SetSize(GetSize().x + ThreadPaneW(), GetSize().y);
 
     { PERF_SCOPE("SessionStore::Init"); store_.Init(); }
     // Open the FTS5 memory index. Failure (e.g. read-only home) is silent;
@@ -1456,6 +1505,7 @@ ChatFrame::ChatFrame()
     Bind(wxEVT_BUTTON, &ChatFrame::OnExport, this, ID_EXPORT);
     Bind(wxEVT_BUTTON, &ChatFrame::OnHamburger, this, ID_HAMBURGER);
     Bind(wxEVT_BUTTON, &ChatFrame::OnEditorToggle, this, ID_EDITOR);
+    Bind(wxEVT_BUTTON, &ChatFrame::OnThreadPaneToggle, this, ID_THREADS);
     fileTree_->Bind(wxEVT_TREE_ITEM_EXPANDING, &ChatFrame::OnEditorTreeExpanding, this);
     fileTree_->Bind(wxEVT_TREE_ITEM_COLLAPSED, &ChatFrame::OnEditorTreeCollapsed, this);
     fileTree_->Bind(wxEVT_TREE_SEL_CHANGED, &ChatFrame::OnEditorTreeSelect, this);
@@ -1803,7 +1853,13 @@ ChatFrame::ChatFrame()
         });
     };
     auto panes = [this]() -> nlohmann::json {
+        nlohmann::json rows = nlohmann::json::array();
+        for (const ThreadRow& r : threadList_->Rows())
+            rows.push_back({{"id", r.id}, {"title", r.title.utf8_string()},
+                            {"detail", r.detail.utf8_string()}, {"child", r.child}});
         return {{"window", GetClientSize().x},
+                {"threads", threadPane_->IsShown() ? threadPane_->GetSize().x : 0},
+                {"threadRows", std::move(rows)},
                 {"import", splitter_->IsSplit() ? importPanel_->GetSize().x : 0},
                 {"chat", mainPanel_->GetSize().x},
                 {"editor", innerSplitter_->IsSplit() ? editorPanel_->GetSize().x : 0}};
@@ -1812,6 +1868,7 @@ ChatFrame::ChatFrame()
         return guiSync([this, panel, panes]() -> nlohmann::json {
             wxCommandEvent ev(wxEVT_BUTTON);
             if (panel == "editor") OnEditorToggle(ev);
+            else if (panel == "threads") OnThreadPaneToggle(ev);
             else OnHamburger(ev);
             return panes();
         });
@@ -1840,7 +1897,7 @@ ChatFrame::ChatFrame()
     SetDropTarget(new FrameFileDropTarget(this));
 
     input_->SetFocus();
-    SetMinClientSize(wxSize(kMainMinClientW, 400));
+    SetMinClientSize(wxSize(kMainMinClientW + ThreadPaneW(), 400));
 
 #ifdef __WXOSX__
     // Tahoe look: native styling only, the layout above stays shared.
@@ -2235,6 +2292,7 @@ void ChatFrame::ApplyTheme() {
     importCanvas_->SetBgColour(wxSystemSettings::GetColour(wxSYS_COLOUR_WINDOW));
     importCanvas_->ApplyTheme();
     changeBtn_->SetForegroundColour(importCanvas_->GetPalette().toolAccent);
+    threadList_->Refresh();
     ReloadToolbarIcons();
     if (!Active().pendingQueue.empty()) RebuildChips();
 
@@ -2252,6 +2310,7 @@ void ChatFrame::ReloadToolbarIcons() {
     exportBtn_->SetBitmap(LoadThemedSvgIcon("export.svg", kIconSize, accent));
     hamburgerBtn_->SetBitmap(LoadThemedSvgIcon("hamburger.svg", kIconSize, accent));
     editorBtn_->SetBitmap(LoadThemedSvgIcon("editor.svg", kIconSize, accent));
+    threadsBtn_->SetBitmap(LoadThemedSvgIcon("threads.svg", kIconSize, accent));
 }
 
 ChatFrame::Thread* ChatFrame::Find(const std::string& id) {
@@ -2280,50 +2339,103 @@ wxString ChatFrame::ThreadLabelOf(const std::string& id) {
     return e != entries.end() ? ThreadLabel(e->id, e->cwd, e->title) : wxString("thread");
 }
 
-void ChatFrame::RefreshSessionChoice() {
-    PERF_SCOPE("RefreshSessionChoice");
+std::vector<ThreadRow> ChatFrame::FolderRows() {
     // Open threads carry the live state (running, title); the index adds the
     // folder's threads that haven't been opened in this run.
     struct Row {
-        std::string id;
+        ThreadRow row;
         std::string parent;
-        wxString label;
         std::string lastUsed;
     };
     std::vector<Row> rows;
-    for (const Thread& t : threads_) {
+    for (Thread& t : threads_) {
         if (t.cwd != activeCwd_) continue;
-        wxString label = ThreadLabel(t.id, t.cwd, t.title);
-        if (t.streaming) label = wxString::FromUTF8("\xE2\x97\x8F ") + label;  // "● "
-        else if (t.failureNotice && !Shown(t))
-            label = wxString::FromUTF8("\xE2\x9A\xA0 ") + label;  // "⚠ ", until viewed
-        rows.push_back({t.id, t.parent, label, t.lastUsed});
+        ThreadRow r{.id = t.id, .title = ThreadLabel(t.id, t.cwd, t.title),
+                    .detail = LastUsedLabel(t.lastUsed)};
+        if (t.streaming) {
+            r.state = t.waiting ? ThreadRow::State::Waiting : ThreadRow::State::Running;
+            r.detail = CurrentStep(t);
+        } else if (t.failureNotice && !Shown(t)) {  // until viewed
+            r.state = ThreadRow::State::Failed;
+            r.detail = t.failureNotice->visibleText.BeforeFirst('\n');
+        }
+        rows.push_back({std::move(r), t.parent, t.lastUsed});
     }
     for (const auto& e : store_.List()) {
-        if (e.cwd == activeCwd_ && !Find(e.id))
-            rows.push_back({e.id, e.parent, ThreadLabel(e.id, e.cwd, e.title), e.lastUsed});
+        if (e.cwd != activeCwd_ || Find(e.id)) continue;
+        rows.push_back({{.id = e.id, .title = ThreadLabel(e.id, e.cwd, e.title),
+                         .detail = LastUsedLabel(e.lastUsed)},
+                        e.parent, e.lastUsed});
     }
     std::ranges::stable_sort(rows, std::greater{}, &Row::lastUsed);
 
-    // Subagent threads go right under their parent, indented.
-    std::vector<const Row*> ordered;
+    // Subagent threads go right under their parent.
     auto listed = [&rows](const std::string& id) {
-        return std::ranges::find(rows, id, &Row::id) != rows.end();
+        return std::ranges::find(rows, id, [](const Row& r) { return r.row.id; }) != rows.end();
     };
+    std::vector<ThreadRow> ordered;
     for (const Row& r : rows) {
         if (!r.parent.empty() && listed(r.parent)) continue;
-        ordered.push_back(&r);
-        for (const Row& c : rows)
-            if (c.parent == r.id) ordered.push_back(&c);
+        ordered.push_back(r.row);
+        for (const Row& c : rows) {
+            if (c.parent != r.row.id) continue;
+            ordered.push_back(c.row);
+            ordered.back().child = true;
+        }
     }
+    return ordered;
+}
 
+wxString ChatFrame::CurrentStep(Thread& t) {
+    if (t.waiting) {
+        const Thread* r = RunningIn(t.cwd, t);
+        return "waiting for " + (r ? ThreadLabel(r->id, r->cwd, r->title)
+                                   : wxString("the folder"));
+    }
+    if (t.compacting) return "compacting";
+    // The tool calls without a result yet: a Claude message keeps its calls
+    // until their first result arrives, other turns record them in history
+    // before running them.
+    std::vector<std::string> running;
+    auto unanswered = [&](const nlohmann::json& msg, const std::vector<std::string>& answered) {
+        auto calls = msg.find("tool_calls");
+        if (calls == msg.end() || !calls->is_array()) return;
+        for (const auto& c : *calls)
+            if (std::ranges::find(answered, StringField(c, "id")) == answered.end())
+                running.push_back(StringField(c.value("function", nlohmann::json()), "name"));
+    };
+    if (t.claudePendingMsg.is_object()) {
+        unanswered(t.claudePendingMsg, {});
+    } else {
+        std::vector<std::string> answered;
+        auto m = t.history.rbegin();
+        for (; m != t.history.rend() && StringField(*m, "role") == "tool"; ++m)
+            answered.push_back(StringField(*m, "tool_call_id"));
+        if (m != t.history.rend() && StringField(*m, "role") == "assistant")
+            unanswered(*m, answered);
+    }
+    if (!running.empty()) {
+        wxString step = "running " + wxString::FromUTF8(running.front());
+        if (running.size() > 1) step += FormatU8(" +{}", running.size() - 1);
+        return step;
+    }
+    return t.activeAssistantText.empty() ? "thinking" : "writing";
+}
+
+void ChatFrame::RefreshSessionChoice() {
+    PERF_SCOPE("RefreshSessionChoice");
+    std::vector<ThreadRow> rows = FolderRows();
     sessionChoice_->Clear();
     threadRowIds_.clear();
-    for (const Row* r : ordered) {
-        const bool child = !r->parent.empty() && listed(r->parent);
-        sessionChoice_->Append(child ? wxString::FromUTF8("    \xE2\x86\xB3 ") + r->label  // "↳ "
-                                     : r->label);
-        threadRowIds_.push_back(r->id);
+    for (const ThreadRow& r : rows) {
+        wxString label = r.title;
+        if (r.state == ThreadRow::State::Running || r.state == ThreadRow::State::Waiting)
+            label = wxString::FromUTF8("\xE2\x97\x8F ") + label;  // "● "
+        else if (r.state == ThreadRow::State::Failed)
+            label = wxString::FromUTF8("\xE2\x9A\xA0 ") + label;  // "⚠ "
+        if (r.child) label = wxString::FromUTF8("    \xE2\x86\xB3 ") + label;  // "↳ "
+        sessionChoice_->Append(label);
+        threadRowIds_.push_back(r.id);
     }
     sessionChoice_->Append("New thread");
     sessionChoice_->Append(wxString::FromUTF8("Project brief\xE2\x80\xA6"));
@@ -2331,6 +2443,18 @@ void ChatFrame::RefreshSessionChoice() {
     auto active = std::ranges::find(threadRowIds_, Active().id);
     sessionChoice_->SetSelection((int)(active - threadRowIds_.begin()));
     sessionChoice_->SetToolTip(wxString::FromUTF8(activeCwd_));
+    if (threadPane_->IsShown()) UpdateThreadPane(std::move(rows));
+}
+
+void ChatFrame::UpdateThreadPane(std::vector<ThreadRow> rows) {
+    // While a thread runs its step changes without a refresh from the turn
+    // code, so poll at a low rate until none does.
+    const bool running = std::ranges::any_of(rows, [](const ThreadRow& r) {
+        return r.state == ThreadRow::State::Running || r.state == ThreadRow::State::Waiting;
+    });
+    if (!running) threadPaneTimer_.Stop();
+    else if (!threadPaneTimer_.IsRunning()) threadPaneTimer_.Start(1000);
+    threadList_->SetRows(std::move(rows), Active().id);
 }
 
 void ChatFrame::OnSessionChoice(wxCommandEvent& evt) {
@@ -2938,6 +3062,37 @@ void ChatFrame::OnHamburger(wxCommandEvent&) {
     SyncPanelSizing(centerW, tiled);
 }
 
+void ChatFrame::OnThreadPaneToggle(wxCommandEvent&) {
+    // Like the import pane: the chat pane keeps its width, the window grows
+    // or shrinks (unless tiled).
+    const bool tiled = hyprland::IsTiled().value_or(false);
+    int centerW = mainPanel_->GetSize().x;
+    const bool show = !threadPane_->IsShown();
+    threadPane_->Show(show);
+    Preferences::SetShowThreadPane(show);
+    if (show) UpdateThreadPane(FolderRows());
+    else threadPaneTimer_.Stop();
+    SyncPanelSizing(centerW, tiled);
+}
+
+int ChatFrame::ThreadPaneW() const {
+    return threadPane_->IsShown() ? kThreadPaneWidth + FromDIP(kEdgePad) : 0;
+}
+
+void ChatFrame::OnThreadListContextMenu(wxContextMenuEvent& e) {
+    const int n = e.GetPosition() == wxDefaultPosition
+        ? threadList_->GetSelection()
+        : threadList_->HitTest(threadList_->ScreenToClient(e.GetPosition()));
+    if (n == wxNOT_FOUND) return;
+    const std::string id = threadList_->Rows()[n].id;
+    const Thread* t = Find(id);
+    if (!t || !t->streaming) return;
+    wxMenu menu;
+    menu.Append(wxID_STOP, "Stop");
+    if (threadList_->GetPopupMenuSelectionFromUser(menu) != wxID_STOP) return;
+    if (Thread* still = Find(id); still && still->streaming) RequestCancel(*still);
+}
+
 void ChatFrame::OnEditorToggle(wxCommandEvent&) {
     const bool tiled = hyprland::IsTiled().value_or(false);
     int centerW = mainPanel_->GetSize().x;
@@ -2969,7 +3124,8 @@ void ChatFrame::OnEditorToggle(wxCommandEvent&) {
         int importW = splitter_->IsSplit()
                     ? kImportPaneWidth + splitter_->GetSashSize() : 0;
         int editorW = editorPaneW_ + innerSplitter_->GetSashSize();
-        SetClientSize(wxSize(centerW + importW + editorW, GetClientSize().y));
+        SetClientSize(wxSize(ThreadPaneW() + centerW + importW + editorW,
+                             GetClientSize().y));
         Layout();
         splitter_->UpdateSize();
         innerSplitter_->UpdateSize();
@@ -2999,8 +3155,9 @@ void ChatFrame::SyncPanelSizing(int centerW, bool tiled) {
     int editorMinW = innerSplitter_->IsSplit()
                 ? innerSplitter_->GetMinimumPaneSize() + innerSplitter_->GetSashSize() : 0;
 
-    SetMinClientSize(wxSize(kMainMinClientW + importMinW + editorMinW, 400));
-    SetClientSize(wxSize(centerW + importW + editorW, GetClientSize().y));
+    const int threadW = ThreadPaneW();
+    SetMinClientSize(wxSize(kMainMinClientW + threadW + importMinW + editorMinW, 400));
+    SetClientSize(wxSize(threadW + centerW + importW + editorW, GetClientSize().y));
     Layout();
     splitter_->UpdateSize();
     innerSplitter_->UpdateSize();
@@ -3014,7 +3171,7 @@ void ChatFrame::LayoutTiledPanes() {
                 ? splitter_->GetMinimumPaneSize() + splitter_->GetSashSize() : 0;
     int editorMinW = innerSplitter_->IsSplit()
                 ? innerSplitter_->GetMinimumPaneSize() + innerSplitter_->GetSashSize() : 0;
-    int minW = kMainMinClientW + importMinW + editorMinW;
+    int minW = kMainMinClientW + ThreadPaneW() + importMinW + editorMinW;
     SetMinClientSize(wxSize(std::min(minW, GetClientSize().x), 400));
     Layout();
     splitter_->UpdateSize();

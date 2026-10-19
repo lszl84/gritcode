@@ -255,6 +255,7 @@ set(SRCS
     src/project_brief.cpp
     src/streaming_web_request.cpp
     src/run_config_store.cpp
+    src/thread_list.cpp
 )
 
 # macOS-only native styling (Objective-C++); see src/mac_style.h.
