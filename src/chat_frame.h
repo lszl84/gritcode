@@ -487,11 +487,30 @@ private:
     // followed by the in-flight turn (partial text, waiting notice).
     void RestoreCanvasFromHistory();
 
-    // Push the default system prompt into t.history. Called on fresh threads.
+    // System prompt for `t`: the static base, AGENTS.md (recorded in
+    // t.lastAgentsContent) and FolderContext.
+    std::string SystemPrompt(Thread& t);
+    // Push the system prompt into t.history. Called on fresh threads.
     void SeedSystemPrompt(Thread& t);
-    // Re-inject AGENTS.md instructions into t.history[0] for an existing
-    // (restored or switched-to) thread whose system prompt predates them.
-    void RefreshSystemPromptAgents(Thread& t);
+    // Rebuild t.history[0] for an existing (restored or switched-to) thread,
+    // or after AGENTS.md or the brief changed.
+    void RefreshSystemPrompt(Thread& t);
+
+    // A titled top-level thread of a folder, open or only in the index.
+    struct FolderThread {
+        std::string id;
+        std::string title;
+        std::string lastUsed;
+    };
+    // The folder's titled top-level threads, most recent first.
+    std::vector<FolderThread> FolderThreads(const std::string& cwd) const;
+    // The folder's project brief and a short list of its other threads, so a
+    // new thread knows what the project is and that parallel work exists.
+    // Empty when the folder has neither.
+    std::string FolderContext(const Thread& t) const;
+    // "Project brief…": edit (or generate) the active folder's brief, then
+    // refresh the system prompts of its open threads.
+    void EditProjectBrief();
 
     // Re-render SVG icons with the current system foreground color. Called
     // once at construction and again on EVT_SYS_COLOUR_CHANGED so the icons

@@ -252,6 +252,7 @@ set(SRCS
     src/shell_env.cpp
     src/preferences.cpp
     src/settings_dialog.cpp
+    src/project_brief.cpp
     src/streaming_web_request.cpp
     src/run_config_store.cpp
 )
