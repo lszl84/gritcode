@@ -2495,7 +2495,8 @@ void ChatFrame::Persist(Thread& t) {
     persistWorker_ = std::thread([this, entry, msgs = std::move(msgs)]() {
         store_.WriteSessionFile(entry, msgs);
         if (memory_.IsOpen())
-            memory_.RebuildSession(entry.id, entry.cwd, msgs, entry.lastUsed);
+            memory_.RebuildSession(entry.id, entry.cwd, entry.title, entry.parent,
+                                   msgs, entry.lastUsed);
     });
 }
 
@@ -2553,7 +2554,8 @@ std::string ChatFrame::FolderContext(const Thread& t) const {
     if (!list.empty()) {
         if (!out.empty()) out += "\n\n";
         out += "Other threads in this folder: separate conversations whose "
-               "history isn't available here." + list;
+               "history isn't available here; grit_history_search with scope "
+               "\"folder\" finds what was said and done in them." + list;
     }
     return out;
 }
@@ -4956,7 +4958,7 @@ void ChatFrame::HandleCompletion(Thread& t, const wxString& errorIfFailed,
                 r = std::move(job.parseError);
             } else {
                 r = DispatchTool(job.name, job.argsParsed, token.get(),
-                                 &memory_, cwd, enableGrit);
+                                 &memory_, cwd, enableGrit, id);
             }
             results.push_back({std::move(job.id), std::move(job.name),
                                std::move(job.argsJson), std::move(r)});
