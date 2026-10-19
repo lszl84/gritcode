@@ -125,12 +125,37 @@ first, second = read(os.path.join(B, "first_done")), read(os.path.join(B, "secon
 check(bool(first and second) and float(second) > float(first),
       "the second ran after the first finished")
 
+print("-- opening a folder")
+g.switch_session(A)
+check(g.switch_session(B).get("threadId") == b2, "it shows the folder's most recent thread")
+
+print("-- a turn that fails in the background")
+g.select_thread(b)
+g.send(bash("sleep 8"))  # keeps the folder busy
+x = g.new_thread(B)["threadId"]
+g.set_model(1)  # a DeepSeek model: needs a key, and this HOME has none
+g.send("remember this prompt")
+check(threads(g)[x]["waiting"], "it waits for the folder")
+g.select_thread(b)
+g.cancel()  # b ends; x starts in the background and fails without a key
+end = time.time() + 60
+while time.time() < end and threads(g)[x]["waiting"]:
+    time.sleep(0.5)
+g.set_model(0)
+now = threads(g)
+check(now[x]["failed"] and not now[x]["running"], "it failed in the background")
+g.select_thread(x)
+check(any("No API key" in blk["preview"] for blk in g.blocks()), "its notice shows when viewed")
+check(g.status()["input"] == "remember this prompt", "its prompt is back in the input")
+check(not threads(g)[x]["failed"], "it is no longer marked as failed")
+
 print("-- restart")
 stop(pid)
 pid, g = launch()
 now = threads(g)
-check({a, b, b2} <= now.keys(), "threads restored")
-check(g.status()["threadId"] == b2, "last active thread restored")
+check({a, b, b2, x} <= now.keys(), "threads restored")
+check(g.status()["threadId"] == x, "last active thread restored")
+
 check(now[b2]["title"].startswith("Call the bash tool"), "titles restored")
 
 print("-- index rewritten by 0.5.x (no threads array)")
