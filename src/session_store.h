@@ -13,9 +13,6 @@
 // reads) and adds `threads` for the others, which 0.5.x ignores.
 // Each folder can also have a project brief, keyed like its first thread:
 //   ~/.local/share/gritcode/briefs/<id>.md
-// Worktree threads record their checkout and branch in optional `worktree`
-// and `branch` fields (older versions ignore them); the checkouts live in
-//   ~/.local/share/gritcode/worktrees/<id>/
 // Writes are atomic (temp file then rename) so a crash mid-write can't
 // corrupt the index or any session file.
 class SessionStore {
@@ -26,10 +23,6 @@ public:
         std::string lastUsed;  // ISO 8601, used for sorting (most recent first)
         std::string title;     // empty until the first user message
         std::string parent;    // parent thread id, empty for top-level threads
-        // A worktree thread's own checkout (root) and its branch; both empty
-        // for threads working in the folder itself.
-        std::string worktree;
-        std::string branch;
     };
 
     // Loads the index from disk, creating storage directories if needed.
@@ -76,10 +69,6 @@ public:
     // brief removes it; false when the file can't be written.
     std::string LoadBrief(const std::string& cwd) const;
     bool SaveBrief(const std::string& cwd, const std::string& text) const;
-
-    // Where worktree thread `id` gets its checkout: worktrees/<id> in the
-    // data dir, outside the user's repo.
-    std::string WorktreePath(const std::string& id) const;
 
     // Persists the last active folder and thread in the index without
     // touching session files. Called when the user switches threads.

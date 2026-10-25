@@ -10,7 +10,6 @@ struct ThreadRow {
     wxString title;
     wxString detail;  // the current step while running, else when last used
     State state = State::Done;
-    std::string branch;  // a worktree thread's branch, else empty
     bool child = false;  // a subagent, indented under its parent
 };
 

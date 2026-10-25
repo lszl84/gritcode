@@ -41,10 +41,9 @@ bash `chdir`s in the forked child. The process-wide `ChdirToCwd` goes away.
 
 ## Write safety
 
-One running turn per working folder. Starting a turn while another thread in
-the same folder is running queues it (shown as "waiting for <thread>"). A
-worktree thread's checkout is a working folder of its own (`Thread::workDir`,
-see "Worktree threads"), so it runs alongside the project folder's threads.
+One running turn per folder. Starting a turn while another thread in the same
+folder is running queues it (shown as "waiting for <thread>"). Real parallel
+writing in one folder comes later with worktrees.
 
 A thread and its subagents count as one owner of the folder, so a subagent
 never waits for its own parent. Subagents are read-only: `write_file`,
@@ -80,10 +79,7 @@ under its parent in the thread list and linked from the parent's tool block.
 ## Storage (no migration)
 
 Session files keep their format: `sessions/<id>.json` with `id`, `cwd`,
-`lastUsed`, `messages`, plus optional `title`, `parent`, and for worktree
-threads `worktree` (the checkout's root) and `branch`; the index's `threads`
-rows carry the same optional fields. Old versions ignore them and show a
-worktree thread as an ordinary thread of its folder. The existing
+`lastUsed`, `messages`, plus optional `title` and `parent`. The existing
 session of a folder (id = hash of cwd) simply becomes its first thread. The
 index keeps `sessions` (one entry per folder, exactly what 0.5.x reads) and
 adds `threads` for additional threads, which 0.5.x ignores. Downgrading keeps
@@ -97,8 +93,9 @@ layout and conventions, and the current work. `SystemPrompt` composes the
 base prompt, AGENTS.md, the brief and a list of the folder's other titled
 threads (title and day last used, at most 10). Titles and days only: running
 state changes every turn and would keep changing the cached prompt prefix. A
-thread's prompt is rebuilt when it opens, when AGENTS.md changes and when the
-brief is saved; Claude turns get the same text with each run.
+thread's prompt is rebuilt when it opens and when AGENTS.md changes, and a
+thread with no turn yet gets the brief as soon as it is written; Claude turns
+get the same text with each run.
 
 Storage: `briefs/<folder id>.md` in the app data dir, next to `sessions/` and
 keyed like a folder's first thread. Gritcode doesn't write into the user's
@@ -106,13 +103,16 @@ repo unasked, and AGENTS.md already is the versioned, in-repo place for
 project instructions (it is injected too). No brief means no section, as
 before.
 
-"Project brief…" in the left pane's Threads view opens a dialog to edit it. "Generate"
-asks DeepSeek Flash (cheap and fast; the free model without a key; Claude's
-CLI doesn't fit one request) to write it from the top-level entries, README,
-AGENTS.md and thread titles. The text streams into the box; failures show in
-red and restore the previous text. Nothing is generated unasked: a new thread
-in a folder with other threads and no brief only shows a one-line hint
-linking to the dialog.
+The brief is written automatically, once: when the user starts a new thread
+in a folder that has none, DeepSeek Flash (cheap and fast; the free model
+without a key; Claude's CLI doesn't fit one request) writes it in the
+background from the top-level entries, README, AGENTS.md and thread titles,
+and every later new thread there reuses it. It isn't editable for now.
+Nothing about it is silent: the new thread says it is being written and by
+which model, then shows the brief it starts with (every new thread shows the
+brief it starts with); a failure is shown with the model's error, and the
+next new thread tries again. Opening a folder or a saved thread writes
+nothing.
 
 ## History search
 
@@ -133,84 +133,26 @@ indexed by 0.5.x or before this step) shows no title until its next save or
 a `--reindex`. Nothing is deleted except a session's own rows on its
 rebuild, as before; turns of sessions with no file any more stay searchable.
 
-## Worktree threads
-
-A worktree thread writes in its own git checkout, so several threads can
-change one project at once. "New thread in worktree" (a Threads view button,
-offered only when the folder is in a git repo) runs
-`git worktree add -b grit/<first 8 of the id> <data dir>/worktrees/<id> HEAD`:
-the checkout lives outside the user's repo and holds the committed state (the
-creation notice says that uncommitted changes aren't in it). The thread still
-belongs to its folder (`cwd`, listed there, same brief and AGENTS.md), while
-its tools, bash and Claude Code run in `workDir`, the same subfolder of the
-worktree as the folder is of the repo. Its subagents get its `workDir`, so the
-family rule holds as before. Its system prompt adds that it works in an
-isolated worktree of the project on its branch. History search's "folder"
-scope stays the project folder. It is saved as soon as it is created, so its
-checkout is never unlisted.
-
-Its canvas starts with a header (branch, "Review changes", "Merge into
-<branch>", "Discard worktree"), the thread list rows show the branch,
-and their right-click menu offers the same actions. The git work is a
-few free functions in `git_worktree.{h,cpp}` that run git synchronously with
-an argv (fork/exec, no shell); they are quick, and run only on the user's
-click.
-
-- Review: `git add -A` in the worktree (its index is the thread's), then
-  `git diff --cached <merge-base of the worktree and the project's HEAD>`:
-  committed and uncommitted changes, new files included, as a stat notice and
-  a diff code block in the canvas (not in history, so the model doesn't see
-  it).
-- Merge: refused while the thread (or a thread in the project folder) runs,
-  when the project checkout has uncommitted changes to tracked files, or when
-  it is on no branch. Otherwise the worktree's uncommitted changes are
-  committed on its branch with the thread's title as the message, then
-  `git merge --no-ff grit/<id>` in the project checkout. A conflict is
-  aborted with `git merge --abort`; the notice names the files and suggests
-  merging the project's branch into the worktree branch in the thread
-  (conflicts are then resolved in its isolated checkout). Every outcome,
-  including the commit message used, shows as a notice; if the abort itself
-  fails, the notice says the repo is mid-merge and what to run.
-- Why a merge commit rather than applying the diff as uncommitted changes:
-  the merge is refused unless the checkout is clean, so the user's own work
-  is never mixed in; a conflict aborts back to exactly the previous state
-  (`git apply --3way` would leave conflict markers among the user's files);
-  and the result is one commit, easy to inspect and undo
-  (`git reset --hard HEAD~1` or `git revert -m 1`). The worktree stays, so
-  the thread can go on and be merged again.
-- Discard: refused while the thread runs. When the branch has commits not
-  in the project's HEAD, or the worktree has uncommitted changes (or git
-  can't tell), it asks first and names what would be lost. Then
-  `git worktree remove --force` (or `git worktree prune` when the checkout is
-  already gone) and `git branch -D`. The thread stays, as a thread of the
-  folder itself.
-- A worktree deleted by hand: the header says so and offers Discard (which
-  prunes it and deletes the branch); sending a message is refused with a
-  notice.
-
-There is no "delete thread" yet; when there is, it must discard the
-worktree the same way.
-
 ## UI
 
 The session dropdown stays at the folder level, as in 0.5.x: "New Session…"
 (pick a folder), then the folders, most recent first, a ● marking one with a
 running thread. Picking a folder opens its most recently used thread.
 
-Threads are switched in the existing left pane (hamburger toggle). A
-Session | Threads switch on top picks its view, remembered in preferences:
-Session is the 0.5.x session reference, unchanged; Threads has "New thread",
-"New thread in worktree" (git repos only) and "Project brief…" buttons above
-the folder's threads, per thread a state mark (● running, ○ waiting for the
-folder, ⚠ failed until viewed) with the title, subagents indented under their
-parent, and a dim line below: while running the current step (the tool it
-runs, "writing", "thinking", "waiting for <thread>"), after a failure its
-notice, otherwise when it was last used. The rows come from `FolderRows`; the
-step is derived from the thread's existing fields (pending tool calls in
-history or Claude's pending message, in-flight text), and a 1 s timer
-refreshes the list only while it is on screen and a thread of the folder
-runs. Clicking a row selects the thread; right-click offers "Stop" on a
-running one and the worktree actions on a worktree thread. The agent map and the decision tray come later (see
+Threads are switched in the existing left pane (hamburger toggle). Its
+bottom toolbar, like the main pane's, has two view icons, the current one in
+the text colour (remembered in preferences), and "+" (New thread) on the
+right in the Threads view. Session is the 0.5.x session reference,
+unchanged. Threads lists the folder's threads: per thread a state mark
+(● running, ○ waiting for the folder, ⚠ failed until viewed) with the title,
+subagents indented under their parent, and a dim line below: while running
+the current step (the tool it runs, "writing", "thinking", "waiting for
+<thread>"), after a failure its notice, otherwise when it was last used. The
+rows come from `FolderRows`; the step is derived from the thread's existing
+fields (pending tool calls in history or Claude's pending message, in-flight
+text), and a 1 s timer refreshes the list only while it is on screen and a
+thread of the folder runs. Clicking a row selects the thread; right-click on
+a running one offers "Stop". The agent map and the decision tray come later (see
 `orchestrator-conversation.md`).
 
 ## Steps
@@ -224,14 +166,15 @@ running one and the worktree actions on a worktree thread. The agent map and the
    read-modify-write, SSE parsing of CRLF streams / a final event without a
    blank line / `data:` without a space, and "Refresh" in the file tree saving
    the open file.
-4. Project brief: a short per-folder brief (written or generated) and a
-   list of the folder's other threads in every thread's system prompt.
-   (done)
+4. Project brief: a short per-folder brief, written automatically at the
+   first new thread, and a list of the folder's other threads in every
+   thread's system prompt. (done)
 5. Thread list: a Threads view in the left pane listing the folder's threads
    and their child threads with state (running, waiting, failed, done); the
    session dropdown stays per folder. (done)
 6. Worktree threads: a thread can run in its own git worktree, so several
-   threads write in one project at once; diff and merge back. (done)
+   threads write in one project at once; diff and merge back. Built, then
+   taken out for now (merge d48a624, reverted); comes back from there.
 7. Project-scoped history search for the memory tool. (done)
 
 The orchestrator ideas (`orchestrator-conversation.md`) build on 2 and 5.

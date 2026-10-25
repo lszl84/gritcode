@@ -9,7 +9,6 @@
 #include "run_config_store.h"
 #include "settings_dialog.h"
 #include "project_brief.h"
-#include "git_worktree.h"
 #include "image_store.h"
 #include "debug_window.h"
 #include "syntax.h"
@@ -461,16 +460,6 @@ constexpr const char* kSubagentNote =
     "inspect (grep, git log, running tests). Nobody can answer questions, so "
     "state your assumptions in the report.";
 
-// Added to a worktree thread's system prompt.
-std::string WorktreeNote(const std::string& project, const std::string& workDir,
-                         const std::string& branch) {
-    return "You work in an isolated git worktree of " + project + ": " + workDir
-           + ", on branch " + branch + ". Your tools run there; make every change "
-           "there, not in " + project + ", where other threads may be working. The "
-           "project's instructions and brief above apply as they are. When you are "
-           "done, the user reviews the branch and merges it into the project.";
-}
-
 // Model that writes a project brief: DeepSeek Flash when there is a key (it
 // is cheap and fast), otherwise the free model. Claude runs through its CLI,
 // which doesn't fit a single request.
@@ -553,48 +542,16 @@ Block NoticeBlock(const wxString& msg) {
     return b;
 }
 
-// Appends a link to `url` (see OnCanvasLink) to notice `b`.
-void AppendLink(Block& b, const wxString& label, const wxString& url) {
+// Notice ending in a link that opens thread `id` (see OnCanvasLink).
+Block ThreadLinkBlock(const wxString& msg, const std::string& id, const wxString& label) {
+    Block b = NoticeBlock(msg);
     InlineRun link;
     link.text = label;
     link.bold = true;
-    link.link = url;
+    link.link = wxString::FromUTF8("gritcode://thread/" + id);
     b.runs.push_back(link);
     b.rawText += label;
     b.visibleText += label;
-}
-
-// Appends plain notice text to `b`.
-void AppendText(Block& b, const wxString& text) {
-    InlineRun r;
-    r.text = text;
-    r.italic = true;
-    b.runs.push_back(r);
-    b.rawText += text;
-    b.visibleText += text;
-}
-
-// Notice ending in a link that opens thread `id`.
-Block ThreadLinkBlock(const wxString& msg, const std::string& id, const wxString& label) {
-    Block b = NoticeBlock(msg);
-    AppendLink(b, label, wxString::FromUTF8("gritcode://thread/" + id));
-    return b;
-}
-
-// Shown in a new thread of a folder that has other threads but no brief.
-Block BriefHintNotice() {
-    const wxString text =
-        "This thread starts without the history of the folder's other "
-        "threads. A project brief tells every thread what the project is "
-        "about. ";
-    const wxString linkText = wxString::FromUTF8("Write or generate one\xE2\x80\xA6");
-    Block b = NoticeBlock(text);
-    b.rawText = b.visibleText = text + linkText;
-    InlineRun link;
-    link.text = linkText;
-    link.bold = true;
-    link.link = "gritcode://brief";
-    b.runs.push_back(link);
     return b;
 }
 
@@ -1425,17 +1382,6 @@ ChatFrame::ChatFrame()
 
     threadsView_ = new wxPanel(importPanel_);
     {
-        auto* newBtn = new wxButton(threadsView_, wxID_ANY, "New thread");
-        newBtn->Bind(wxEVT_BUTTON, [this](wxCommandEvent&) { NewThread(activeCwd_); });
-        newWorktreeBtn_ = new wxButton(threadsView_, wxID_ANY, "New thread in worktree");
-        newWorktreeBtn_->SetToolTip("A thread that works in its own git worktree, so it can "
-                                    "write alongside the folder's other threads");
-        newWorktreeBtn_->Bind(wxEVT_BUTTON,
-                              [this](wxCommandEvent&) { NewWorktreeThread(activeCwd_); });
-        auto* briefBtn = new wxButton(threadsView_, wxID_ANY,
-                                      wxString::FromUTF8("Project brief\xE2\x80\xA6"));
-        briefBtn->SetToolTip("What every new thread of this folder is told about the project");
-        briefBtn->Bind(wxEVT_BUTTON, [this](wxCommandEvent&) { EditProjectBrief(); });
         threadList_ = new ThreadList(threadsView_);
         // Switch after the click is handled: the switch replaces the rows.
         threadList_->Bind(wxEVT_LISTBOX, [this](wxCommandEvent& e) {
@@ -1446,27 +1392,37 @@ ChatFrame::ChatFrame()
         });
         threadList_->Bind(wxEVT_CONTEXT_MENU, &ChatFrame::OnThreadListContextMenu, this);
         auto* sizer = new wxBoxSizer(wxVERTICAL);
-        sizer->Add(newBtn, 0, wxEXPAND | wxBOTTOM, 4);
-        sizer->Add(newWorktreeBtn_, 0, wxEXPAND | wxBOTTOM, 4);
-        sizer->Add(briefBtn, 0, wxEXPAND | wxBOTTOM, 4);
         sizer->Add(threadList_, 1, wxEXPAND);
         threadsView_->SetSizer(sizer);
     }
 
-    sessionTab_ = new wxToggleButton(importPanel_, wxID_ANY, "Session");
-    sessionTab_->SetToolTip("A saved session to copy prompts from");
-    threadsTab_ = new wxToggleButton(importPanel_, wxID_ANY, "Threads");
+    // Bottom toolbar, like the main pane's: the view icons, and "New thread"
+    // on the right in the Threads view. Bitmaps come from PaintLeftTabs.
+    sessionTab_ = new wxBitmapButton(importPanel_, wxID_ANY, wxBitmapBundle(),
+                                     wxDefaultPosition, kBtnSize, wxBORDER_NONE);
+    sessionTab_->SetToolTip("Session reference: a saved session to copy prompts from");
+    threadsTab_ = new wxBitmapButton(importPanel_, wxID_ANY, wxBitmapBundle(),
+                                     wxDefaultPosition, kBtnSize, wxBORDER_NONE);
     threadsTab_->SetToolTip("This folder's threads");
-    sessionTab_->Bind(wxEVT_TOGGLEBUTTON, [this](wxCommandEvent&) { ShowLeftView(false); });
-    threadsTab_->Bind(wxEVT_TOGGLEBUTTON, [this](wxCommandEvent&) { ShowLeftView(true); });
-    auto* tabs = new wxBoxSizer(wxHORIZONTAL);
-    tabs->Add(sessionTab_, 1);
-    tabs->Add(threadsTab_, 1);
+    newThreadBtn_ = new wxBitmapButton(importPanel_, wxID_ANY, wxBitmapBundle(),
+                                       wxDefaultPosition, kBtnSize, wxBORDER_NONE);
+    newThreadBtn_->SetToolTip("New thread");
+    sessionTab_->Bind(wxEVT_BUTTON, [this](wxCommandEvent&) { ShowLeftView(false); });
+    threadsTab_->Bind(wxEVT_BUTTON, [this](wxCommandEvent&) { ShowLeftView(true); });
+    newThreadBtn_->Bind(wxEVT_BUTTON, [this](wxCommandEvent&) { NewThread(activeCwd_); });
+    auto* leftToolbar = new wxBoxSizer(wxHORIZONTAL);
+    leftToolbar->Add(sessionTab_, 0, wxALIGN_CENTER_VERTICAL | wxRIGHT, 2);
+    leftToolbar->Add(threadsTab_, 0, wxALIGN_CENTER_VERTICAL);
+    leftToolbar->AddStretchSpacer();
+    leftToolbar->Add(newThreadBtn_, 0, wxALIGN_CENTER_VERTICAL);
+    // As tall as the main toolbar, whose dropdowns set its height, so the
+    // two line up.
+    leftToolbar->SetMinSize(wxSize(-1, sessionChoice_->GetBestSize().y));
 
     auto* importRoot = new wxBoxSizer(wxVERTICAL);
-    importRoot->Add(tabs, 0, wxEXPAND | wxLEFT | wxRIGHT | wxBOTTOM, FromDIP(kEdgePad));
     importRoot->Add(loadView_, 1, wxEXPAND | wxLEFT | wxRIGHT, FromDIP(kEdgePad));
     importRoot->Add(threadsView_, 1, wxEXPAND | wxLEFT | wxRIGHT, FromDIP(kEdgePad));
+    importRoot->Add(leftToolbar, 0, wxEXPAND | wxLEFT | wxRIGHT | wxTOP, FromDIP(kEdgePad));
     importPanel_->SetSizer(importRoot);
     ShowLeftView(Preferences::GetLeftPaneThreads());
     importPanel_->Hide();  // hidden until split
@@ -1703,43 +1659,18 @@ ChatFrame::ChatFrame()
                     {"failed", t && t->failureNotice.has_value()},
                 });
             };
-            for (const Thread& t : threads_) {
+            for (const Thread& t : threads_)
                 add(t.id, t.cwd, t.title, t.parent, t.lastUsed, &t);
-                arr.back()["worktree"] = t.worktree;
-                arr.back()["branch"] = t.branch;
-            }
-            for (const auto& e : store_.List()) {
-                if (Find(e.id)) continue;
-                add(e.id, e.cwd, e.title, e.parent, e.lastUsed, nullptr);
-                arr.back()["worktree"] = e.worktree;
-                arr.back()["branch"] = e.branch;
-            }
+            for (const auto& e : store_.List())
+                if (!Find(e.id)) add(e.id, e.cwd, e.title, e.parent, e.lastUsed, nullptr);
             return {{"threads", std::move(arr)}, {"activeId", Active().id}};
         });
     };
-    cb.newThread = [this, guiSync](const std::string& cwd, bool worktree) -> nlohmann::json {
-        return guiSync([this, cwd, worktree]() -> nlohmann::json {
-            const std::string folder = cwd.empty() ? activeCwd_ : cwd;
-            if (!(worktree ? NewWorktreeThread(folder) : NewThread(folder)))
-                return {{"ok", false}, {"reason", worktree ? "worktree failed" : "cancelled"}};
+    cb.newThread = [this, guiSync](const std::string& cwd) -> nlohmann::json {
+        return guiSync([this, cwd]() -> nlohmann::json {
+            if (!NewThread(cwd.empty() ? activeCwd_ : cwd))
+                return {{"ok", false}, {"reason", "cancelled"}};
             return {{"ok", true}, {"threadId", Active().id}};
-        });
-    };
-    cb.worktreeAction = [this, guiSync](const std::string& action,
-                                        bool confirm) -> nlohmann::json {
-        return guiSync([this, action, confirm]() -> nlohmann::json {
-            Thread& t = Active();
-            if (t.worktree.empty()) return {{"ok", false}, {"notice", "not a worktree thread"}};
-            if (action == "review") return {{"ok", true}, {"notice", ReviewChanges(t)}};
-            if (action == "merge") return {{"ok", true}, {"notice", MergeWorktreeThread(t)}};
-            if (action != "discard") return {{"ok", false}, {"notice", "unknown action"}};
-            std::string asked;
-            const auto notice = DiscardWorktree(t, [&](const wxString& question) {
-                asked = question.utf8_string();
-                return confirm;
-            });
-            return {{"ok", notice.has_value()}, {"notice", notice.value_or("")},
-                    {"asked", asked}};
         });
     };
     cb.selectThread = [this, guiSync](const std::string& id) -> nlohmann::json {
@@ -2396,6 +2327,7 @@ void ChatFrame::ReloadToolbarIcons() {
     playBtn_->SetBitmap(LoadThemedSvgIcon("play.svg", kIconSize, accent));
     exportBtn_->SetBitmap(LoadThemedSvgIcon("export.svg", kIconSize, accent));
     hamburgerBtn_->SetBitmap(LoadThemedSvgIcon("hamburger.svg", kIconSize, accent));
+    PaintLeftTabs();
     editorBtn_->SetBitmap(LoadThemedSvgIcon("editor.svg", kIconSize, accent));
 }
 
@@ -2437,7 +2369,7 @@ std::vector<ThreadRow> ChatFrame::FolderRows() {
     for (Thread& t : threads_) {
         if (t.cwd != activeCwd_) continue;
         ThreadRow r{.id = t.id, .title = ThreadLabel(t.id, t.cwd, t.title),
-                    .detail = LastUsedLabel(t.lastUsed), .branch = t.branch};
+                    .detail = LastUsedLabel(t.lastUsed)};
         if (t.streaming) {
             r.state = t.waiting ? ThreadRow::State::Waiting : ThreadRow::State::Running;
             r.detail = CurrentStep(t);
@@ -2450,14 +2382,8 @@ std::vector<ThreadRow> ChatFrame::FolderRows() {
     for (const auto& e : store_.List()) {
         if (e.cwd != activeCwd_ || Find(e.id)) continue;
         rows.push_back({{.id = e.id, .title = ThreadLabel(e.id, e.cwd, e.title),
-                         .detail = LastUsedLabel(e.lastUsed), .branch = e.branch},
+                         .detail = LastUsedLabel(e.lastUsed)},
                         e.parent, e.lastUsed});
-    }
-    // A worktree thread shows its branch while it isn't busy.
-    for (Row& r : rows) {
-        if (!r.row.branch.empty() && r.row.state == ThreadRow::State::Done)
-            r.row.detail = wxString::FromUTF8(r.row.branch) + wxString::FromUTF8(" \xC2\xB7 ")
-                           + r.row.detail;  // "·"
     }
     std::ranges::stable_sort(rows, std::greater{}, &Row::lastUsed);
 
@@ -2480,7 +2406,7 @@ std::vector<ThreadRow> ChatFrame::FolderRows() {
 
 wxString ChatFrame::CurrentStep(Thread& t) {
     if (t.waiting) {
-        const Thread* r = RunningIn(t.workDir, t);
+        const Thread* r = RunningIn(t.cwd, t);
         return "waiting for " + (r ? ThreadLabel(r->id, r->cwd, r->title)
                                    : wxString("the folder"));
     }
@@ -2538,11 +2464,6 @@ void ChatFrame::RefreshSessionChoice() {
     if (active != sessionCwds_.end())
         sessionChoice_->SetSelection(1 + (int)(active - sessionCwds_.begin()));
     sessionChoice_->SetToolTip(wxString::FromUTF8(activeCwd_));
-    const bool git = !FindGitRoot(activeCwd_).empty();
-    if (newWorktreeBtn_->IsShown() != git) {
-        newWorktreeBtn_->Show(git);
-        threadsView_->Layout();
-    }
     if (ThreadsShown()) UpdateThreadPane(FolderRows());
 }
 
@@ -2606,41 +2527,11 @@ bool ChatFrame::NewThread(const std::string& cwd) {
     // behind.
     Thread& t = OpenThread(SessionStore::NewThreadId(), cwd);
     if (ShowThread(t.id)) {
-        if (store_.LoadBrief(cwd).empty() && !FolderThreads(cwd).empty())
-            canvas_->AddBlock(BriefHintNotice());
+        if (store_.LoadBrief(cwd).empty() && WriteProjectBrief(cwd)) AddBriefNotice(t);
         return true;
     }
     threads_.pop_back();  // cancelled; nothing refers to it yet
     return false;
-}
-
-bool ChatFrame::NewWorktreeThread(const std::string& cwd) {
-    const std::string id = SessionStore::NewThreadId();
-    const std::string branch = "grit/" + id.substr(0, 8);
-    const std::string path = store_.WorktreePath(id);
-    if (std::string error = AddWorktree(cwd, path, branch); !error.empty()) {
-        RenderErrorBlock(Active(), "Couldn't create a worktree: " + wxString::FromUTF8(error));
-        return false;
-    }
-    Thread& t = OpenThread(id, cwd);
-    t.worktree = path;
-    t.branch = branch;
-    t.workDir = WorktreeDir(cwd, path);
-    RefreshSystemPrompt(t);
-    if (!ShowThread(id)) {
-        threads_.pop_back();  // cancelled; nothing refers to it yet
-        RemoveWorktree(cwd, path, branch);
-        return false;
-    }
-    // Saved right away, unlike a plain new thread: it owns a worktree, which
-    // must stay listed (and discardable) even if the thread is never used.
-    Persist(t);
-    const std::string from = GitBranch(cwd);
-    RenderErrorBlock(t, wxString::FromUTF8(
-        "Created the worktree " + path + " on branch " + branch + " from "
-        + (from.empty() ? std::string("HEAD") : from) + ". It holds the committed "
-        "state only: uncommitted changes in " + cwd + " aren't in it."));
-    return true;
 }
 
 bool ChatFrame::SelectThread(const std::string& id) {
@@ -2665,10 +2556,7 @@ ChatFrame::Thread& ChatFrame::OpenThread(const std::string& id,
         t.title = e->title;
         t.parent = e->parent;
         t.lastUsed = e->lastUsed;
-        t.worktree = e->worktree;
-        t.branch = e->branch;
     }
-    t.workDir = t.worktree.empty() ? cwd : WorktreeDir(cwd, t.worktree);
     if (store_.Load(id, t.history)) {
         RefreshSystemPrompt(t);
         // Sessions from before threads have no title yet.
@@ -2725,7 +2613,6 @@ void ChatFrame::Persist(Thread& t) {
     const SessionStore::Entry entry{
         .id = t.id, .cwd = t.cwd, .lastUsed = t.lastUsed,
         .title = t.title, .parent = t.parent,
-        .worktree = t.worktree, .branch = t.branch,
     };
     std::vector<nlohmann::json> msgs = t.history;
 
@@ -2746,139 +2633,12 @@ void ChatFrame::Persist(Thread& t) {
     });
 }
 
-std::string ChatFrame::ReviewChanges(Thread& t) {
-    const WorktreeDiff d = ReviewWorktree(t.cwd, t.worktree);
-    std::string notice;
-    if (!d.error.empty()) notice = "Can't show the changes: " + d.error;
-    else if (d.diff.empty()) notice = "No changes on " + t.branch + " yet.";
-    else notice = "Changes on " + t.branch + " since it branched off (committed and "
-                  "uncommitted):\n" + d.stat;
-    RenderErrorBlock(t, wxString::FromUTF8(notice));
-    if (!d.diff.empty() && Shown(t)) {
-        // A huge diff is cut at a line end, so the text stays valid UTF-8.
-        constexpr size_t kMaxShown = 200'000;
-        std::string text = d.diff;
-        if (text.size() > kMaxShown) {
-            text.resize(text.rfind('\n', kMaxShown) + 1);
-            text += "... [cut; git diff in " + t.worktree + " shows the rest]\n";
-        }
-        Block b;
-        b.type = BlockType::CodeBlock;
-        b.lang = "diff";
-        b.rawText = b.visibleText = wxString::FromUTF8(text);
-        InlineRun r;
-        r.text = b.rawText;
-        r.code = true;
-        b.runs.push_back(std::move(r));
-        canvas_->AddBlock(std::move(b));
-    }
-    return notice + "\n" + d.diff;
-}
-
-std::string ChatFrame::MergeWorktreeThread(Thread& t) {
-    std::string notice;
-    if (t.streaming || HasRunningChild(t)) {
-        notice = "This thread is still running. Merge when its turn has ended (or stop it).";
-    } else if (const Thread* other = RunningIn(t.cwd, t)) {
-        notice = ThreadLabel(other->id, other->cwd, other->title).utf8_string()
-                 + " is running in the project folder. Merge when it's done, so the "
-                   "merge doesn't change files under it.";
-    } else {
-        const std::string message =
-            t.title.empty() ? "Work from Gritcode thread " + t.id : t.title;
-        notice = MergeWorktree(t.cwd, t.worktree, t.branch, message).message;
-    }
-    RenderErrorBlock(t, wxString::FromUTF8(notice));
-    return notice;
-}
-
-std::optional<std::string> ChatFrame::DiscardWorktree(
-    Thread& t, const std::function<bool(const wxString&)>& confirm) {
-    std::string notice;
-    if (t.streaming || HasRunningChild(t)) {
-        notice = "This thread is still running. Discard its worktree when its turn has "
-                 "ended (or stop it).";
-        RenderErrorBlock(t, wxString::FromUTF8(notice));
-        return notice;
-    }
-    // Never lose work silently: ask when the worktree holds anything that
-    // isn't in the project yet, or when git can't tell.
-    const WorktreeWork w = UnmergedWork(t.cwd, t.worktree, t.branch);
-    std::string loses;
-    if (!w.error.empty()) {
-        loses = "Gritcode couldn't check what it holds (" + w.error + ").";
-    } else if (w.unmergedCommits > 0 || w.changedFiles > 0) {
-        std::string target = GitBranch(t.cwd);
-        if (target.empty()) target = "the project";
-        if (w.unmergedCommits > 0)
-            loses = t.branch + " has " + std::to_string(w.unmergedCommits) + " commit(s) not "
-                    "merged into " + target + ".";
-        if (w.changedFiles > 0)
-            loses += (loses.empty() ? "" : " ") + std::string("The worktree has uncommitted "
-                     "changes in ") + std::to_string(w.changedFiles) + " file(s).";
-        loses += " Discarding deletes them.";
-    }
-    if (!loses.empty()
-        && !confirm(wxString::FromUTF8("Discard the worktree of this thread? " + loses)))
-        return std::nullopt;
-
-    const std::string path = t.worktree;
-    const std::string branch = t.branch;
-    if (std::string error = RemoveWorktree(t.cwd, path, branch); !error.empty()) {
-        notice = "Couldn't discard the worktree: " + error;
-    } else {
-        t.worktree.clear();
-        t.branch.clear();
-        t.workDir = t.cwd;
-        RefreshSystemPrompt(t);
-        Persist(t);
-        if (Shown(t)) RestoreCanvasFromHistory();
-        RefreshSessionChoice();
-        notice = "Discarded the worktree " + path + " and branch " + branch
-                 + ". This thread now works in " + t.cwd + ".";
-    }
-    RenderErrorBlock(t, wxString::FromUTF8(notice));
-    return notice;
-}
-
-void ChatFrame::DiscardWorktreeAsking(Thread& t) {
-    DiscardWorktree(t, [this](const wxString& question) {
-        return wxMessageBox(question, "Discard worktree",
-                            wxYES_NO | wxNO_DEFAULT | wxICON_WARNING, this) == wxYES;
-    });
-}
-
-Block ChatFrame::WorktreeHeader(const Thread& t) {
-    if (!wxDirExists(wxString::FromUTF8(t.worktree))) {
-        Block b = NoticeBlock(wxString::FromUTF8(
-            "This thread's worktree " + t.worktree + " is gone (removed outside Gritcode), "
-            "so the thread can't run. Its branch " + t.branch + " may still hold committed "
-            "work: git merge " + t.branch + " in the project brings that in. "));
-        AppendLink(b, "Discard worktree", "gritcode://worktree/discard");
-        AppendText(b, " deletes the branch, and the thread works in the project folder.");
-        return b;
-    }
-    const std::string target = GitBranch(t.cwd);
-    Block b = NoticeBlock(wxString::FromUTF8(
-        "Worktree thread: works in " + t.workDir + " on branch " + t.branch
-        + ", apart from the folder's other threads. "));
-    AppendLink(b, "Review changes", "gritcode://worktree/review");
-    AppendText(b, wxString::FromUTF8(" \xC2\xB7 "));  // "·"
-    AppendLink(b, "Merge into " + wxString::FromUTF8(
-                      target.empty() ? std::string("the project") : target),
-               "gritcode://worktree/merge");
-    AppendText(b, wxString::FromUTF8(" \xC2\xB7 "));
-    AppendLink(b, "Discard worktree", "gritcode://worktree/discard");
-    return b;
-}
-
 std::string ChatFrame::SystemPrompt(Thread& t) {
     t.lastAgentsContent = LoadAgentsInstructions(t.cwd);
     std::string content = BaseSystemPrompt();
     if (!t.lastAgentsContent.empty()) content += "\n\n" + t.lastAgentsContent;
     if (std::string folder = FolderContext(t); !folder.empty())
         content += "\n\n" + folder;
-    if (!t.worktree.empty()) content += "\n\n" + WorktreeNote(t.cwd, t.workDir, t.branch);
     if (!t.parent.empty()) content += kSubagentNote;
     return content;
 }
@@ -2922,8 +2682,8 @@ std::string ChatFrame::FolderContext(const Thread& t) const {
     }
     std::string out;
     if (std::string brief = store_.LoadBrief(t.cwd); !brief.empty())
-        out = "Project brief for " + t.cwd + " (kept by the user, may be "
-              "out of date):\n" + brief;
+        out = "Project brief for " + t.cwd + " (written by a model from the "
+              "README and file list, may be out of date):\n" + brief;
     if (!list.empty()) {
         if (!out.empty()) out += "\n\n";
         out += "Other threads in this folder: separate conversations whose "
@@ -2933,8 +2693,17 @@ std::string ChatFrame::FolderContext(const Thread& t) const {
     return out;
 }
 
-void ChatFrame::EditProjectBrief() {
-    const std::string cwd = activeCwd_;
+bool ChatFrame::Started(const Thread& t) {
+    return t.streaming || std::ranges::any_of(t.history, IsUserTurn);
+}
+
+bool ChatFrame::WriteProjectBrief(const std::string& cwd) {
+    auto job = std::ranges::find(briefJobs_, cwd, &BriefJob::cwd);
+    if (job == briefJobs_.end()) {
+        briefJobs_.emplace_back().cwd = cwd;
+        job = briefJobs_.end() - 1;
+    }
+    if (job->running) return false;
     std::vector<std::string> titles;
     for (const FolderThread& f : FolderThreads(cwd)) titles.push_back(f.title);
     const ModelRoute route = BriefRoute(remoteModels_);
@@ -2947,16 +2716,54 @@ void ChatFrame::EditProjectBrief() {
         .deepseek = route.needsApiKey,
         .label = ModelLabelForId(route.model),
     };
-    const auto brief = ShowBriefDialog(this, DisplayPath(cwd), store_.LoadBrief(cwd), model,
-                                       BriefMaterial(cwd, LoadAgentsInstructions(cwd), titles));
-    if (!brief) return;
-    if (!store_.SaveBrief(cwd, *brief)) {
-        wxMessageBox("The project brief could not be saved.", "Project brief",
-                     wxOK | wxICON_ERROR, this);
+    job->writer = model.label;
+    job->running = true;
+    job->request = WriteBrief(this, model, BriefMaterial(cwd, LoadAgentsInstructions(cwd), titles),
+                              [this, cwd](std::string brief, std::string error) {
+                                  OnBriefWritten(cwd, std::move(brief), std::move(error));
+                              });
+    return true;
+}
+
+void ChatFrame::OnBriefWritten(const std::string& cwd, std::string brief, std::string error) {
+    auto job = std::ranges::find(briefJobs_, cwd, &BriefJob::cwd);
+    if (job == briefJobs_.end()) return;
+    job->running = false;
+    if (error.empty() && !store_.SaveBrief(cwd, brief)) error = "it could not be saved";
+    // Threads with no turn yet start with it; the others get it when they
+    // are next opened, like an AGENTS.md change.
+    if (error.empty())
+        for (Thread& t : threads_)
+            if (t.cwd == cwd && !Started(t)) RefreshSystemPrompt(t);
+    Thread& a = Active();
+    if (a.cwd != cwd) return;
+    if (!Started(a)) RestoreCanvasFromHistory();  // "Writing…" becomes the brief
+    if (!error.empty())
+        canvas_->AddBlock(NoticeBlock(
+            wxString::FromUTF8("\xE2\x9A\xA0 ") + job->writer + " couldn't write the project "
+            "brief: " + wxString::FromUTF8(error) + ". Threads here start without one; the "
+            "next new thread tries again."));
+    else if (Started(a))
+        canvas_->AddBlock(NoticeBlock("The project brief for this folder is written; new "
+                                      "threads here start with it."));
+}
+
+void ChatFrame::AddBriefNotice(const Thread& t) {
+    if (!t.parent.empty()) return;
+    auto job = std::ranges::find(briefJobs_, t.cwd, &BriefJob::cwd);
+    if (job != briefJobs_.end() && job->running) {
+        canvas_->AddBlock(NoticeBlock(
+            "Writing a project brief for this folder with " + job->writer + ", from its "
+            "README, AGENTS.md, file names and thread titles. New threads here start "
+            "with it" + wxString::FromUTF8("\xE2\x80\xA6")));
         return;
     }
-    for (Thread& t : threads_)
-        if (t.cwd == cwd) RefreshSystemPrompt(t);
+    const std::string brief = store_.LoadBrief(t.cwd);
+    if (brief.empty()) return;
+    canvas_->AddBlock(NoticeBlock("This thread starts with the folder's project brief:"));
+    MdStream md([this](Block b) { canvas_->AddBlock(std::move(b)); });
+    md.Feed(wxString::FromUTF8(brief));
+    md.Flush();
 }
 
 void ChatFrame::RestoreCanvasFromHistory() {
@@ -2967,7 +2774,6 @@ void ChatFrame::RestoreCanvasFromHistory() {
     if (!t.parent.empty())
         canvas_->AddBlock(ThreadLinkBlock("Subagent thread (view only), started by ",
                                           t.parent, ThreadLabelOf(t.parent)));
-    if (!t.worktree.empty()) canvas_->AddBlock(WorktreeHeader(t));
     ModelSwitchTracker modelTracker;
     // Walk the message list and re-emit blocks. Tool call/result pairs are
     // stitched back together: an assistant message's tool_calls are matched
@@ -3061,6 +2867,7 @@ void ChatFrame::RestoreCanvasFromHistory() {
     // in the order it streamed. A fresh markdown stream, fed the partial
     // text, carries the rest of the reply on this canvas.
     t.liveThinkingIdx = -1;
+    if (!Started(t)) AddBriefNotice(t);
     // A turn that failed in the background: its notice, seen now.
     if (t.failureNotice) {
         canvas_->AddBlock(std::move(*t.failureNotice));
@@ -3302,13 +3109,6 @@ void ChatFrame::OnCanvasLink(wxCommandEvent& e) {
         OnSettings(ev);
     } else if (e.GetString().StartsWith("gritcode://thread/", &threadId)) {
         SelectThread(threadId.utf8_string());
-    } else if (e.GetString() == "gritcode://brief") {
-        EditProjectBrief();
-    } else if (wxString action; e.GetString().StartsWith("gritcode://worktree/", &action)
-                                && !Active().worktree.empty()) {
-        if (action == "review") ReviewChanges(Active());
-        else if (action == "merge") MergeWorktreeThread(Active());
-        else if (action == "discard") DiscardWorktreeAsking(Active());
     }
 }
 
@@ -3330,14 +3130,24 @@ void ChatFrame::OnHamburger(wxCommandEvent&) {
 }
 
 void ChatFrame::ShowLeftView(bool threads) {
-    sessionTab_->SetValue(!threads);
-    threadsTab_->SetValue(threads);
     loadView_->Show(!threads);
     threadsView_->Show(threads);
+    newThreadBtn_->Show(threads);
+    PaintLeftTabs();
     importPanel_->Layout();
     Preferences::SetLeftPaneThreads(threads);
     if (ThreadsShown()) UpdateThreadPane(FolderRows());
     else threadPaneTimer_.Stop();
+}
+
+void ChatFrame::PaintLeftTabs() {
+    const wxSize kIconSize(20, 20);
+    const wxColour on = wxSystemSettings::GetColour(wxSYS_COLOUR_WINDOWTEXT);
+    const wxColour off = wxSystemSettings::GetColour(wxSYS_COLOUR_GRAYTEXT);
+    const bool threads = threadsView_->IsShown();
+    sessionTab_->SetBitmap(LoadThemedSvgIcon("session.svg", kIconSize, threads ? off : on));
+    threadsTab_->SetBitmap(LoadThemedSvgIcon("threads.svg", kIconSize, threads ? on : off));
+    newThreadBtn_->SetBitmap(LoadThemedSvgIcon("plus.svg", kIconSize, on));
 }
 
 bool ChatFrame::ThreadsShown() const {
@@ -3349,30 +3159,13 @@ void ChatFrame::OnThreadListContextMenu(wxContextMenuEvent& e) {
         ? threadList_->GetSelection()
         : threadList_->HitTest(threadList_->ScreenToClient(e.GetPosition()));
     if (n == wxNOT_FOUND) return;
-    const ThreadRow row = threadList_->Rows()[n];
-    const Thread* t = Find(row.id);
-    enum { ID_REVIEW = wxID_HIGHEST + 1, ID_MERGE, ID_DISCARD };
+    const std::string id = threadList_->Rows()[n].id;
+    const Thread* t = Find(id);
+    if (!t || !t->streaming) return;
     wxMenu menu;
-    if (t && t->streaming) menu.Append(wxID_STOP, "Stop");
-    if (!row.branch.empty()) {
-        const std::string target = GitBranch(activeCwd_);
-        menu.Append(ID_REVIEW, "Review changes");
-        menu.Append(ID_MERGE, "Merge into " + wxString::FromUTF8(
-                                  target.empty() ? std::string("the project") : target));
-        menu.Append(ID_DISCARD, "Discard worktree");
-    }
-    if (menu.GetMenuItemCount() == 0) return;
-    const int choice = threadList_->GetPopupMenuSelectionFromUser(menu);
-    if (choice == wxID_STOP) {
-        if (Thread* still = Find(row.id); still && still->streaming) RequestCancel(*still);
-        return;
-    }
-    if (choice != ID_REVIEW && choice != ID_MERGE && choice != ID_DISCARD) return;
-    // The outcome shows in the thread's canvas.
-    if (!SelectThread(row.id) || Active().worktree.empty()) return;
-    if (choice == ID_REVIEW) ReviewChanges(Active());
-    else if (choice == ID_MERGE) MergeWorktreeThread(Active());
-    else DiscardWorktreeAsking(Active());
+    menu.Append(wxID_STOP, "Stop");
+    if (threadList_->GetPopupMenuSelectionFromUser(menu) != wxID_STOP) return;
+    if (Thread* still = Find(id); still && still->streaming) RequestCancel(*still);
 }
 
 void ChatFrame::OnEditorToggle(wxCommandEvent&) {
@@ -4544,10 +4337,6 @@ void ChatFrame::OnSend(wxCommandEvent&) {
         input_->Clear();
         return;
     }
-    if (!t.worktree.empty() && !wxDirExists(wxString::FromUTF8(t.worktree))) {
-        RenderErrorBlock(t, "This thread can't run: its worktree is gone (see above).");
-        return;
-    }
 
     input_->Clear();
     std::vector<PendingImage> images = std::move(pendingImages_);
@@ -4607,10 +4396,9 @@ void ChatFrame::StartTurn(Thread& t, const wxString& userText,
         UpdateQueueUI();  // Send becomes "Add", chip row stays visible if non-empty.
     }
 
-    // One running turn per folder (a worktree thread's checkout is a folder
-    // of its own): until the other thread there finishes, this one waits
-    // (StartNextWaiting starts it).
-    if (RunningIn(t.workDir, t)) {
+    // One running turn per folder: until the other thread there finishes,
+    // this one waits (StartNextWaiting starts it).
+    if (RunningIn(t.cwd, t)) {
         t.waiting = true;
         RenderWaitingNotice(t);
     } else {
@@ -4619,14 +4407,14 @@ void ChatFrame::StartTurn(Thread& t, const wxString& userText,
     RefreshSessionChoice();  // marks the thread as running
 }
 
-ChatFrame::Thread* ChatFrame::RunningIn(const std::string& dir, const Thread& self) {
+ChatFrame::Thread* ChatFrame::RunningIn(const std::string& cwd, const Thread& self) {
     // A thread and its subagents count as one owner of the folder (the
     // subagents are read-only, see IsWriteTool).
     auto family = [](const Thread& t) -> const std::string& {
         return t.parent.empty() ? t.id : t.parent;
     };
     for (Thread& t : threads_) {
-        if (&t != &self && t.workDir == dir && t.streaming && !t.waiting
+        if (&t != &self && t.cwd == cwd && t.streaming && !t.waiting
             && family(t) != family(self))
             return &t;
     }
@@ -4637,10 +4425,10 @@ int ChatFrame::ModelIndexFor(const Thread& t) const {
     return t.parent.empty() ? currentModelIndex_ : t.turnModelIndex;
 }
 
-void ChatFrame::StartNextWaiting(const std::string& dir) {
+void ChatFrame::StartNextWaiting(const std::string& cwd) {
     for (Thread& t : threads_) {
-        if (!t.waiting || t.workDir != dir) continue;
-        if (RunningIn(dir, t)) return;
+        if (!t.waiting || t.cwd != cwd) continue;
+        if (RunningIn(cwd, t)) return;
         t.waiting = false;
         StartCompletion(t);
         return;
@@ -4648,7 +4436,7 @@ void ChatFrame::StartNextWaiting(const std::string& dir) {
 }
 
 void ChatFrame::RenderWaitingNotice(Thread& t) {
-    const Thread* other = RunningIn(t.workDir, t);
+    const Thread* other = RunningIn(t.cwd, t);
     if (!other) return;
     RenderErrorBlock(t, "Waiting for " + ThreadLabel(other->id, other->cwd, other->title)
                         + wxString::FromUTF8(" to finish\xE2\x80\xA6"));
@@ -4837,8 +4625,8 @@ void ChatFrame::DoSendActualRequest(Thread& t) {
         && messages[0].value("role", std::string{}) == "system") {
         std::string base = messages[0].value("content", std::string{});
         std::string extra;
-        if (!t.workDir.empty())
-            extra += "\n\nWorking directory: " + t.workDir;
+        if (!t.cwd.empty())
+            extra += "\n\nWorking directory: " + t.cwd;
         // When the user disabled Grit History tools, explicitly countermand
         // the baked "use grit_history_search" system-prompt guidance so the
         // agent neither attempts the (now-absent) tools nor leans on local
@@ -5386,7 +5174,7 @@ void ChatFrame::HandleCompletion(Thread& t, const wxString& errorIfFailed,
         return m.is_object() && m.value("isSummary", false);
     });
     ++t.gen;
-    t.toolWorker = std::thread([this, jobs, token, dir = t.workDir, folder = t.cwd, enableGrit,
+    t.toolWorker = std::thread([this, jobs, token, cwd = t.cwd, enableGrit,
                                 searchExclude = compacted ? std::string() : t.id,
                                 id = t.id, gen = t.gen]() {
         std::vector<ToolBatchEntry> results;
@@ -5398,11 +5186,8 @@ void ChatFrame::HandleCompletion(Thread& t, const wxString& errorIfFailed,
             } else if (!job.parseError.empty()) {
                 r = std::move(job.parseError);
             } else {
-                // History search's scope "folder" is the project folder,
-                // where a worktree thread's history is indexed too.
-                r = DispatchTool(job.name, job.argsParsed, token.get(), &memory_,
-                                 job.name == "grit_history_search" ? folder : dir,
-                                 enableGrit, searchExclude);
+                r = DispatchTool(job.name, job.argsParsed, token.get(),
+                                 &memory_, cwd, enableGrit, searchExclude);
             }
             results.push_back({std::move(job.id), std::move(job.name),
                                std::move(job.argsJson), std::move(r)});
@@ -5499,7 +5284,7 @@ void ChatFrame::FinalizeTurn(Thread& t, bool wasCancelledOrError) {
 
     // The folder is free: a thread waiting for it goes before this thread's
     // own queue, which would otherwise keep the folder to itself.
-    StartNextWaiting(t.workDir);
+    StartNextWaiting(t.cwd);
     if (!t.parentToolId.empty()) ReportToParent(t, wasCancelledOrError);
 
     // Natural completion: auto-dispatch the next queued message so back-to-
@@ -5538,7 +5323,6 @@ bool ChatFrame::HasRunningChild(const Thread& t) const {
 ChatFrame::Thread& ChatFrame::OpenChild(Thread& parent, const std::string& toolId,
                                         const std::string& description) {
     Thread& c = OpenThread(SessionStore::NewThreadId(), parent.cwd);
-    c.workDir = parent.workDir;
     c.parent = parent.id;
     c.parentToolId = toolId;
     c.title = DefaultTitle(description.empty() ? std::string("Subagent") : description);
@@ -6454,7 +6238,6 @@ void ChatFrame::StartClaudeTurn(Thread& t, bool fresh) {
     if (!agents.empty()) append += "\n\n" + agents;
     if (std::string folder = FolderContext(t); !folder.empty())
         append += "\n\n" + folder;
-    if (!t.worktree.empty()) append += "\n\n" + WorktreeNote(t.cwd, t.workDir, t.branch);
     const std::string promptFile = writeTemp(append);
 
     // gritcode's own stdio MCP server, in its run_project-only mode, so the
@@ -6465,7 +6248,7 @@ void ChatFrame::StartClaudeTurn(Thread& t, bool fresh) {
             {"gritcode", {
                 {"type", "stdio"},
                 {"command", wxStandardPaths::Get().GetExecutablePath().utf8_string()},
-                {"args", {"--mcp-stdio", "--run-project", t.workDir}},
+                {"args", {"--mcp-stdio", "--run-project", t.cwd}},
             }},
         }},
     };
@@ -6474,7 +6257,7 @@ void ChatFrame::StartClaudeTurn(Thread& t, bool fresh) {
 
     ClaudeRunSpec spec;
     spec.executable = exe;
-    spec.cwd = t.workDir;
+    spec.cwd = t.cwd;
     spec.args = {
         "-p",
         "--input-format", "stream-json",

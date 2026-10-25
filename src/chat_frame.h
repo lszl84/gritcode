@@ -5,7 +5,6 @@
 #include <wx/treectrl.h>
 #include <wx/bmpbuttn.h>
 #include <wx/splitter.h>
-#include <wx/tglbtn.h>
 #include <wx/dnd.h>
 #include <wx/statbmp.h>
 #include <wx/wrapsizer.h>
@@ -26,7 +25,6 @@
 #include <atomic>
 #include <cstdint>
 #include <deque>
-#include <functional>
 #include <map>
 #include <memory>
 #include <optional>
@@ -122,19 +120,10 @@ private:
     // their data only.
     struct Thread {
         std::string id;        // session file id (SessionStore::Entry::id)
-        std::string cwd;       // the folder (project) it belongs to
+        std::string cwd;       // tools and Claude Code run here
         std::string title;     // from the first user message
         std::string parent;    // parent thread id, empty for top-level threads
         std::string lastUsed;  // ISO 8601, orders the dropdown
-        // A worktree thread writes in its own git checkout (worktree root, on
-        // `branch`), so it runs alongside the folder's other threads; both
-        // are empty for a thread working in the folder itself.
-        std::string worktree;
-        std::string branch;
-        // Where its tools and Claude Code run: `cwd`, or the same folder in
-        // its worktree (a subagent: its parent's). One running turn per
-        // workDir (see RunningIn).
-        std::string workDir;
         // A thread with a parent is a subagent: a `task` call run headless, or
         // a Claude Code subagent shown from its parent's stream. It is
         // view-only. parentToolId is the parent's tool call it answers (known
@@ -475,15 +464,15 @@ private:
     void RefreshSessionChoice();
 
     // ---- Left pane threads view ----
-    // The left pane (hamburger) switches between the session reference
-    // ("Session") and the active folder's threads ("Threads"); the mode is
+    // The left pane (hamburger) shows the session reference or the active
+    // folder's threads, picked by the icons of its bottom toolbar and
     // remembered in preferences.
-    wxToggleButton* sessionTab_ = nullptr;
-    wxToggleButton* threadsTab_ = nullptr;
+    wxBitmapButton* sessionTab_ = nullptr;
+    wxBitmapButton* threadsTab_ = nullptr;
+    wxBitmapButton* newThreadBtn_ = nullptr;  // Threads view only
     wxPanel* loadView_ = nullptr;     // session reference
     wxPanel* threadsView_ = nullptr;  // thread list
     ThreadList* threadList_ = nullptr;
-    wxButton* newWorktreeBtn_ = nullptr;  // shown when the folder is a git repo
     // Refreshes the rows' current step while a thread of the folder runs.
     wxTimer threadPaneTimer_;
     // The active folder's threads, most recent first, each followed by its
@@ -495,6 +484,8 @@ private:
     void UpdateThreadPane(std::vector<ThreadRow> rows);
     // Picks the left pane's view; remembered for next time.
     void ShowLeftView(bool threads);
+    // The toolbar icons, the current view's in the text colour.
+    void PaintLeftTabs();
     // Whether the thread list is on screen (pane open, Threads view).
     bool ThreadsShown() const;
     void OnThreadListContextMenu(wxContextMenuEvent& e);
@@ -507,9 +498,6 @@ private:
     void CreateNewSession();
     bool SwitchToCwd(const std::string& cwd);
     bool NewThread(const std::string& cwd);
-    // NewWorktreeThread adds an empty thread of `cwd` that works in a new git
-    // worktree; failures show as a notice. Only offered in git repos.
-    bool NewWorktreeThread(const std::string& cwd);
     bool SelectThread(const std::string& id);
     // Adds an open thread for (id, cwd): loaded from disk when it has a
     // session file, otherwise seeded with a fresh system prompt.
@@ -520,24 +508,6 @@ private:
 
     // Persist the thread's history to its session file.
     void Persist(Thread& t);
-
-    // ---- Worktree threads ----
-    // Review shows the worktree's diff against where it branched off; Merge
-    // commits its uncommitted changes on its branch and merges that into the
-    // project's branch; Discard removes the worktree and branch after
-    // `confirm` agreed to what would be lost (unmerged commits, uncommitted
-    // changes), and the thread works in the folder from then on. Each shows
-    // its outcome in t's canvas and returns it; Discard returns nothing when
-    // not confirmed.
-    std::string ReviewChanges(Thread& t);
-    std::string MergeWorktreeThread(Thread& t);
-    std::optional<std::string> DiscardWorktree(
-        Thread& t, const std::function<bool(const wxString&)>& confirm);
-    // Discard, asking the user with a dialog.
-    void DiscardWorktreeAsking(Thread& t);
-    // The actions' header at the top of a worktree thread's canvas, or the
-    // notice that its worktree is gone.
-    Block WorktreeHeader(const Thread& t);
 
     // Re-render every renderable message in the active thread's history —
     // user prompts as UserPrompt blocks, assistant content via MdStream, tool
@@ -566,9 +536,24 @@ private:
     // new thread knows what the project is and that parallel work exists.
     // Empty when the folder has neither.
     std::string FolderContext(const Thread& t) const;
-    // "Project brief…": edit (or generate) the active folder's brief, then
-    // refresh the system prompts of its open threads.
-    void EditProjectBrief();
+
+    // A folder's project brief is written once, when the user starts a new
+    // thread in a folder without one, and its later new threads reuse it.
+    // One job per folder; a failed one runs again at the next new thread.
+    struct BriefJob {
+        std::string cwd;
+        wxString writer;  // the model's label
+        bool running = false;
+        StreamingWebRequest request;
+    };
+    std::deque<BriefJob> briefJobs_;
+    // Starts writing `cwd`'s brief; false when a job for it already runs.
+    bool WriteProjectBrief(const std::string& cwd);
+    void OnBriefWritten(const std::string& cwd, std::string brief, std::string error);
+    // For a thread with no turn yet: the brief it starts with, or that one
+    // is being written.
+    void AddBriefNotice(const Thread& t);
+    static bool Started(const Thread& t);
 
     // Re-render SVG icons with the current system foreground color. Called
     // once at construction and again on EVT_SYS_COLOUR_CHANGED so the icons
@@ -665,11 +650,10 @@ private:
     void StartTurn(Thread& t, const wxString& userText,
                    std::vector<PendingImage> images = {},
                    const std::string& hiddenInstructions = std::string());
-    // The thread (other than `self` and its family) running a turn in work
-    // dir `dir`, if any.
-    Thread* RunningIn(const std::string& dir, const Thread& self);
-    // Start the first turn waiting for work dir `dir`, unless one runs there.
-    void StartNextWaiting(const std::string& dir);
+    // The thread (other than `self`) running a turn in `cwd`, if any.
+    Thread* RunningIn(const std::string& cwd, const Thread& self);
+    // Start the first turn waiting for `cwd`, unless one is running there.
+    void StartNextWaiting(const std::string& cwd);
     void EnqueueMessage(Thread& t, const wxString& text);
     void LogDebug(const std::string& line);
     void OpenDebugWindow();

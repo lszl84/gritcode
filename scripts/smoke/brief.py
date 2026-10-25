@@ -1,13 +1,15 @@
 #!/usr/bin/env python3
 """
-Smoke test for the project brief: what goes into a thread's system prompt.
+Smoke test for the project brief: written when a new thread starts in a
+folder without one, reused by the folder's later new threads, and what goes
+into a thread's system prompt.
 
 Usage:
     python3 scripts/smoke/brief.py build/gritcode
 
 Runs the app only through ~/.local/share/grit-dev/run-hidden.sh (invisible
-Xvfb, temp HOME and data dir). No model turns: the folder's threads are seeded
-into the index before launch.
+Xvfb, temp HOME and data dir), with the free model pointed at a local fake
+(fake_model.py), which answers a brief request with the material it got.
 """
 
 import json
@@ -22,6 +24,7 @@ import time
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
 from grit import Grit  # noqa: E402
+from fake_model import serve  # noqa: E402
 
 LAUNCHER = os.path.expanduser("~/.local/share/grit-dev/run-hidden.sh")
 BIN = os.path.abspath(sys.argv[1] if len(sys.argv) > 1 else "build/gritcode")
@@ -41,8 +44,17 @@ def system_prompt(g, thread_id):
     return g.conversation()[0]["content"]
 
 
-def hint_shown(g):
-    return any("A project brief tells" in b["preview"] for b in g.blocks())
+def previews(g):
+    return " ".join(b["preview"] for b in g.blocks())
+
+
+def wait_for(cond, timeout=20):
+    end = time.time() + timeout
+    while time.time() < end:
+        if cond():
+            return True
+        time.sleep(0.2)
+    return False
 
 
 P, Q = os.path.join(DATA, "P"), os.path.join(DATA, "Q")
@@ -50,6 +62,11 @@ os.makedirs(P)
 os.makedirs(Q)
 with open(os.path.join(P, "AGENTS.md"), "w") as f:
     f.write("agents-marker: run make test\n")
+with open(os.path.join(P, "README.md"), "w") as f:
+    f.write("readme-marker: a C++ chat app.\n")
+# The fake model answers this folder's brief request with HTTP 500.
+with open(os.path.join(Q, "README.md"), "w") as f:
+    f.write("FAIL-500\n")
 # Folder P has two threads; the first has no id, so gritcode derives it from
 # the folder, which also names the folder's brief file.
 os.makedirs(os.path.join(DATA, "gritcode"))
@@ -60,9 +77,11 @@ with open(os.path.join(DATA, "gritcode", "sessions.json"), "w") as f:
                             "lastUsed": "2026-10-19T09:00:00",
                             "title": "Add dark mode"}],
                "lastActiveCwd": P}, f)
+BRIEFS = os.path.join(DATA, "gritcode", "briefs")
 
 env = dict(os.environ, GRIT_TEST_DATA=DATA)
-pid = int(subprocess.check_output([LAUNCHER, BIN, f"GRIT_MCP_PORT={PORT}"],
+pid = int(subprocess.check_output([LAUNCHER, BIN, f"GRIT_MCP_PORT={PORT}",
+                                   f"GRIT_FREE_MODEL_URL={serve()}"],
                                   env=env, stderr=subprocess.DEVNULL))
 try:
     # Wait for this instance's own port (Grit would also try the next ones).
@@ -75,6 +94,7 @@ try:
     g = Grit(port=PORT)
     threads = g.list_threads()["threads"]
     first = next(t["id"] for t in threads if t["cwd"] == P and t["id"] != "00000000000000aa")
+    brief_file = os.path.join(BRIEFS, first + ".md")
 
     print("-- no brief")
     sp = system_prompt(g, "00000000000000aa")
@@ -82,27 +102,42 @@ try:
     check("Fix the SSE parser (last used 2026-10-18)" in sp, "the other thread is listed")
     check("Add dark mode" not in sp, "the thread itself is not listed")
     check("Project brief" not in sp, "no brief section")
-    fresh = g.new_thread(P)["threadId"]
-    check(hint_shown(g), "a new thread offers a brief")
-    sp = system_prompt(g, fresh)
-    check("Fix the SSE parser" in sp and "Add dark mode" in sp, "a new thread lists both threads")
+    check("project brief" not in previews(g), "opening a thread writes no brief")
 
-    print("-- with a brief")
-    os.makedirs(os.path.join(DATA, "gritcode", "briefs"), exist_ok=True)
-    with open(os.path.join(DATA, "gritcode", "briefs", first + ".md"), "w") as f:
-        f.write("brief-marker: a C++ chat app.")
+    print("-- a new thread writes it")
     fresh = g.new_thread(P)["threadId"]
-    check(not hint_shown(g), "no hint once the folder has a brief")
+    check("Writing a project brief for this folder with" in previews(g),
+          "the new thread says a brief is being written, and by which model")
+    check(wait_for(lambda: os.path.exists(brief_file)), "the brief is saved")
+    brief = open(brief_file).read() if os.path.exists(brief_file) else ""
+    check(brief.startswith("Fake brief.") and "readme-marker" in brief
+          and "agents-marker" in brief and "Fix the SSE parser" in brief,
+          "it was written from the README, AGENTS.md and the thread titles")
+    check(wait_for(lambda: "starts with the folder's project brief" in previews(g)
+                   and "Writing a project brief" not in previews(g)),
+          "the thread then shows the brief it starts with")
     sp = system_prompt(g, fresh)
-    check("brief-marker: a C++ chat app." in sp, "the brief is injected")
-    check("agents-marker" in sp, "together with AGENTS.md")
+    check("Fake brief." in sp and "agents-marker" in sp, "the brief is in its system prompt")
+    check("Fix the SSE parser" in sp and "Add dark mode" in sp, "it lists both threads")
 
-    print("-- another folder")
+    print("-- the next new thread reuses it")
+    mtime = os.path.getmtime(brief_file)
+    g.new_thread(P)
+    p = previews(g)
+    check("starts with the folder's project brief" in p and "Writing" not in p,
+          "it starts with the saved brief right away")
+    time.sleep(2)
+    check(os.path.getmtime(brief_file) == mtime, "the brief is not written again")
+
+    print("-- a failed brief")
     q = g.switch_session(Q)["threadId"]
     sp = system_prompt(g, q)
-    check("brief-marker" not in sp and "Other threads" not in sp, "nothing from P")
+    check("Fake brief" not in sp and "Other threads" not in sp, "nothing from P")
     g.new_thread(Q)
-    check(not hint_shown(g), "no hint without other threads")
+    check(wait_for(lambda: "couldn't write the project brief" in previews(g)),
+          "the failure is shown")
+    check("scripted failure" in previews(g), "with the model's error")
+    check(os.listdir(BRIEFS) == [first + ".md"], "no brief is saved for the folder")
 finally:
     os.kill(pid, 15)
 

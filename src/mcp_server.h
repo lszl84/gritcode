@@ -55,21 +55,14 @@ struct MCPCallbacks {
     std::function<nlohmann::json()> newSession;
 
     // Threads. listThreads returns {threads: [{id, cwd, title, lastUsed,
-    // loaded, running, waiting, failed, worktree, branch}, ...], activeId};
-    // `failed` marks a background failure not yet viewed. newThread adds an
-    // empty thread in `cwd` (the active folder when empty), in a new git
-    // worktree when `worktree`, and makes it active; selectThread makes
-    // thread `id` active. Both return {ok, ...}; every other method acts on
-    // the active thread.
+    // loaded, running, waiting, failed}, ...], activeId}; `failed` marks a
+    // background failure not yet viewed. newThread adds an empty
+    // thread in `cwd` (the active folder when empty) and makes it active;
+    // selectThread makes thread `id` active. Both return {ok, ...}; every
+    // other method acts on the active thread.
     std::function<nlohmann::json()> listThreads;
-    std::function<nlohmann::json(const std::string&, bool)> newThread;
+    std::function<nlohmann::json(const std::string&)> newThread;
     std::function<nlohmann::json(const std::string&)> selectThread;
-
-    // A worktree thread's actions: "review", "merge" or "discard"; `confirm`
-    // answers the question discard asks before losing work. Returns {ok,
-    // notice, asked?}: `asked` is that question, `ok` false when it wasn't
-    // confirmed or the thread has no worktree.
-    std::function<nlohmann::json(const std::string&, bool)> worktreeAction;
 
     // Set the active model by dropdown index (0=Kilo Free, 1=DeepSeek
     // Flash, 2=DeepSeek Pro). Persists via wxConfig. Returns {ok, modelIndex}.

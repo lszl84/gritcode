@@ -8,6 +8,8 @@ answers with a scripted SSE stream, picked by the last message:
 - a user message "Call these tools now: [[name, {args}], ...]" calls those
   tools, all in one response;
 - tool results get the text "Results: <result> | <result> ...";
+- a project brief request (its system prompt starts "You write the project
+  brief") gets "Fake brief. " followed by the material it was sent;
 - anything else gets the text "ok".
 
 Markers in the last user message, before any of those "Call ..." lines (so a
@@ -43,6 +45,8 @@ def text_of(message):
 def reply_for(messages):
     """The delta of the reply: {"content": ...} or {"tool_calls": [...]}."""
     last = messages[-1]
+    if text_of(messages[0]).startswith("You write the project brief"):
+        return {"content": "Fake brief. " + text_of(last)}
     if last["role"] == "tool":
         results = []
         for m in reversed(messages):

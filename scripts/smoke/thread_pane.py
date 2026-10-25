@@ -8,7 +8,8 @@ Usage:
 
 Runs the app only through ~/.local/share/grit-dev/run-hidden.sh (invisible
 Xvfb, temp HOME and data dir). The folder's threads are seeded into the index
-before launch; the live states come from turns that are cancelled right away.
+before launch; the live states come from turns against a local fake model
+(fake_model.py) that are cancelled right away.
 """
 
 import json
@@ -24,6 +25,7 @@ from datetime import datetime
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
 from grit import Grit  # noqa: E402
+from fake_model import serve  # noqa: E402
 
 LAUNCHER = os.path.expanduser("~/.local/share/grit-dev/run-hidden.sh")
 BIN = os.path.abspath(sys.argv[1] if len(sys.argv) > 1 else "build/gritcode")
@@ -71,7 +73,8 @@ with open(os.path.join(DATA, "gritcode", "sessions.json"), "w") as f:
                "lastActiveCwd": P}, f)
 
 env = dict(os.environ, GRIT_TEST_DATA=DATA)
-pid = int(subprocess.check_output([LAUNCHER, BIN, f"GRIT_MCP_PORT={PORT}"],
+pid = int(subprocess.check_output([LAUNCHER, BIN, f"GRIT_MCP_PORT={PORT}",
+                                   f"GRIT_FREE_MODEL_URL={serve()}"],
                                   env=env, stderr=subprocess.DEVNULL))
 try:
     for _ in range(100):

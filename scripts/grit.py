@@ -95,11 +95,8 @@ class Grit:
     def list_threads(self):
         return self._call("listThreads")
 
-    def new_thread(self, cwd="", worktree=False):
-        return self._call("newThread", {"cwd": cwd, "worktree": worktree})
-
-    def worktree_action(self, action, confirm=False):
-        return self._call("worktreeAction", {"action": action, "confirm": confirm})
+    def new_thread(self, cwd=""):
+        return self._call("newThread", {"cwd": cwd})
 
     def select_thread(self, thread_id):
         return self._call("selectThread", {"id": thread_id})

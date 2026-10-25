@@ -231,14 +231,7 @@ json MCPServer::HandleRequest(const json& request) {
     }
     if (method == "newThread") {
         if (!cb_.newThread) return err(-32603, "not ready");
-        return okResult(cb_.newThread(params.value("cwd", ""),
-                                      params.value("worktree", false)));
-    }
-    if (method == "worktreeAction") {
-        if (!cb_.worktreeAction) return err(-32603, "not ready");
-        std::string action = params.value("action", "");
-        if (action.empty()) return err(-32602, "missing 'action' param");
-        return okResult(cb_.worktreeAction(action, params.value("confirm", false)));
+        return okResult(cb_.newThread(params.value("cwd", "")));
     }
     if (method == "selectThread") {
         if (!cb_.selectThread) return err(-32603, "not ready");
