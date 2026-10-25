@@ -40,6 +40,11 @@ public:
     static bool GetEnableGritHistory();
     static void SetEnableGritHistory(bool enabled);
 
+    // Whether the left pane shows the thread list rather than the session
+    // reference. Defaults to false.
+    static bool GetLeftPaneThreads();
+    static void SetLeftPaneThreads(bool threads);
+
     // DeepSeek reasoning effort, sent as `reasoning_effort` on every DeepSeek
     // chat request: "high" (DeepSeek's own default, and ours) or "max".
     // Anything else stored in the config reads back as "high".

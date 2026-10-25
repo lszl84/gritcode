@@ -12,7 +12,8 @@
 // onto the GUI thread via wxFrame::CallAfter when they need to mutate UI.
 //
 // Wire protocol: newline-delimited JSON-RPC 2.0.
-// Default port: 8765. If unavailable, falls back to 8766..8770.
+// Default port: 8765. If unavailable, falls back to 8766..8770; the
+// GRIT_MCP_PORT environment variable pins one port instead.
 struct MCPCallbacks {
     // Returns a JSON status object. Should include at least
     // {streaming: bool, blocks: int}.
@@ -53,6 +54,16 @@ struct MCPCallbacks {
     // Interactive new-session flow goes through the directory dialog instead.
     std::function<nlohmann::json()> newSession;
 
+    // Threads. listThreads returns {threads: [{id, cwd, title, lastUsed,
+    // loaded, running, failed, unseen}, ...], activeId}; `failed` marks a
+    // background failure not yet viewed. newThread adds an empty
+    // thread in `cwd` (the active folder when empty) and makes it active;
+    // selectThread makes thread `id` active. Both return {ok, ...}; every
+    // other method acts on the active thread.
+    std::function<nlohmann::json()> listThreads;
+    std::function<nlohmann::json(const std::string&)> newThread;
+    std::function<nlohmann::json(const std::string&)> selectThread;
+
     // Set the active model by dropdown index (0=Kilo Free, 1=DeepSeek
     // Flash, 2=DeepSeek Pro). Persists via wxConfig. Returns {ok, modelIndex}.
     // Test hook for driving the provider switch programmatically.
@@ -89,12 +100,16 @@ struct MCPCallbacks {
     // {started: false, reason: "streaming"} while a turn is in flight.
     std::function<nlohmann::json()> play;
 
-    // Toggle a side panel ("editor" or "import") as its toolbar button would,
-    // then return getPanes().
+    // Put `text` in the input box without sending it, as typing would.
+    std::function<nlohmann::json(const std::string& text)> setInput;
+
+    // Toggle a side panel ("editor", "import" or "threads") as its toolbar
+    // button would, then return getPanes().
     std::function<nlohmann::json(const std::string&)> togglePanel;
 
     // Pixel widths of the window client area and each visible pane:
-    // {window, import, chat, editor} (0 for a hidden pane).
+    // {window, threads, import, chat, editor} (0 for a hidden pane), and the
+    // thread pane's rows (threadRows: id, title, detail, child).
     std::function<nlohmann::json()> getPanes;
 
     // Scroll the chat so block `index` is at the top; returns {ok}.

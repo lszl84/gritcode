@@ -8,6 +8,7 @@
 #include "preferences.h"
 #include "run_config_store.h"
 #include "settings_dialog.h"
+#include "project_brief.h"
 #include "image_store.h"
 #include "debug_window.h"
 #include "syntax.h"
@@ -56,16 +57,7 @@
 #include <signal.h>
 #ifndef _WIN32
 #include <unistd.h>
-#else
-#include <direct.h>
-#define chdir _chdir
 #endif
-
-// Posted from the tool-dispatch worker thread when a batch completes.
-// Payload is a shared_ptr<vector<ToolBatchEntry>> — shared_ptr so wxThreadEvent's
-// payload copy doesn't slice the move-only vector and the worker can hand off
-// ownership cheaply.
-wxDEFINE_EVENT(wxEVT_TOOL_BATCH_DONE, wxThreadEvent);
 
 namespace {
 
@@ -84,7 +76,7 @@ constexpr int ID_TREE_NEW_FILE      = wxID_HIGHEST + 17;
 constexpr int ID_TREE_RENAME        = wxID_HIGHEST + 18;
 constexpr int ID_TREE_SHOW_IN_FILES = wxID_HIGHEST + 19;
 constexpr int ID_TREE_NEW_FOLDER    = wxID_HIGHEST + 20;
-constexpr int ID_TREE_REFRESH       = wxID_HIGHEST + 21;
+constexpr int ID_TREE_REFRESH       = wxID_HIGHEST + 28;
 constexpr int ID_TREE_TOGGLE_HIDDEN = wxID_HIGHEST + 27;
 constexpr int ID_EDITOR_SAVE        = wxID_HIGHEST + 21;
 constexpr int ID_EDITOR_SAVE_AS     = wxID_HIGHEST + 22;
@@ -101,8 +93,10 @@ constexpr int kFileTreeWidth    = 280;   // fixed (non-resizable) file tree widt
 constexpr int kEditorTextWidth  = kFileTreeWidth * 5 / 2;  // editor text = 2.5x tree
 constexpr int kEditorPaneWidth  = kFileTreeWidth + kEditorTextWidth;  // whole right pane
 constexpr int kMainMinClientW   = 220;   // min chat-pane width with no panels
+// The thread pane sits left of the splitters in the frame sizer, at a fixed
+// width (no sash), so the window grows by exactly this much.
 // Chat-pane widths below which toolbar items hide, least important first.
-constexpr int kToolbarLabelsW   = 640;   // "Session:" / "Model:" captions
+constexpr int kToolbarLabelsW   = 640;   // "Thread:" / "Model:" captions
 constexpr int kToolbarSettingsW = 500;   // settings (and debug Log) button
 constexpr int kToolbarExportW   = 466;   // export button
 constexpr int kToolbarModelW    = 430;   // model dropdown
@@ -363,6 +357,14 @@ int ModelIndexForRow(int row, const std::vector<std::string>& remoteModels) {
     return kClaudeIndexBase + (row - 1 - dsCount);
 }
 
+// The free model's endpoint. GRIT_FREE_MODEL_URL overrides it: a test/dev
+// hook that lets the smoke tests use a local fake model
+// (scripts/smoke/fake_model.py) instead of the flaky shared free tier.
+const char* FreeModelUrl() {
+    const char* url = std::getenv("GRIT_FREE_MODEL_URL");
+    return url && *url ? url : "https://api.kilo.ai/api/gateway/chat/completions";
+}
+
 ModelRoute RouteForIndex(int idx, const std::vector<std::string>& remoteModels) {
     if (idx == kModelKiloFree) {
         // Kilo Gateway free tier: kilo-auto/free auto-routes to whichever
@@ -370,7 +372,7 @@ ModelRoute RouteForIndex(int idx, const std::vector<std::string>& remoteModels) 
         // 256K context, anonymous rate limit 200 requests/hour/IP. Free
         // models are shared-pool and best-effort, so this is the no-key
         // default, not a replacement for a DeepSeek key.
-        return {"https://api.kilo.ai/api/gateway/chat/completions",
+        return {FreeModelUrl(),
                 "kilo-auto/free", false, Preferences::Provider::DeepSeek,
                 kOutputTokenMax, 256000};
     }
@@ -394,7 +396,7 @@ ModelRoute RouteForIndex(int idx, const std::vector<std::string>& remoteModels) 
     }
 
     // Unknown/stale index — fall back to the no-key free provider.
-    return {"https://api.kilo.ai/api/gateway/chat/completions",
+    return {FreeModelUrl(),
             "kilo-auto/free", false, Preferences::Provider::DeepSeek,
             32000, 256000};
 }
@@ -427,6 +429,48 @@ ModelRoute CompletionRoute(int currentIdx, int turnIdx,
     if (route.claudeCli) route = RouteForIndex(turnIdx, remoteModels);
     if (route.claudeCli) route = RouteForIndex(kModelKiloFree, remoteModels);
     return route;
+}
+
+// Model index for a subagent started by a turn on `parentModel`: a DeepSeek
+// Pro model's matching Flash model when listed (a fraction of the price),
+// otherwise the parent's own model (`parentIdx` when it isn't listed).
+int SubagentModelIndex(const std::string& parentModel, int parentIdx,
+                       const std::vector<std::string>& remoteModels) {
+    const auto& ds = DeepseekModels(remoteModels);
+    auto indexOf = [&ds](const std::string& id) {
+        auto it = std::ranges::find(ds, id);
+        return it == ds.end() ? -1 : 1 + (int)(it - ds.begin());
+    };
+    if (auto pos = parentModel.find("-pro"); pos != std::string::npos) {
+        std::string flash = parentModel;
+        flash.replace(pos, 4, "-flash");
+        if (int i = indexOf(flash); i > 0) return i;
+        if (int i = indexOf("deepseek-flash"); i > 0) return i;
+    }
+    if (int i = indexOf(parentModel); i > 0) return i;
+    return parentIdx;
+}
+
+// Added to a subagent's system prompt.
+constexpr const char* kSubagentNote =
+    "\n\nYou are a subagent: another agent delegated this self-contained task "
+    "to you. Work on it with your tools, then finish with a concise report of "
+    "what you found or did; that report is all the other agent gets back. You "
+    "are read-only: do not create, edit or delete files, and use bash only to "
+    "inspect (grep, git log, running tests). Nobody can answer questions, so "
+    "state your assumptions in the report.";
+
+// Model that writes a project brief: one of the provider the user picked,
+// so the folder's README and file names go to no one else. DeepSeek: its
+// Flash model (cheap and fast); Claude: Sonnet, through the CLI; the free
+// model: itself.
+int BriefModelIndex(int idx, const std::vector<std::string>& remoteModels) {
+    const ModelRoute route = RouteForIndex(idx, remoteModels);
+    if (!route.claudeCli) return SubagentModelIndex(route.model, idx, remoteModels);
+    for (int i = 0; i < kClaudeModelCount; ++i)
+        if (std::string_view(kClaudeModels[i].id).find("sonnet") != std::string_view::npos)
+            return kClaudeIndexBase + i;
+    return idx;
 }
 
 // String field of a history/event object, or empty when missing or not a
@@ -494,6 +538,55 @@ Block NoticeBlock(const wxString& msg) {
     b.visibleText = msg;
     InlineRun r; r.text = msg; r.italic = true;
     b.runs.push_back(r);
+    return b;
+}
+
+// A collapsed tool call block: "name(args)" with the result inside.
+Block ToolBlock(const std::string& name, const std::string& argsJson, const std::string& result) {
+    // Compact the args JSON for display: parse + dump to drop whitespace.
+    std::string displayArgs = argsJson;
+    try {
+        if (!argsJson.empty()) {
+            displayArgs = nlohmann::json::parse(argsJson).dump(
+                -1, ' ', false, nlohmann::json::error_handler_t::replace);
+        }
+    } catch (...) { /* show raw */ }
+
+    std::string preview = result;
+    constexpr size_t kPreviewCap = 4000;
+    if (preview.size() > kPreviewCap) {
+        preview.resize(kPreviewCap);
+        preview += "\n... [preview truncated; full output sent to model]";
+    }
+
+    Block b;
+    b.type = BlockType::ToolCall;
+    b.toolName = wxString::FromUTF8(name);
+    b.toolArgs = wxString::FromUTF8(displayArgs);
+    b.toolResult = wxString::FromUTF8(preview);
+    b.toolExpanded = false;
+    // visibleText layout:
+    //   [0, headerLen)            "toolName(args)"
+    //   [headerLen, headerLen+2)  "\n\n" separator
+    //   [headerLen+2, end)        toolResult
+    // Header chars are selectable in the rendered header strip; body chars
+    // are selectable only when expanded. Selecting across a collapsed block
+    // (drag from another block, through this one) still grabs the full
+    // visibleText, so Ctrl+C captures both the header and the hidden body.
+    b.visibleText = b.toolName + "(" + b.toolArgs + ")\n\n" + b.toolResult;
+    return b;
+}
+
+// Notice ending in a link that opens thread `id` (see OnCanvasLink).
+Block ThreadLinkBlock(const wxString& msg, const std::string& id, const wxString& label) {
+    Block b = NoticeBlock(msg);
+    InlineRun link;
+    link.text = label;
+    link.bold = true;
+    link.link = wxString::FromUTF8("gritcode://thread/" + id);
+    b.runs.push_back(link);
+    b.rawText += label;
+    b.visibleText += label;
     return b;
 }
 
@@ -624,18 +717,6 @@ std::string ClaudeToolResultText(const nlohmann::json& content) {
     return out;
 }
 
-// chdir() into the session's directory so tool subprocesses (bash,
-// list_directory with relative paths, etc.) operate against it. If the
-// directory no longer exists or isn't accessible, fall back to $HOME so
-// we don't strand subprocesses in some inherited cwd.
-void ChdirToCwd(const std::string& cwd) {
-    if (cwd.empty()) return;
-    if (chdir(cwd.c_str()) == 0) return;
-    if (const char* home = std::getenv("HOME")) {
-        chdir(home);
-    }
-}
-
 // Resolve $HOME as the default cwd when the index has no last-active entry.
 std::string DefaultCwd() {
     if (const char* home = std::getenv("HOME")) {
@@ -672,6 +753,40 @@ std::string FindGitRoot(const std::string& cwd) {
         cur = parent;
     }
     return std::string();
+}
+
+// For a top-level thread in a git repo. Threads share the checkout with no
+// lock, so the agent mustn't move its branch under the others, and takes
+// branch work, or bigger work while another thread is busy here, into a
+// worktree of its own. Small edits stay in place, so most work makes none.
+std::string SharedCheckoutNote(const std::string& repo, const std::string& worktreesDir) {
+    const std::string dir =
+        worktreesDir + "/" + std::filesystem::path(repo).filename().string() + "/<branch>";
+    return "Other conversation threads may work in " + repo + " at the same time: "
+           "they share its files and its checked-out branch. So:\n"
+           "- Don't change this checkout's branch or index (switching branches, "
+           "stash, reset, rebase, pull): it would change under the other threads. "
+           "If the user asks for that, say so and offer a worktree.\n"
+           "- By default, work here directly, and read a file again right before "
+           "editing it.\n"
+           "- Use a git worktree only when the user wants the work on its own branch, "
+           "or when another thread is working here right now (a note on the user's "
+           "message says so; it is for you, so don't bring it up unless it matters) "
+           "and your change is more than a small edit: `git worktree "
+           "add -b <branch> " + dir + " HEAD` with a short branch name (or reuse one "
+           "from `git worktree list`), then work only there, with absolute paths and "
+           "`cd` in bash. Tell the user its path and branch, and that uncommitted "
+           "changes here aren't in it.\n"
+           "- When the work in a worktree is done, commit it there and tell the user "
+           "how to bring it in (`git merge <branch>` here). Leave the worktree unless "
+           "the user asks to remove it.";
+}
+
+// The repo `cwd` is in, else `cwd`: threads in folders of one repo share its
+// checkout.
+std::string CheckoutOf(const std::string& cwd) {
+    std::string repo = FindGitRoot(cwd);
+    return repo.empty() ? cwd : repo;
 }
 
 bool ReadTextFile(const std::string& path, std::string& out) {
@@ -719,9 +834,8 @@ std::string LoadAgentsInstructions(const std::string& cwd) {
 }
 
 // The static base of the system prompt (platform info + tool guidance).
-// AGENTS.md instructions are appended to this by both SeedSystemPrompt and
-// RefreshSystemPromptAgents so the same base is used for fresh and restored
-// sessions alike.
+// SystemPrompt appends AGENTS.md and the folder context, so fresh and
+// restored threads share the same base.
 std::string BaseSystemPrompt() {
     std::string platformInfo;
 #ifdef _WIN32
@@ -759,6 +873,17 @@ std::string BaseSystemPrompt() {
         "what you have rather than firing speculative variants.";
 }
 
+// When a thread was last used, short: "14:32" today, "Oct 12" earlier this
+// year, else the date.
+wxString LastUsedLabel(const std::string& iso) {
+    wxDateTime when;
+    if (!when.ParseISOCombined(wxString::FromUTF8(iso))) return wxString();
+    const wxDateTime now = wxDateTime::Now();
+    if (when.IsSameDate(now)) return when.Format("%H:%M");
+    if (when.GetYear() == now.GetYear()) return when.Format("%b %d");
+    return when.FormatISODate();
+}
+
 // Format an absolute path for display in the dropdown. Replaces $HOME with
 // "~" and drops trailing slashes — matches the typical shell/IDE convention.
 wxString DisplayPath(const std::string& cwd) {
@@ -770,6 +895,17 @@ wxString DisplayPath(const std::string& cwd) {
         }
     }
     return wxString::FromUTF8(cwd);
+}
+
+// Default thread title: the first line of the first user message, shortened
+// to fit the dropdown.
+std::string DefaultTitle(const std::string& text) {
+    constexpr size_t kMaxChars = 50;
+    wxString title = wxString::FromUTF8(text.substr(0, text.find('\n')));
+    title.Trim().Trim(false);
+    if (title.length() > kMaxChars)
+        title = title.Left(kMaxChars - 1) + wxString::FromUTF8("\xE2\x80\xA6");
+    return title.utf8_string();
 }
 
 // Resolve the assets directory using wxStandardPaths — the standard
@@ -1059,7 +1195,7 @@ ChatFrame::ChatFrame()
     outer->Add(canvas_, 1, wxEXPAND);
 
     // Toolbar row below the input:
-    //   Session: [▾]   Model: [▾]   <stretch>   [⚙]
+    //   Thread:  [▾]   Model: [▾]   <stretch>   [⚙]
     const wxSize kIconSize(20, 20);
     const wxSize kBtnSize(FromDIP(32), -1);
     wxColour accent = wxSystemSettings::GetColour(wxSYS_COLOUR_WINDOWTEXT);
@@ -1072,7 +1208,7 @@ ChatFrame::ChatFrame()
     hamburgerBtn_ = new wxBitmapButton(panel, ID_HAMBURGER, bbHamburger,
                                         wxDefaultPosition, kBtnSize,
                                         wxBORDER_NONE);
-    hamburgerBtn_->SetToolTip(wxString::FromUTF8("Toggle session reference"));
+    hamburgerBtn_->SetToolTip(wxString::FromUTF8("Toggle side pane (session reference, threads)"));
 
     sessionLabel_ = new wxStaticText(panel, wxID_ANY, "Session:");
     sessionChoice_ = new wxChoice(panel, ID_SESSION);
@@ -1244,11 +1380,13 @@ ChatFrame::ChatFrame()
     editorPanel_->Hide();
 
     // Import viewer — left pane of splitter, hidden until hamburger toggle.
+    // A Session | Threads switch on top picks what it shows.
     importPanel_ = new wxPanel(splitter_);
+    loadView_ = new wxPanel(importPanel_);
     auto* importSizer = new wxBoxSizer(wxVERTICAL);
 
     // Empty state: centered "Load Session…" button.
-    importEmptyView_ = new wxPanel(importPanel_);
+    importEmptyView_ = new wxPanel(loadView_);
     auto* emptySizer = new wxBoxSizer(wxVERTICAL);
     emptySizer->AddStretchSpacer(1);
     auto* loadBtn = new wxButton(importEmptyView_, wxID_ANY,
@@ -1261,19 +1399,19 @@ ChatFrame::ChatFrame()
         OnImport(dummy);
     });
 
-    importCanvas_ = new ChatCanvas(importPanel_);
+    importCanvas_ = new ChatCanvas(loadView_);
     importCanvas_->SetBgColour(
         wxSystemSettings::GetColour(wxSYS_COLOUR_WINDOW));
     importCanvas_->Hide();
 
-    refLabel_ = new wxStaticText(importPanel_, wxID_ANY,
+    refLabel_ = new wxStaticText(loadView_, wxID_ANY,
         wxString::FromUTF8("Referenced Session: None"));
     auto refFont = refLabel_->GetFont();
     refFont.SetPointSize(refFont.GetPointSize() - 1);
     refLabel_->SetFont(refFont);
     refLabel_->SetForegroundColour(wxColour(140, 140, 140));
 
-    auto* instructionLabel = new wxStaticText(importPanel_, wxID_ANY,
+    auto* instructionLabel = new wxStaticText(loadView_, wxID_ANY,
         wxString::FromUTF8("Click a prompt to copy it to the current session."));
     auto instrFont = instructionLabel->GetFont();
     instrFont.SetPointSize(instrFont.GetPointSize() - 1);
@@ -1285,7 +1423,7 @@ ChatFrame::ChatFrame()
     auto* refRow = new wxBoxSizer(wxHORIZONTAL);
     refRow->Add(refLabel_, 0, wxALIGN_CENTER_VERTICAL);
 
-    auto* changeBtn = new wxButton(importPanel_, wxID_ANY,
+    auto* changeBtn = new wxButton(loadView_, wxID_ANY,
         wxString::FromUTF8("load another\xE2\x80\xA6"),
         wxDefaultPosition, wxDefaultSize, wxBORDER_NONE);
     changeBtn_ = changeBtn;
@@ -1309,9 +1447,53 @@ ChatFrame::ChatFrame()
     importSizer->Add(importEmptyView_, 1, wxEXPAND);
     importSizer->Add(importCanvas_, 1, wxEXPAND);
     importSizer->Add(bottomBox, 0, wxEXPAND);
+    loadView_->SetSizer(importSizer);
+
+    threadsView_ = new wxPanel(importPanel_);
+    {
+        threadList_ = new ThreadList(threadsView_);
+        // Switch after the click is handled: the switch replaces the rows.
+        threadList_->Bind(wxEVT_LISTBOX, [this](wxCommandEvent& e) {
+            const std::string id = threadList_->Rows()[e.GetSelection()].id;
+            CallAfter([this, id] {
+                if (!SelectThread(id)) RefreshSessionChoice();  // snap back
+            });
+        });
+        threadList_->Bind(wxEVT_CONTEXT_MENU, &ChatFrame::OnThreadListContextMenu, this);
+        auto* sizer = new wxBoxSizer(wxVERTICAL);
+        sizer->Add(threadList_, 1, wxEXPAND);
+        threadsView_->SetSizer(sizer);
+    }
+
+    // Bottom toolbar, like the main pane's: the view icons, and "New thread"
+    // on the right in the Threads view. Bitmaps come from PaintLeftTabs.
+    sessionTab_ = new wxBitmapButton(importPanel_, wxID_ANY, wxBitmapBundle(),
+                                     wxDefaultPosition, kBtnSize, wxBORDER_NONE);
+    sessionTab_->SetToolTip("Session reference: a saved session to copy prompts from");
+    threadsTab_ = new wxBitmapButton(importPanel_, wxID_ANY, wxBitmapBundle(),
+                                     wxDefaultPosition, kBtnSize, wxBORDER_NONE);
+    threadsTab_->SetToolTip("This folder's threads");
+    newThreadBtn_ = new wxBitmapButton(importPanel_, wxID_ANY, wxBitmapBundle(),
+                                       wxDefaultPosition, kBtnSize, wxBORDER_NONE);
+    newThreadBtn_->SetToolTip("New thread");
+    sessionTab_->Bind(wxEVT_BUTTON, [this](wxCommandEvent&) { ShowLeftView(false); });
+    threadsTab_->Bind(wxEVT_BUTTON, [this](wxCommandEvent&) { ShowLeftView(true); });
+    newThreadBtn_->Bind(wxEVT_BUTTON, [this](wxCommandEvent&) { NewThread(activeCwd_); });
+    auto* leftToolbar = new wxBoxSizer(wxHORIZONTAL);
+    leftToolbar->Add(sessionTab_, 0, wxALIGN_CENTER_VERTICAL | wxRIGHT, 2);
+    leftToolbar->Add(threadsTab_, 0, wxALIGN_CENTER_VERTICAL);
+    leftToolbar->AddStretchSpacer();
+    leftToolbar->Add(newThreadBtn_, 0, wxALIGN_CENTER_VERTICAL);
+    // As tall as the main toolbar, whose dropdowns set its height, so the
+    // two line up.
+    leftToolbar->SetMinSize(wxSize(-1, sessionChoice_->GetBestSize().y));
+
     auto* importRoot = new wxBoxSizer(wxVERTICAL);
-    importRoot->Add(importSizer, 1, wxEXPAND | wxLEFT | wxRIGHT, FromDIP(kEdgePad));
+    importRoot->Add(loadView_, 1, wxEXPAND | wxLEFT | wxRIGHT, FromDIP(kEdgePad));
+    importRoot->Add(threadsView_, 1, wxEXPAND | wxLEFT | wxRIGHT, FromDIP(kEdgePad));
+    importRoot->Add(leftToolbar, 0, wxEXPAND | wxLEFT | wxRIGHT | wxTOP, FromDIP(kEdgePad));
     importPanel_->SetSizer(importRoot);
+    ShowLeftView(Preferences::GetLeftPaneThreads());
     importPanel_->Hide();  // hidden until split
 
     // Click on import canvas copies prompt to main input.
@@ -1328,6 +1510,10 @@ ChatFrame::ChatFrame()
         e.Skip();
     });
 
+    threadPaneTimer_.SetOwner(this);
+    Bind(wxEVT_TIMER, [this](wxTimerEvent&) { UpdateThreadPane(FolderRows()); },
+         threadPaneTimer_.GetId());
+
     splitter_->Initialize(innerSplitter_);   // Right pane only at start
     innerSplitter_->Initialize(mainPanel_);  // Editor hidden at start
 
@@ -1340,41 +1526,26 @@ ChatFrame::ChatFrame()
     frameSizer->Add(splitter_, 1, wxEXPAND | wxTOP | wxBOTTOM, FromDIP(kEdgePad));
     SetSizer(frameSizer);
 
-    // Open the most recent session if one exists; otherwise seed one for the
-    // default cwd so the dropdown always has at least one entry.
     { PERF_SCOPE("SessionStore::Init"); store_.Init(); }
     // Open the FTS5 memory index. Failure (e.g. read-only home) is silent;
     // grit_history_search returns "Memory index unavailable" in that case.
     { PERF_SCOPE("MemoryDB::Open"); memory_.Open(MemoryDB::DefaultPath()); }
-    bool restored = false;
     { PERF_SCOPE("RestoreLastSession");
-    if (auto last = store_.LastActiveCwd()) {
-        std::vector<nlohmann::json> hist;
-        if (store_.Load(*last, hist)) {
-            history_ = std::move(hist);
-            activeCwd_ = *last;
-            restored = true;
-        }
+    // Open the last active thread. An index written by 0.5.x only names the
+    // folder, whose first thread is used; with no index at all, the most
+    // recent thread, or else a fresh thread for the default cwd. Nothing is
+    // written here: the thread is saved once it changes.
+    std::string cwd = store_.LastActiveCwd().value_or(std::string());
+    std::string id = store_.LastActiveThread().value_or(std::string());
+    if (cwd.empty() && !store_.List().empty()) {
+        cwd = store_.List().front().cwd;
+        id = store_.List().front().id;
     }
-    if (!restored && !store_.List().empty()) {
-        const auto& e = store_.List().front();  // most recent
-        std::vector<nlohmann::json> hist;
-        if (store_.Load(e.cwd, hist)) {
-            history_ = std::move(hist);
-            activeCwd_ = e.cwd;
-            restored = true;
-        }
-    }
-    if (!restored) {
-        activeCwd_ = DefaultCwd();
-        SeedSystemPrompt();
-        { PERF_SCOPE("PersistActive:Save"); store_.Save(activeCwd_, history_); }
-        store_.SetLastActiveCwd(activeCwd_);
-    } else {
-        RefreshSystemPromptAgents();
-    }
+    if (cwd.empty()) cwd = DefaultCwd();
+    if (id.empty()) id = SessionStore::IdForCwd(cwd);
+    OpenThread(id, cwd);
+    activeCwd_ = Active().cwd;
     } // RestoreLastSession
-    ChdirToCwd(activeCwd_);
     RefreshSessionChoice();
     PopulateEditorTree();
     // Some watcher backends need a running event loop before they initialise,
@@ -1390,7 +1561,7 @@ ChatFrame::ChatFrame()
     // callback from its first OnPaint). Small sessions are restored
     // synchronously, as before.
     canvas_->SetLoadingPaintCallback([this] { RestoreSession(); });
-    if (HistoryIsLarge()) {
+    if (HistoryIsLarge(Active())) {
         canvas_->SetLoading(true);
     } else {
         RestoreCanvasFromHistory();
@@ -1425,7 +1596,6 @@ ChatFrame::ChatFrame()
     Bind(wxEVT_MENU, &ChatFrame::OnEditorCloseFile, this, ID_EDITOR_CLOSE);
     Bind(wxEVT_MENU, &ChatFrame::OnEditorShowInFiles, this, ID_EDITOR_SHOW_IN_FILES);
     Bind(wxEVT_BUTTON, &ChatFrame::OnPlay, this, ID_PLAY);
-    Bind(wxEVT_TOOL_BATCH_DONE, &ChatFrame::OnToolBatchDone, this);
     sessionChoice_->Bind(wxEVT_CHOICE, &ChatFrame::OnSessionChoice, this);
     modelChoice_->Bind(wxEVT_CHOICE, &ChatFrame::OnModelChoice, this);
     modelChoice_->Bind(wxEVT_CONTEXT_MENU, &ChatFrame::OnModelContextMenu, this);
@@ -1461,14 +1631,17 @@ ChatFrame::ChatFrame()
     MCPCallbacks cb;
     cb.getStatus = [this, guiSync]() {
         return guiSync([this]() -> nlohmann::json {
+            const Thread& t = Active();
             nlohmann::json queue = nlohmann::json::array();
-            for (const auto& q : pendingQueue_) queue.push_back(q.text);
+            for (const auto& q : t.pendingQueue) queue.push_back(q.text);
             return {
-                {"streaming", streaming_},
-                {"toolIter", toolIter_},
-                {"historyLen", (int)history_.size()},
+                {"threadId", t.id},
+                {"streaming", t.streaming},
+                {"toolIter", t.toolIter},
+                {"historyLen", (int)t.history.size()},
                 {"pendingQueue", std::move(queue)},
                 {"continueQueueVisible", continueQueueBtn_->IsShown()},
+                {"input", input_->GetValue().utf8_string()},
             };
         });
     };
@@ -1477,7 +1650,8 @@ ChatFrame::ChatFrame()
     };
     cb.getLastAssistant = [this, guiSync]() {
         return guiSync([this]() -> nlohmann::json {
-            for (auto it = history_.rbegin(); it != history_.rend(); ++it) {
+            const Thread& t = Active();
+            for (auto it = t.history.rbegin(); it != t.history.rend(); ++it) {
                 if (it->value("role", std::string{}) != "assistant") continue;
                 if (!it->contains("content") || !(*it)["content"].is_string()) continue;
                 return {{"text", (*it)["content"].get<std::string>()}};
@@ -1491,13 +1665,15 @@ ChatFrame::ChatFrame()
         // GUI thread under guiSync so the caller learns immediately whether
         // the message was accepted (or queued, or rejected as full).
         return guiSync([this, text]() -> nlohmann::json {
-            if (streaming_) {
-                if (pendingQueue_.size() >= kMaxQueue_) {
+            Thread& t = Active();
+            if (!t.parent.empty()) return {{"sent", false}, {"reason", "subagent thread"}};
+            if (t.streaming) {
+                if (t.pendingQueue.size() >= kMaxQueue_) {
                     return {{"sent", false}, {"reason", "queue_full"}};
                 }
-                EnqueueMessage(text);
+                EnqueueMessage(t, text);
                 return {{"sent", true}, {"queued", true},
-                        {"queueLen", (int)pendingQueue_.size()}};
+                        {"queueLen", (int)t.pendingQueue.size()}};
             }
             input_->SetValue(text);
             CallAfter([this]() {
@@ -1508,10 +1684,7 @@ ChatFrame::ChatFrame()
         });
     };
     cb.cancelRequest = [this]() {
-        CallAfter([this]() {
-            request_.Cancel();
-            claudeProc_.Cancel();
-        });
+        CallAfter([this]() { RequestCancel(Active()); });
     };
     cb.getBlocks = [this, guiSync]() {
         return guiSync([this]() { return BuildBlocksSnapshot(); });
@@ -1534,10 +1707,43 @@ ChatFrame::ChatFrame()
     };
     cb.switchSession = [this, guiSync](const std::string& cwd) -> nlohmann::json {
         return guiSync([this, cwd]() -> nlohmann::json {
-            if (streaming_) return {{"ok", false}, {"reason", "streaming"}};
             if (cwd == activeCwd_) return {{"ok", true}};
             if (!SwitchToCwd(cwd))
                 return {{"ok", false}, {"reason", "cancelled"}};
+            return {{"ok", true}, {"threadId", Active().id}};
+        });
+    };
+    cb.listThreads = [this, guiSync]() {
+        return guiSync([this]() -> nlohmann::json {
+            nlohmann::json arr = nlohmann::json::array();
+            auto add = [&](const std::string& id, const std::string& cwd,
+                           const std::string& title, const std::string& parent,
+                           const std::string& lastUsed, const Thread* t) {
+                arr.push_back({
+                    {"id", id}, {"cwd", cwd}, {"title", title}, {"parent", parent},
+                    {"lastUsed", lastUsed}, {"loaded", t != nullptr},
+                    {"running", t && t->streaming},
+                    {"failed", t && t->failureNotice.has_value()},
+                    {"unseen", t && t->unseen},
+                });
+            };
+            for (const Thread& t : threads_)
+                add(t.id, t.cwd, t.title, t.parent, t.lastUsed, &t);
+            for (const auto& e : store_.List())
+                if (!Find(e.id)) add(e.id, e.cwd, e.title, e.parent, e.lastUsed, nullptr);
+            return {{"threads", std::move(arr)}, {"activeId", Active().id}};
+        });
+    };
+    cb.newThread = [this, guiSync](const std::string& cwd) -> nlohmann::json {
+        return guiSync([this, cwd]() -> nlohmann::json {
+            if (!NewThread(cwd.empty() ? activeCwd_ : cwd))
+                return {{"ok", false}, {"reason", "cancelled"}};
+            return {{"ok", true}, {"threadId", Active().id}};
+        });
+    };
+    cb.selectThread = [this, guiSync](const std::string& id) -> nlohmann::json {
+        return guiSync([this, id]() -> nlohmann::json {
+            if (!SelectThread(id)) return {{"ok", false}, {"reason", "not found"}};
             return {{"ok", true}};
         });
     };
@@ -1552,10 +1758,15 @@ ChatFrame::ChatFrame()
             return {{"ok", true}, {"modelIndex", currentModelIndex_}};
         });
     };
-    cb.getPreferences = [guiSync]() -> nlohmann::json {
-        return guiSync([]() -> nlohmann::json {
+    cb.getPreferences = [this, guiSync]() -> nlohmann::json {
+        return guiSync([this]() -> nlohmann::json {
+            // The model dropdown's rows, as setModel takes them.
+            nlohmann::json models = nlohmann::json::array();
+            for (unsigned i = 0; i < modelChoice_->GetCount(); ++i)
+                models.push_back(modelChoice_->GetString(i).utf8_string());
             return {
                 {"modelIndex", Preferences::GetLastModelIndex()},
+                {"models", std::move(models)},
                 {"hasDeepseekKey",
                  Preferences::HasApiKey(Preferences::Provider::DeepSeek)},
                 {"enableGritHistory", Preferences::GetEnableGritHistory()},
@@ -1647,44 +1858,27 @@ ChatFrame::ChatFrame()
     };
     cb.newSession = [this, guiSync]() -> nlohmann::json {
         return guiSync([this]() -> nlohmann::json {
-            if (streaming_) return {{"ok", false}, {"reason", "streaming"}};
-            // MCP-driven new session uses the index's default cwd as a fresh
-            // sentinel rather than popping a directory dialog (the dialog
-            // would block the GUI thread and is awkward to drive from tests).
-            // The interactive flow goes through OnSessionChoice → directory
-            // picker. Tests can use switchSession with an arbitrary cwd to
-            // create entries on demand.
-            std::string newCwd = DefaultCwd();
-            PersistActive();
-            std::vector<nlohmann::json> hist;
-            if (store_.Load(newCwd, hist)) {
-                activeCwd_ = newCwd;
-                history_ = std::move(hist);
-                RefreshSystemPromptAgents();
-            } else {
-                activeCwd_ = newCwd;
-                history_.clear();
-                SeedSystemPrompt();
-                store_.Save(activeCwd_, history_);
-            }
-            store_.SetLastActiveCwd(activeCwd_);
-            ChdirToCwd(activeCwd_);
-            canvas_->Clear();
-            RestoreCanvasFromHistory();
-            RefreshSessionChoice();
+            // MCP-driven new session opens the default cwd rather than popping
+            // a directory dialog (the dialog would block the GUI thread and is
+            // awkward to drive from tests). The interactive flow goes through
+            // OnSessionChoice → directory picker. Tests can use switchSession
+            // with an arbitrary cwd to create entries on demand.
+            if (!SwitchToCwd(DefaultCwd()))
+                return {{"ok", false}, {"reason", "cancelled"}};
             return {{"ok", true}, {"cwd", activeCwd_}};
         });
     };
     cb.exportSession = [this, guiSync](const std::string& path)
         -> nlohmann::json {
         return guiSync([this, path]() -> nlohmann::json {
+            const Thread& t = Active();
             nlohmann::json j;
-            j["version"] = HistoryHasImages(history_) ? 2 : 1;
-            j["messages"] = history_;
+            j["version"] = HistoryHasImages(t.history) ? 2 : 1;
+            j["messages"] = t.history;
             std::string err;
             bool ok = false;
-            if (HistoryHasImages(history_)) {
-                ok = ExportToZip(path, j, CollectImageRefs(history_), err);
+            if (HistoryHasImages(t.history)) {
+                ok = ExportToZip(path, j, CollectImageRefs(t.history), err);
             } else {
                 std::ofstream f(path, std::ios::binary | std::ios::trunc);
                 ok = (bool)f;
@@ -1693,7 +1887,7 @@ ChatFrame::ChatFrame()
                 else err = "cannot write file";
             }
             if (!ok) return {{"ok", false}, {"error", err}};
-            return {{"ok", true}, {"messageCount", (int)history_.size()}};
+            return {{"ok", true}, {"messageCount", (int)t.history.size()}};
         });
     };
     cb.importSession = [this, guiSync](const std::string& path)
@@ -1726,9 +1920,15 @@ ChatFrame::ChatFrame()
             return {{"ok", true}, {"promptCount", promptCount}};
         });
     };
+    cb.setInput = [this, guiSync](const std::string& text) -> nlohmann::json {
+        return guiSync([this, text]() -> nlohmann::json {
+            input_->SetValue(wxString::FromUTF8(text));
+            return {{"ok", true}};
+        });
+    };
     cb.play = [this, guiSync]() -> nlohmann::json {
         return guiSync([this]() -> nlohmann::json {
-            if (streaming_) return {{"started", false}, {"reason", "streaming"}};
+            if (Active().streaming) return {{"started", false}, {"reason", "streaming"}};
             const bool configured = RunConfigStore::Get(activeCwd_).has_value();
             wxCommandEvent ev(wxEVT_BUTTON, ID_PLAY);
             OnPlay(ev);
@@ -1736,7 +1936,18 @@ ChatFrame::ChatFrame()
         });
     };
     auto panes = [this]() -> nlohmann::json {
+        nlohmann::json rows = nlohmann::json::array();
+        for (const ThreadRow& r : threadList_->Rows())
+            rows.push_back({{"id", r.id}, {"title", r.title.utf8_string()},
+                            {"detail", r.detail.utf8_string()}, {"child", r.child},
+                            {"state", std::array{"done", "running", "unseen", "failed"}[(int)r.state]}});
+        nlohmann::json sessions = nlohmann::json::array();
+        for (unsigned i = 0; i < sessionChoice_->GetCount(); ++i)
+            sessions.push_back(sessionChoice_->GetString(i).utf8_string());
         return {{"window", GetClientSize().x},
+                {"sessions", std::move(sessions)},
+                {"threads", ThreadsShown() ? importPanel_->GetSize().x : 0},
+                {"threadRows", std::move(rows)},
                 {"import", splitter_->IsSplit() ? importPanel_->GetSize().x : 0},
                 {"chat", mainPanel_->GetSize().x},
                 {"editor", innerSplitter_->IsSplit() ? editorPanel_->GetSize().x : 0}};
@@ -1744,8 +1955,19 @@ ChatFrame::ChatFrame()
     cb.togglePanel = [this, guiSync, panes](const std::string& panel) -> nlohmann::json {
         return guiSync([this, panel, panes]() -> nlohmann::json {
             wxCommandEvent ev(wxEVT_BUTTON);
-            if (panel == "editor") OnEditorToggle(ev);
-            else OnHamburger(ev);
+            if (panel == "editor") {
+                OnEditorToggle(ev);
+            } else {
+                // "import" and "threads" are the left pane's two views: close
+                // it if it shows that view, else open it on that view.
+                const bool threads = panel == "threads";
+                if (splitter_->IsSplit() && threadsView_->IsShown() == threads) {
+                    OnHamburger(ev);
+                } else {
+                    ShowLeftView(threads);
+                    if (!splitter_->IsSplit()) OnHamburger(ev);
+                }
+            }
             return panes();
         });
     };
@@ -1886,10 +2108,10 @@ bool ChatFrame::TryPasteImage() {
     return true;
 }
 
-bool ChatFrame::HistoryIsLarge() const {
-    if (history_.size() > 200) return true;
+bool ChatFrame::HistoryIsLarge(const Thread& t) {
+    if (t.history.size() > 200) return true;
     size_t chars = 0;
-    for (const auto& m : history_) {
+    for (const auto& m : t.history) {
         if (!m.is_object()) continue;
         if (m.contains("content") && m["content"].is_string())
             chars += m["content"].get<std::string>().size();
@@ -1908,7 +2130,7 @@ bool ChatFrame::HistoryIsLarge() const {
 
 void ChatFrame::RestoreCanvasMaybeDeferred() {
     canvas_->Clear();
-    if (HistoryIsLarge()) {
+    if (HistoryIsLarge(Active())) {
         // The canvas fires onLoadingPainted_ (set once in the constructor)
         // from its first paint of the placeholder, which runs RestoreSession.
         // No direct CallAfter here — that would run RestoreSession twice.
@@ -1924,40 +2146,31 @@ ChatFrame::~ChatFrame() {
     // on a thread waiting for a CallAfter that can no longer fire.
     destroying_.store(true);
     mcp_.Stop();
-    request_.Cancel();
-    // Kills a running Claude Code turn and joins its worker, so no callback
-    // can land on a half-destroyed frame.
-    claudeProc_ = ClaudeAgentProcess();
+    for (Thread& t : threads_) {
+        // Joins the request's worker, so no more callbacks can be posted.
+        t.request = StreamingWebRequest();
+        // Kills a running Claude Code turn and joins its worker, so no
+        // callback can land on a half-destroyed frame.
+        t.claudeProc = ClaudeAgentProcess();
+        // Tool worker isn't detached — cancel any in-flight bash subtree and
+        // join so the worker can't post to a half-destroyed frame.
+        if (t.toolWorker.joinable()) {
+            if (auto tok = t.currentToolToken) {
+                tok->cancelled.store(true);
+#ifndef _WIN32
+                int pgid = tok->activePgid.load();
+                if (pgid > 0) ::kill(-pgid, SIGTERM);
+#endif
+            }
+            t.toolWorker.join();
+        }
+    }
     delete fileWatcher_;  // stop filesystem watches (own their thread)
     fileWatcher_ = nullptr;
     delete themeWatcher_;
     themeWatcher_ = nullptr;
     themeTimer_.Stop();
-    // ~StreamingWebRequest joins the worker thread, so by the time we return
-    // no more callbacks can be posted.
-
-    // Tool worker isn't detached — cancel any in-flight bash subtree and join
-    // so the worker can't fire wxQueueEvent on a half-destroyed frame.
-    if (toolWorker_.joinable()) {
-        if (auto tok = currentToolToken_) {
-            tok->cancelled.store(true);
-#ifndef _WIN32
-            int pgid = tok->activePgid.load();
-            if (pgid > 0) ::kill(-pgid, SIGTERM);
-#endif
-        }
-        toolWorker_.join();
-    }
-    if (playWorker_.joinable()) {
-        if (auto tok = currentPlayToken_) {
-            tok->cancelled.store(true);
-#ifndef _WIN32
-            int pgid = tok->activePgid.load();
-            if (pgid > 0) ::kill(-pgid, SIGTERM);
-#endif
-        }
-        playWorker_.join();
-    }
+    for (PlayRun& run : plays_) StopPlay(run);
     if (persistWorker_.joinable()) persistWorker_.join();
     if (remoteModelsWorker_.joinable()) remoteModelsWorker_.join();
 }
@@ -1995,7 +2208,7 @@ nlohmann::json ChatFrame::BuildBlocksSnapshot() const {
         wxString preview = b.visibleText.Length() > kPreview
             ? b.visibleText.Left(kPreview) + "..."
             : b.visibleText;
-        e["preview"] = preview.ToStdString();
+        e["preview"] = preview.utf8_string();  // UTF-8 whatever the locale
         if (b.type == BlockType::Heading) {
             e["level"] = b.headingLevel;
         } else if (b.type == BlockType::CodeBlock) {
@@ -2028,7 +2241,7 @@ nlohmann::json ChatFrame::BuildBlocksSnapshot() const {
 
 nlohmann::json ChatFrame::BuildConversationSnapshot() const {
     nlohmann::json out = nlohmann::json::array();
-    for (const auto& m : history_) {
+    for (const auto& m : Active().history) {
         nlohmann::json e;
         e["role"] = m.value("role", std::string{});
         if (m.contains("content") && m["content"].is_string()) {
@@ -2048,14 +2261,16 @@ nlohmann::json ChatFrame::BuildConversationSnapshot() const {
 }
 
 void ChatFrame::OnClose(wxCloseEvent& evt) {
-    // currentToolToken_ is non-null exactly while the tool-dispatch worker is
-    // running. Closing during a tool batch must veto + cancel just like
+    // Closing while a tool-dispatch worker runs must veto + cancel just like
     // closing during an in-flight HTTP request — otherwise the worker would
-    // outlive the frame and post wxQueueEvent to a dangling `this`.
-    if (request_.IsActive() || currentToolToken_ || claudeProc_.IsActive()) {
+    // outlive the frame and post to a dangling `this`.
+    auto busy = [](const Thread& t) {
+        return t.request.IsActive() || t.toolWorkerRunning || t.claudeProc.IsActive();
+    };
+    if (std::ranges::any_of(threads_, busy)) {
         quitRequested_ = true;
         Hide();
-        RequestCancel();
+        for (Thread& t : threads_) RequestCancel(t);
         // OnStreamDone / OnToolBatchDone / OnClaudeDone check quitRequested_
         // and re-fire Close() once their phase finishes.
         evt.Veto();
@@ -2064,7 +2279,7 @@ void ChatFrame::OnClose(wxCloseEvent& evt) {
             evt.Veto();
             return;
         }
-        PersistActive();
+        Persist(Active());
         evt.Skip();
     }
 }
@@ -2086,8 +2301,8 @@ void ChatFrame::OnInputKey(wxKeyEvent& e) {
 }
 
 void ChatFrame::OnCharHook(wxKeyEvent& e) {
-    if (e.GetKeyCode() == WXK_ESCAPE && streaming_) {
-        RequestCancel();
+    if (e.GetKeyCode() == WXK_ESCAPE && Active().streaming) {
+        RequestCancel(Active());
         return;
     }
     int key = e.GetKeyCode();
@@ -2098,23 +2313,34 @@ void ChatFrame::OnCharHook(wxKeyEvent& e) {
     e.Skip();
 }
 
-void ChatFrame::RequestCancel() {
+void ChatFrame::RequestCancel(Thread& t) {
+    // A Claude Code subagent runs inside its parent's Claude Code process:
+    // cancelling it cancels that run, which ends the subagent too.
+    if (Thread* p = t.parent.empty() ? nullptr : Find(t.parent);
+        p && p->claudeProc.IsActive()) {
+        RequestCancel(*p);
+        return;
+    }
+    if (t.streaming) t.stopRequested = true;
     // Idempotent on a finished request — Cancel just sets an atomic.
-    request_.Cancel();
+    t.request.Cancel();
     // A Claude turn gets SIGINT, so Claude Code ends it cleanly.
-    claudeProc_.Cancel();
+    t.claudeProc.Cancel();
     // Signal the tool worker. Setting `cancelled` makes the worker bail out
     // between tools and the bash poll loop bail mid-tool. Sending SIGTERM to
     // the active pgid kills the bash subtree without waiting for the worker
     // to notice — important when bash is blocked on something slow.
-    if (auto tok = currentToolToken_) {
+    if (auto tok = t.currentToolToken) {
         tok->cancelled.store(true);
 #ifndef _WIN32
         int pgid = tok->activePgid.load();
         if (pgid > 0) ::kill(-pgid, SIGTERM);
 #endif
+        // The batch waits for its subagents: they are cancelled too.
+        for (Thread& c : threads_)
+            if (c.parent == t.id && c.streaming) RequestCancel(c);
     }
-    // Note: Play-button worker (currentPlayToken_) is intentionally NOT
+    // Note: Play-button runs (plays_) are intentionally NOT
     // cancelled here. Escape cancels AI-initiated tool calls, not user-
     // initiated Play runs. If the user started a dev server via Play,
     // they want it to keep running.
@@ -2147,8 +2373,10 @@ void ChatFrame::ApplyTheme() {
     importCanvas_->SetBgColour(wxSystemSettings::GetColour(wxSYS_COLOUR_WINDOW));
     importCanvas_->ApplyTheme();
     changeBtn_->SetForegroundColour(importCanvas_->GetPalette().toolAccent);
+    threadList_->Refresh();
     ReloadToolbarIcons();
-    if (!pendingQueue_.empty()) RebuildChips();
+    if (!Active().pendingQueue.empty()) RebuildChips();
+
     // Re-colour the open file with the new syntax palette.
     if (codeEdit_ && !editorFilePath_.empty() && highlightTimer_)
         highlightTimer_->StartOnce(1);
@@ -2162,196 +2390,491 @@ void ChatFrame::ReloadToolbarIcons() {
     playBtn_->SetBitmap(LoadThemedSvgIcon("play.svg", kIconSize, accent));
     exportBtn_->SetBitmap(LoadThemedSvgIcon("export.svg", kIconSize, accent));
     hamburgerBtn_->SetBitmap(LoadThemedSvgIcon("hamburger.svg", kIconSize, accent));
+    PaintLeftTabs();
     editorBtn_->SetBitmap(LoadThemedSvgIcon("editor.svg", kIconSize, accent));
+}
+
+ChatFrame::Thread* ChatFrame::Find(const std::string& id) {
+    auto it = std::ranges::find(threads_, id, &Thread::id);
+    return it != threads_.end() ? &*it : nullptr;
+}
+
+ChatFrame::Thread* ChatFrame::Find(const std::string& id, uint32_t gen) {
+    Thread* t = Find(id);
+    return t && t->gen == gen ? t : nullptr;
+}
+
+wxString ChatFrame::ThreadLabel(const std::string& id, const std::string& cwd,
+                                const std::string& title) {
+    if (!title.empty()) return wxString::FromUTF8(title);
+    // A folder's first thread is its session from before threads existed,
+    // named by the folder as it always was.
+    if (id == SessionStore::IdForCwd(cwd)) return DisplayPath(cwd);
+    return "New thread";
+}
+
+wxString ChatFrame::ThreadLabelOf(const std::string& id) {
+    if (const Thread* t = Find(id)) return ThreadLabel(t->id, t->cwd, t->title);
+    const auto& entries = store_.List();
+    auto e = std::ranges::find(entries, id, &SessionStore::Entry::id);
+    return e != entries.end() ? ThreadLabel(e->id, e->cwd, e->title) : wxString("thread");
+}
+
+std::vector<ThreadRow> ChatFrame::FolderRows() {
+    // Open threads carry the live state (running, title); the index adds the
+    // folder's threads that haven't been opened in this run.
+    struct Row {
+        ThreadRow row;
+        std::string parent;
+        std::string lastUsed;
+    };
+    std::vector<Row> rows;
+    for (Thread& t : threads_) {
+        if (t.cwd != activeCwd_) continue;
+        ThreadRow r{.id = t.id, .title = ThreadLabel(t.id, t.cwd, t.title),
+                    .detail = LastUsedLabel(t.lastUsed)};
+        if (t.streaming) {
+            r.state = ThreadRow::State::Running;
+            r.detail = CurrentStep(t);
+        } else if (t.failureNotice && !Shown(t)) {  // until viewed
+            r.state = ThreadRow::State::Failed;
+            r.detail = t.failureNotice->visibleText.BeforeFirst('\n');
+        } else if (t.unseen) {
+            r.state = ThreadRow::State::Unseen;
+        }
+        rows.push_back({std::move(r), t.parent, t.lastUsed});
+    }
+    for (const auto& e : store_.List()) {
+        if (e.cwd != activeCwd_ || Find(e.id)) continue;
+        rows.push_back({{.id = e.id, .title = ThreadLabel(e.id, e.cwd, e.title),
+                         .detail = LastUsedLabel(e.lastUsed)},
+                        e.parent, e.lastUsed});
+    }
+    std::ranges::stable_sort(rows, std::greater{}, &Row::lastUsed);
+
+    // Subagent threads go right under their parent.
+    auto listed = [&rows](const std::string& id) {
+        return std::ranges::find(rows, id, [](const Row& r) { return r.row.id; }) != rows.end();
+    };
+    std::vector<ThreadRow> ordered;
+    for (const Row& r : rows) {
+        if (!r.parent.empty() && listed(r.parent)) continue;
+        ordered.push_back(r.row);
+        for (const Row& c : rows) {
+            if (c.parent != r.row.id) continue;
+            ordered.push_back(c.row);
+            ordered.back().child = true;
+        }
+    }
+    return ordered;
+}
+
+wxString ChatFrame::CurrentStep(Thread& t) {
+    if (t.compacting) return "compacting";
+    // The tool calls without a result yet: a Claude message keeps its calls
+    // until their first result arrives, other turns record them in history
+    // before running them.
+    std::vector<std::string> running;
+    auto unanswered = [&](const nlohmann::json& msg, const std::vector<std::string>& answered) {
+        auto calls = msg.find("tool_calls");
+        if (calls == msg.end() || !calls->is_array()) return;
+        for (const auto& c : *calls)
+            if (std::ranges::find(answered, StringField(c, "id")) == answered.end())
+                running.push_back(StringField(c.value("function", nlohmann::json()), "name"));
+    };
+    if (t.claudePendingMsg.is_object()) {
+        unanswered(t.claudePendingMsg, {});
+    } else {
+        std::vector<std::string> answered;
+        auto m = t.history.rbegin();
+        for (; m != t.history.rend() && StringField(*m, "role") == "tool"; ++m)
+            answered.push_back(StringField(*m, "tool_call_id"));
+        if (m != t.history.rend() && StringField(*m, "role") == "assistant")
+            unanswered(*m, answered);
+    }
+    if (!running.empty()) {
+        wxString step = "running " + wxString::FromUTF8(running.front());
+        if (running.size() > 1) step += FormatU8(" +{}", running.size() - 1);
+        return step;
+    }
+    return t.activeAssistantText.empty() ? "thinking" : "writing";
 }
 
 void ChatFrame::RefreshSessionChoice() {
     PERF_SCOPE("RefreshSessionChoice");
-    sessionChoice_->Clear();
+    // One row per folder, most recent first. "● " marks a folder with a
+    // running thread; its threads are in the left pane.
+    // A folder whose threads aren't saved yet goes first.
     sessionCwds_.clear();
+    for (const auto& e : store_.List())
+        if (std::ranges::find(sessionCwds_, e.cwd) == sessionCwds_.end())
+            sessionCwds_.push_back(e.cwd);
+    if (!activeCwd_.empty() && std::ranges::find(sessionCwds_, activeCwd_) == sessionCwds_.end())
+        sessionCwds_.insert(sessionCwds_.begin(), activeCwd_);
+    sessionChoice_->Clear();
     sessionChoice_->Append(wxString::FromUTF8("New Session\xE2\x80\xA6"));
-    int activeRow = -1;
-    for (const auto& e : store_.List()) {
-        sessionChoice_->Append(DisplayPath(e.cwd));
-        sessionCwds_.push_back(e.cwd);
-        if (e.cwd == activeCwd_) activeRow = (int)sessionCwds_.size();
-    }
-    if (activeRow < 1 && sessionCwds_.size() >= 1) activeRow = 1;
-    if (activeRow >= 1) sessionChoice_->SetSelection(activeRow);
-    if (activeRow >= 1) {
-        sessionChoice_->SetToolTip(
-            wxString::FromUTF8(sessionCwds_[activeRow - 1]));
-    }
+    // What the user hasn't seen in a folder: "⚠ " a thread failed, "● " one
+    // is working or finished since it was last viewed. The thread on screen
+    // doesn't count, and subagents report through their parent.
+    auto mark = [this](const std::string& cwd) {
+        bool busy = false;
+        for (const Thread& t : threads_) {
+            if (&t == &Active() || !t.parent.empty() || t.cwd != cwd) continue;
+            if (t.failureNotice) return wxString::FromUTF8("\xE2\x9A\xA0 ");
+            busy = busy || t.streaming || t.unseen;
+        }
+        return busy ? wxString::FromUTF8("\xE2\x97\x8F ") : wxString();
+    };
+    for (const std::string& cwd : sessionCwds_)
+        sessionChoice_->Append(mark(cwd) + DisplayPath(cwd));
+    auto active = std::ranges::find(sessionCwds_, activeCwd_);
+    if (active != sessionCwds_.end())
+        sessionChoice_->SetSelection(1 + (int)(active - sessionCwds_.begin()));
+    sessionChoice_->SetToolTip(wxString::FromUTF8(activeCwd_));
+    if (ThreadsShown()) UpdateThreadPane(FolderRows());
+}
+
+void ChatFrame::UpdateThreadPane(std::vector<ThreadRow> rows) {
+    // While a thread runs its step changes without a refresh from the turn
+    // code, so poll at a low rate until none does.
+    const bool running = std::ranges::any_of(rows, [](const ThreadRow& r) {
+        return r.state == ThreadRow::State::Running;
+    });
+    if (!running) threadPaneTimer_.Stop();
+    else if (!threadPaneTimer_.IsRunning()) threadPaneTimer_.Start(1000);
+    threadList_->SetRows(std::move(rows), Active().id);
 }
 
 void ChatFrame::OnSessionChoice(wxCommandEvent& evt) {
-    int sel = evt.GetSelection();
-    if (sel == 0) {
-        // "New Session…" sentinel — snap back.
-        for (int i = 0; i < (int)sessionCwds_.size(); ++i) {
-            if (sessionCwds_[i] == activeCwd_) {
-                sessionChoice_->SetSelection(i + 1);
-                break;
-            }
-        }
-        if (streaming_) {
-            wxMessageBox("Cannot switch sessions while streaming.",
-                         "gritcode", wxOK | wxICON_INFORMATION, this);
-            return;
-        }
-        CreateNewSession();
-        return;
-    }
-    int idx = sel - 1;
-    if (idx < 0 || idx >= (int)sessionCwds_.size()) return;
-    const std::string& target = sessionCwds_[idx];
-    if (target == activeCwd_) return;
-    if (streaming_) {
-        for (int i = 0; i < (int)sessionCwds_.size(); ++i) {
-            if (sessionCwds_[i] == activeCwd_) {
-                sessionChoice_->SetSelection(i + 1);
-                break;
-            }
-        }
-        wxMessageBox("Cannot switch sessions while streaming.",
-                     "gritcode", wxOK | wxICON_INFORMATION, this);
-        return;
-    }
-    if (!SwitchToCwd(target)) {
-        // Cancelled (unsaved editor changes): snap back to the active session.
-        for (int i = 0; i < (int)sessionCwds_.size(); ++i) {
-            if (sessionCwds_[i] == activeCwd_) {
-                sessionChoice_->SetSelection(i + 1);
-                break;
-            }
-        }
-    }
+    const int sel = evt.GetSelection();
+    const std::string cwd = sel >= 1 && sel <= (int)sessionCwds_.size()
+                                ? sessionCwds_[sel - 1] : std::string();
+    // Snap back to the active folder; a successful switch reselects.
+    RefreshSessionChoice();
+    if (sel == 0) CreateNewSession();
+    else if (!cwd.empty() && cwd != activeCwd_) SwitchToCwd(cwd);
 }
 
 void ChatFrame::CreateNewSession() {
-    // Pop a directory picker so the user can name the session by folder.
+    // Pop a directory picker so the user can pick the folder to work in.
     // Default to $HOME so they start at a familiar root.
     wxString defaultDir = wxString::FromUTF8(DefaultCwd());
-    wxDirDialog dlg(this, "Choose a folder for the new session",
+    wxDirDialog dlg(this, "Choose a folder",
                     defaultDir,
                     wxDD_DEFAULT_STYLE);
     if (dlg.ShowModal() != wxID_OK) return;
     std::string chosen = dlg.GetPath().ToStdString(wxConvUTF8);
     if (chosen.empty()) return;
-    if (chosen == activeCwd_) return;  // already on this session
-
-    if (!MaybeSaveEditor()) return;  // cancelled: keep current session + editor
-    ClearEditorState();
-
-    PersistActive();
-    activeCwd_ = chosen;
-    std::vector<nlohmann::json> hist;
-    if (store_.Load(activeCwd_, hist)) {
-        // Existing session for this folder — restore it.
-        history_ = std::move(hist);
-        RefreshSystemPromptAgents();
-    } else {
-        // Brand new folder: seed a fresh system prompt.
-        history_.clear();
-        SeedSystemPrompt();
-        store_.Save(activeCwd_, history_);
-    }
-    historyCompactBaseCount_ = 0;  // fresh compaction gate for the new session
-    store_.SetLastActiveCwd(activeCwd_);
-    ChdirToCwd(activeCwd_);  // keep the process cwd in sync with activeCwd_
-    RestoreCanvasMaybeDeferred();
-    RefreshSessionChoice();
-    PopulateEditorTree();
-    SetupFsWatcher();
+    SwitchToCwd(chosen);
 }
 
 bool ChatFrame::SwitchToCwd(const std::string& cwd) {
-    PERF_SCOPE("SwitchToCwd");
-    if (cwd == activeCwd_) return true;
-    if (!MaybeSaveEditor()) return false;  // cancelled: keep current session
-    ClearEditorState();
-
-    PersistActive();
-    std::vector<nlohmann::json> hist;
-    bool existed = store_.Load(cwd, hist);
-    activeCwd_ = cwd;
-    history_ = std::move(hist);
-    if (!existed) {
-        // Brand new folder: seed a fresh system prompt and persist so the
-        // session shows up in the index immediately.
-        history_.clear();
-        SeedSystemPrompt();
-        store_.Save(activeCwd_, history_);
-    } else {
-        RefreshSystemPromptAgents();
+    // A folder opens on its most recently used thread. One never used before
+    // starts on its first thread, whose id derives from the folder.
+    std::string id = SessionStore::IdForCwd(cwd);
+    std::string lastUsed;
+    for (const Thread& t : threads_) {
+        if (t.cwd == cwd && t.parent.empty() && t.lastUsed > lastUsed) {
+            id = t.id;
+            lastUsed = t.lastUsed;
+        }
     }
-    historyCompactBaseCount_ = 0;  // fresh compaction gate for the new session
-    store_.SetLastActiveCwd(activeCwd_);
-    ChdirToCwd(activeCwd_);
+    for (const auto& e : store_.List()) {
+        if (e.cwd == cwd && e.parent.empty() && e.lastUsed > lastUsed) {
+            id = e.id;
+            lastUsed = e.lastUsed;
+        }
+    }
+    if (!Find(id)) OpenThread(id, cwd);
+    return ShowThread(id);
+}
+
+bool ChatFrame::NewThread(const std::string& cwd) {
+    // Not saved until its first turn ends, so an unused one leaves nothing
+    // behind.
+    Thread& t = OpenThread(SessionStore::NewThreadId(), cwd);
+    if (ShowThread(t.id)) {
+        if (store_.LoadBrief(cwd).empty() && WriteProjectBrief(cwd)) AddBriefNotice(t);
+        return true;
+    }
+    threads_.pop_back();  // cancelled; nothing refers to it yet
+    return false;
+}
+
+bool ChatFrame::SelectThread(const std::string& id) {
+    if (!Find(id)) {
+        const auto& entries = store_.List();
+        auto e = std::ranges::find(entries, id, &SessionStore::Entry::id);
+        if (e == entries.end()) return false;
+        OpenThread(e->id, e->cwd);
+    }
+    return ShowThread(id);
+}
+
+ChatFrame::Thread& ChatFrame::OpenThread(const std::string& id,
+                                         const std::string& cwd) {
+    Thread& t = threads_.emplace_back();
+    t.id = id;
+    t.cwd = cwd;
+    t.lastUsed = SessionStore::NowIso();
+    const auto& entries = store_.List();
+    if (auto e = std::ranges::find(entries, id, &SessionStore::Entry::id);
+        e != entries.end()) {
+        t.title = e->title;
+        t.parent = e->parent;
+        t.lastUsed = e->lastUsed;
+    }
+    if (store_.Load(id, t.history)) {
+        RefreshSystemPrompt(t);
+        // Sessions from before threads have no title yet.
+        if (t.title.empty()) {
+            auto first = std::ranges::find_if(t.history, IsUserTurn);
+            if (first != t.history.end())
+                t.title = DefaultTitle(StringField(*first, "content"));
+        }
+    } else {
+        SeedSystemPrompt(t);
+    }
+    return t;
+}
+
+bool ChatFrame::ShowThread(const std::string& id) {
+    PERF_SCOPE("ShowThread");
+    auto it = std::ranges::find(threads_, id, &Thread::id);
+    if (it == threads_.end()) return false;
+    const size_t idx = (size_t)(it - threads_.begin());
+    if (idx == active_) return true;
+    const bool otherFolder = it->cwd != activeCwd_;
+    if (otherFolder) {
+        if (!MaybeSaveEditor()) return false;  // cancelled: keep the current thread
+        ClearEditorState();
+    }
+
+    // The thread we leave keeps running; its canvas indices are now stale.
+    // Its draft (input text and images) stays with it.
+    Thread& prev = Active();
+    prev.liveThinkingIdx = -1;
+    prev.draft = input_->GetValue();
+    prev.draftImages = std::move(pendingImages_);
+    active_ = idx;
+    Thread& t = Active();
+    input_->SetValue(t.draft);
+    pendingImages_ = std::move(t.draftImages);
+    t.draft.clear();
+    t.draftImages.clear();
+    RebuildImageRow();
+    activeCwd_ = t.cwd;
+    store_.SetLastActive(t.cwd, t.id);
     RestoreCanvasMaybeDeferred();
+    canvas_->SetThinking(t.streaming);
+    UpdateQueueUI();
+    // The prompt of a turn that failed in the background goes back into the
+    // input, unless the user is already typing something else there.
+    if (!t.failedPrompt.empty() && input_->IsEmpty())
+        input_->SetValue(wxString::FromUTF8(t.failedPrompt));
+    t.failedPrompt.clear();
+    t.unseen = false;
     RefreshSessionChoice();
-    PopulateEditorTree();
-    SetupFsWatcher();
+    if (otherFolder) {
+        PopulateEditorTree();
+        SetupFsWatcher();
+    }
     return true;
 }
 
-void ChatFrame::PersistActive() {
-    PERF_SCOPE("PersistActive");
-    if (activeCwd_.empty()) return;
-
+void ChatFrame::Persist(Thread& t) {
+    PERF_SCOPE("Persist");
     // Snapshot everything the worker needs up front. The worker must not
-    // read history_/activeCwd_ while the GUI thread keeps mutating them.
-    std::string cwd = activeCwd_;
-    std::vector<nlohmann::json> msgs = history_;
-    std::string ts = SessionStore::NowIso();
+    // read the thread while the GUI thread keeps mutating it.
+    t.lastUsed = SessionStore::NowIso();
+    const SessionStore::Entry entry{
+        .id = t.id, .cwd = t.cwd, .lastUsed = t.lastUsed,
+        .title = t.title, .parent = t.parent,
+    };
+    std::vector<nlohmann::json> msgs = t.history;
 
     // The index update is tiny and touches entries_/sessions.json - keep it on
     // the GUI thread so SessionStore stays single-threaded. The heavy parts
     // (session-file JSON dump + write, and the FTS5 reindex) run on the worker.
-    store_.UpdateIndex(cwd, ts);
+    store_.UpdateIndex(entry);
 
     // Serialize with any previous persist so we don't reuse the std::thread
     // slot while it's still joinable. Normally it finished long ago, so this
-    // join is instant; it only blocks if the user switches sessions rapidly.
+    // join is instant; it only blocks if several threads finish at once.
     if (persistWorker_.joinable()) persistWorker_.join();
-    persistWorker_ = std::thread([this, cwd, msgs = std::move(msgs), ts]() {
-        store_.WriteSessionFile(cwd, msgs, ts);
-        if (memory_.IsOpen()) {
-            memory_.RebuildSession(SessionStore::IdForCwd(cwd), cwd, msgs, ts);
-        }
+    persistWorker_ = std::thread([this, entry, msgs = std::move(msgs)]() {
+        store_.WriteSessionFile(entry, msgs);
+        if (memory_.IsOpen())
+            memory_.RebuildSession(entry.id, entry.cwd, entry.title, entry.parent,
+                                   msgs, entry.lastUsed);
     });
 }
 
-void ChatFrame::SeedSystemPrompt() {
+std::string ChatFrame::SystemPrompt(Thread& t) {
+    t.lastAgentsContent = LoadAgentsInstructions(t.cwd);
     std::string content = BaseSystemPrompt();
-    std::string agents = LoadAgentsInstructions(activeCwd_);
-    if (!agents.empty()) content += "\n\n" + agents;
-    history_.push_back({{"role", "system"}, {"content", std::move(content)}});
+    if (!t.lastAgentsContent.empty()) content += "\n\n" + t.lastAgentsContent;
+    if (std::string folder = FolderContext(t); !folder.empty())
+        content += "\n\n" + folder;
+    if (!t.parent.empty()) content += kSubagentNote;
+    return content;
 }
 
-void ChatFrame::RefreshSystemPromptAgents() {
-    // Rebuild history_[0]'s content from the static base + current AGENTS.md.
-    // This re-injects project instructions into an EXISTING session whose
-    // system message was seeded before AGENTS.md existed (or changed).
-    if (history_.empty()) return;
-    auto& m = history_[0];
+void ChatFrame::SeedSystemPrompt(Thread& t) {
+    t.history.push_back({{"role", "system"}, {"content", SystemPrompt(t)}});
+}
+
+void ChatFrame::RefreshSystemPrompt(Thread& t) {
+    if (t.history.empty()) return;
+    auto& m = t.history[0];
     if (!m.is_object() || m.value("role", std::string{}) != "system") return;
-    std::string agents = LoadAgentsInstructions(activeCwd_);
-    lastAgentsContent_ = agents;
-    std::string content = BaseSystemPrompt();
-    if (!agents.empty()) content += "\n\n" + agents;
-    m["content"] = std::move(content);
+    m["content"] = SystemPrompt(t);
+}
+
+std::vector<ChatFrame::FolderThread> ChatFrame::FolderThreads(const std::string& cwd) const {
+    std::vector<FolderThread> out;
+    for (const Thread& t : threads_) {
+        if (t.cwd == cwd && t.parent.empty() && !t.title.empty())
+            out.push_back({t.id, t.title, t.lastUsed});
+    }
+    for (const auto& e : store_.List()) {
+        if (e.cwd == cwd && e.parent.empty() && !e.title.empty()
+            && std::ranges::find(threads_, e.id, &Thread::id) == threads_.end())
+            out.push_back({e.id, e.title, e.lastUsed});
+    }
+    std::ranges::stable_sort(out, std::greater{}, &FolderThread::lastUsed);
+    return out;
+}
+
+std::string ChatFrame::FolderContext(const Thread& t) const {
+    // Titles and days only: a list that changes on every turn would keep
+    // changing the cached prompt prefix.
+    constexpr int kMaxListed = 10;
+    std::string list;
+    int listed = 0;
+    for (const FolderThread& o : FolderThreads(t.cwd)) {
+        if (o.id == t.id) continue;
+        if (listed++ == kMaxListed) break;
+        list += "\n- " + o.title + " (last used " + o.lastUsed.substr(0, 10) + ")";
+    }
+    std::string out;
+    if (std::string brief = store_.LoadBrief(t.cwd); !brief.empty())
+        out = "Project brief for " + t.cwd + " (written by a model from the "
+              "README and file list, may be out of date):\n" + brief;
+    if (!list.empty()) {
+        if (!out.empty()) out += "\n\n";
+        out += "Other threads in this folder: separate conversations whose "
+               "history isn't available here; grit_history_search with scope "
+               "\"folder\" finds what was said and done in them." + list;
+    }
+    if (const std::string repo = FindGitRoot(t.cwd); !repo.empty() && t.parent.empty()) {
+        if (!out.empty()) out += "\n\n";
+        out += SharedCheckoutNote(repo, store_.WorktreesDir());
+    }
+    return out;
+}
+
+bool ChatFrame::Started(const Thread& t) {
+    return t.streaming || std::ranges::any_of(t.history, IsUserTurn);
+}
+
+bool ChatFrame::WriteProjectBrief(const std::string& cwd) {
+    auto job = std::ranges::find(briefJobs_, cwd, &BriefJob::cwd);
+    if (job == briefJobs_.end()) {
+        briefJobs_.emplace_back().cwd = cwd;
+        job = briefJobs_.end() - 1;
+    }
+    if (job->running) return false;
+    std::vector<std::string> titles;
+    for (const FolderThread& f : FolderThreads(cwd)) titles.push_back(f.title);
+    const ModelRoute route = RouteForIndex(BriefModelIndex(currentModelIndex_, remoteModels_),
+                                           remoteModels_);
+    const BriefModel model{
+        .url = route.url,
+        .model = route.model,
+        .apiKey = route.needsApiKey
+                      ? Preferences::GetApiKey(route.provider).utf8_string()
+                      : std::string(),
+        .deepseek = route.needsApiKey,
+        .claudeExe = route.claudeCli ? FindClaudeExecutable() : std::string(),
+        .label = ModelLabelForId(route.model),
+    };
+    job->writer = model.label;
+    job->running = true;
+    if (route.claudeCli && model.claudeExe.empty()) {
+        CallAfter([this, cwd] { OnBriefWritten(cwd, {}, "Claude Code isn't installed"); });
+        return true;
+    }
+    job->run = WriteBrief(this, model, cwd,
+                          BriefMaterial(cwd, LoadAgentsInstructions(cwd), titles),
+                          [this, cwd](std::string brief, std::string error) {
+                              OnBriefWritten(cwd, std::move(brief), std::move(error));
+                          });
+    return true;
+}
+
+void ChatFrame::OnBriefWritten(const std::string& cwd, std::string brief, std::string error) {
+    auto job = std::ranges::find(briefJobs_, cwd, &BriefJob::cwd);
+    if (job == briefJobs_.end()) return;
+    job->running = false;
+    if (error.empty() && !store_.SaveBrief(cwd, brief)) error = "it could not be saved";
+    // Threads with no turn yet start with it; the others get it when they
+    // are next opened, like an AGENTS.md change.
+    if (error.empty())
+        for (Thread& t : threads_)
+            if (t.cwd == cwd && !Started(t)) RefreshSystemPrompt(t);
+    Thread& a = Active();
+    if (a.cwd != cwd) return;
+    if (!Started(a)) RestoreCanvasFromHistory();  // "Writing…" becomes the brief
+    if (!error.empty())
+        canvas_->AddBlock(NoticeBlock(
+            wxString::FromUTF8("\xE2\x9A\xA0 ") + job->writer + " couldn't write the project "
+            "brief: " + wxString::FromUTF8(error) + ". Threads here start without one; the "
+            "next new thread tries again."));
+    else if (Started(a))
+        canvas_->AddBlock(NoticeBlock("The project brief for this folder is written; new "
+                                      "threads here start with it."));
+}
+
+void ChatFrame::AddBriefNotice(const Thread& t) {
+    if (!t.parent.empty()) return;
+    auto job = std::ranges::find(briefJobs_, t.cwd, &BriefJob::cwd);
+    if (job != briefJobs_.end() && job->running) {
+        canvas_->AddBlock(NoticeBlock(
+            "Writing a project brief for this folder with " + job->writer + ", from its "
+            "README, AGENTS.md, file names and thread titles. New threads here start "
+            "with it" + wxString::FromUTF8("\xE2\x80\xA6")));
+        return;
+    }
+    const std::string brief = store_.LoadBrief(t.cwd);
+    if (brief.empty()) return;
+    canvas_->AddBlock(NoticeBlock("This thread starts with the folder's project brief:"));
+    MdStream md([this](Block b) { canvas_->AddBlock(std::move(b)); });
+    md.Feed(wxString::FromUTF8(brief));
+    md.Flush();
 }
 
 void ChatFrame::RestoreCanvasFromHistory() {
     PERF_SCOPE("RestoreCanvasFromHistory");
+    Thread& t = Active();
+    canvas_->Clear();
     canvas_->BeginBatch();
+    if (!t.parent.empty())
+        canvas_->AddBlock(ThreadLinkBlock("Subagent thread (view only), started by ",
+                                          t.parent, ThreadLabelOf(t.parent)));
     ModelSwitchTracker modelTracker;
+    // Display-only blocks go back where they were added (see localBlocks).
+    size_t local = 0;
+    auto emitLocal = [&](size_t upTo) {
+        for (; local < t.localBlocks.size() && t.localBlocks[local].after <= upTo; ++local)
+            canvas_->AddBlock(t.localBlocks[local].block);
+    };
     // Walk the message list and re-emit blocks. Tool call/result pairs are
     // stitched back together: an assistant message's tool_calls are matched
     // against the immediately-following "tool" messages by tool_call_id.
-    for (size_t i = 0; i < history_.size(); ++i) {
-        const auto& m = history_[i];
+    for (size_t i = 0; i < t.history.size(); ++i) {
+        emitLocal(i);
+        const auto& m = t.history[i];
         // Compacted messages are still part of the durable transcript.
         // They are hidden from the MODEL view (BuildModelView), but MUST be
         // rendered here so the user sees the full session, not just the
@@ -2376,7 +2899,7 @@ void ChatFrame::RestoreCanvasFromHistory() {
             if (m.contains("images") && m["images"].is_array()) {
                 for (const auto& img : m["images"]) {
                     if (!img.is_object()) continue;
-                    EmitImageBlock(img.value("sha256", std::string{}),
+                    EmitImageBlock(t, img.value("sha256", std::string{}),
                                    img.value("mime", "image/png"),
                                    img.value("name", std::string{}));
                 }
@@ -2390,7 +2913,7 @@ void ChatFrame::RestoreCanvasFromHistory() {
             if (m.contains("reasoning_content") && m["reasoning_content"].is_string()) {
                 std::string reasoning = m["reasoning_content"].get<std::string>();
                 if (!reasoning.empty()) {
-                    RenderThinkingBlock(wxString::FromUTF8(reasoning));
+                    RenderThinkingBlock(t, wxString::FromUTF8(reasoning));
                 }
             }
             // 1. Render content (if any) through the markdown stream.
@@ -2416,8 +2939,8 @@ void ChatFrame::RestoreCanvasFromHistory() {
                     // Find the matching tool result. It should be in the next
                     // few messages with role=tool and matching tool_call_id.
                     std::string result;
-                    for (size_t j = i + 1; j < history_.size(); ++j) {
-                        const auto& r = history_[j];
+                    for (size_t j = i + 1; j < t.history.size(); ++j) {
+                        const auto& r = t.history[j];
                         if (r.value("role", std::string{}) != "tool") continue;
                         if (r.value("tool_call_id", std::string{}) != id) continue;
                         if (r.contains("content") && r["content"].is_string()) {
@@ -2425,7 +2948,7 @@ void ChatFrame::RestoreCanvasFromHistory() {
                         }
                         break;
                     }
-                    RenderToolBlock(name, args, result);
+                    RenderToolBlock(t, name, args, result, StringField(tc, "thread"));
                 }
             }
             continue;
@@ -2434,8 +2957,29 @@ void ChatFrame::RestoreCanvasFromHistory() {
         // role == "system" or "tool": skipped (system not visible; tool was
         // consumed above by the matching assistant pairing).
     }
+
+    // The in-flight turn: what has streamed so far but isn't in history yet,
+    // in the order it streamed. A fresh markdown stream, fed the partial
+    // text, carries the rest of the reply on this canvas.
+    t.liveThinkingIdx = -1;
+    emitLocal(SIZE_MAX);
+    if (!Started(t)) AddBriefNotice(t);
+    // A turn that failed in the background: its notice, seen now.
+    if (t.failureNotice) {
+        canvas_->AddBlock(std::move(*t.failureNotice));
+        t.failureNotice.reset();
+    }
+    if (t.streaming) {
+        if (t.thinkingEmitted) RenderThinkingBlock(t, wxString::FromUTF8(t.activeReasoning));
+        else UpdateLiveThinking(t);
+        if (t.mdStream) {
+            t.mdStream = MakeMdStream(t);
+            t.mdStream->Feed(wxString::FromUTF8(t.activeAssistantText));
+        }
+    }
     canvas_->EndBatch();
 }
+
 
 void ChatFrame::OnModelChoice(wxCommandEvent& evt) {
     int sel = evt.GetSelection();
@@ -2539,13 +3083,24 @@ void ChatFrame::OnModelContextMenu(wxContextMenuEvent&) {
     PopupMenu(&menu);
 }
 
+void ChatFrame::StopPlay(PlayRun& run) {
+    if (auto tok = run.token) {
+        tok->cancelled.store(true);
+#ifndef _WIN32
+        int pgid = tok->activePgid.load();
+        if (pgid > 0) ::kill(-pgid, SIGTERM);
+#endif
+    }
+    if (run.worker.joinable()) run.worker.join();
+}
+
 void ChatFrame::OnPlay(wxCommandEvent&) {
-    if (streaming_) return;
+    if (Active().streaming) return;
     auto cfg = RunConfigStore::Get(activeCwd_);
     if (cfg) {
         // Direct execution path — no model inference, just run the stored
         // command. Display-only: the user prompt block and tool result go
-        // on the canvas but are NOT appended to history_. The Play button
+        // on the canvas but are NOT appended to history. The Play button
         // is a local UX affordance; injecting fake tool_call/tool_result
         // messages into the API conversation breaks subsequent requests
         // when the command is long-running (e.g. a dev server) — the API
@@ -2556,24 +3111,21 @@ void ChatFrame::OnPlay(wxCommandEvent&) {
         userBlock.rawText = userMsg;
         userBlock.visibleText = userMsg;
         userBlock.runs.push_back({userMsg, false, false, false, {}});
-        canvas_->AddBlock(std::move(userBlock));
+        AddLocalBlock(Active(), std::move(userBlock));
 
         // Run the command on a background thread. Use a dedicated playWorker_
         // so a long-running dev server doesn't block the tool dispatch worker
         // — otherwise the model can't execute tool calls while the server runs.
-        auto token = std::make_shared<ToolCancelToken>();
-        // If a previous Play run is still alive (e.g. a dev server), cancel
-        // it so join() returns quickly instead of blocking the GUI forever.
-        if (auto old = currentPlayToken_) {
-            old->cancelled.store(true);
-#ifndef _WIN32
-            int pgid = old->activePgid.load();
-            if (pgid > 0) ::kill(-pgid, SIGTERM);
-#endif
+        auto run = std::ranges::find(plays_, activeCwd_, &PlayRun::cwd);
+        if (run == plays_.end()) {
+            plays_.emplace_back().cwd = activeCwd_;
+            run = plays_.end() - 1;
         }
-        if (playWorker_.joinable()) playWorker_.join();
-        currentPlayToken_ = token;
-        playWorker_ = std::thread([this, cmd = cfg->command, token, cwd = activeCwd_]() {
+        StopPlay(*run);  // this folder's previous run, e.g. a dev server
+        auto token = std::make_shared<ToolCancelToken>();
+        run->token = token;
+        run->worker = std::thread([this, cmd = cfg->command, token, cwd = activeCwd_,
+                                   id = Active().id]() {
             // Wrap the stored command with a cd to the project directory so
             // relative paths work regardless of the process's current cwd.
             // This is the key fix for the Play button: the model stores
@@ -2596,11 +3148,13 @@ void ChatFrame::OnPlay(wxCommandEvent&) {
             std::string wrapped = "cd " + qcwd + " && " + cmd;
 #endif
             std::string result = ToolBashDirect(wrapped.c_str(), token.get());
-            CallAfter([this, result, cmd]() {
+            CallAfter([this, result, cmd, cwd, id, token]() {
                 if (destroying_.load()) return;
-                currentPlayToken_.reset();
-                // Canvas-only display — no history_ modification.
-                RenderToolBlock("bash", cmd, result);
+                if (auto r = std::ranges::find(plays_, cwd, &PlayRun::cwd);
+                    r != plays_.end() && r->token == token)
+                    r->token.reset();
+                // Display-only, in the thread Play was pressed in.
+                if (Thread* t = Find(id)) AddLocalBlock(*t, ToolBlock("bash", cmd, result));
             });
         });
     } else {
@@ -2641,7 +3195,8 @@ void ChatFrame::OnPlay(wxCommandEvent&) {
         // The canvas shows only the visible prompt; the model also gets the
         // hidden instructions. StartTurn routes it to whichever model is
         // selected, Claude included.
-        StartTurn(visible, {}, hidden);
+        StartTurn(Active(), visible, {}, hidden);
+
     }
 }
 void ChatFrame::OnSettings(wxCommandEvent&) {
@@ -2653,9 +3208,12 @@ void ChatFrame::OnSettings(wxCommandEvent&) {
 }
 
 void ChatFrame::OnCanvasLink(wxCommandEvent& e) {
+    wxString threadId;
     if (e.GetString() == "gritcode://settings") {
         wxCommandEvent ev;
         OnSettings(ev);
+    } else if (e.GetString().StartsWith("gritcode://thread/", &threadId)) {
+        SelectThread(threadId.utf8_string());
     }
 }
 
@@ -2671,7 +3229,48 @@ void ChatFrame::OnHamburger(wxCommandEvent&) {
         importPanel_->Show();
         splitter_->SplitVertically(importPanel_, innerSplitter_, kImportPaneWidth);
     }
+    if (ThreadsShown()) UpdateThreadPane(FolderRows());
+    else threadPaneTimer_.Stop();
     SyncPanelSizing(centerW, tiled);
+}
+
+void ChatFrame::ShowLeftView(bool threads) {
+    loadView_->Show(!threads);
+    threadsView_->Show(threads);
+    newThreadBtn_->Show(threads);
+    PaintLeftTabs();
+    importPanel_->Layout();
+    Preferences::SetLeftPaneThreads(threads);
+    if (ThreadsShown()) UpdateThreadPane(FolderRows());
+    else threadPaneTimer_.Stop();
+}
+
+void ChatFrame::PaintLeftTabs() {
+    const wxSize kIconSize(20, 20);
+    const wxColour on = wxSystemSettings::GetColour(wxSYS_COLOUR_WINDOWTEXT);
+    const wxColour off = wxSystemSettings::GetColour(wxSYS_COLOUR_GRAYTEXT);
+    const bool threads = threadsView_->IsShown();
+    sessionTab_->SetBitmap(LoadThemedSvgIcon("session.svg", kIconSize, threads ? off : on));
+    threadsTab_->SetBitmap(LoadThemedSvgIcon("threads.svg", kIconSize, threads ? on : off));
+    newThreadBtn_->SetBitmap(LoadThemedSvgIcon("plus.svg", kIconSize, on));
+}
+
+bool ChatFrame::ThreadsShown() const {
+    return splitter_->IsSplit() && threadsView_->IsShown();
+}
+
+void ChatFrame::OnThreadListContextMenu(wxContextMenuEvent& e) {
+    const int n = e.GetPosition() == wxDefaultPosition
+        ? threadList_->GetSelection()
+        : threadList_->HitTest(threadList_->ScreenToClient(e.GetPosition()));
+    if (n == wxNOT_FOUND) return;
+    const std::string id = threadList_->Rows()[n].id;
+    const Thread* t = Find(id);
+    if (!t || !t->streaming) return;
+    wxMenu menu;
+    menu.Append(wxID_STOP, "Stop");
+    if (threadList_->GetPopupMenuSelectionFromUser(menu) != wxID_STOP) return;
+    if (Thread* still = Find(id); still && still->streaming) RequestCancel(*still);
 }
 
 void ChatFrame::OnEditorToggle(wxCommandEvent&) {
@@ -2705,7 +3304,8 @@ void ChatFrame::OnEditorToggle(wxCommandEvent&) {
         int importW = splitter_->IsSplit()
                     ? kImportPaneWidth + splitter_->GetSashSize() : 0;
         int editorW = editorPaneW_ + innerSplitter_->GetSashSize();
-        SetClientSize(wxSize(centerW + importW + editorW, GetClientSize().y));
+        SetClientSize(wxSize(centerW + importW + editorW,
+                             GetClientSize().y));
         Layout();
         splitter_->UpdateSize();
         innerSplitter_->UpdateSize();
@@ -3023,10 +3623,13 @@ void ChatFrame::OnTreeRefreshTimer(wxTimerEvent&) {
     RescanFsWatcher();
     CheckEditorFileChangedOnDisk();
 
-    // AGENTS.md may have been added or edited since the session loaded —
-    // re-inject it into the system prompt only when its content changed.
+    // AGENTS.md may have been added or edited since the threads loaded —
+    // re-inject it into their system prompts only when its content changed.
     std::string agents = LoadAgentsInstructions(activeCwd_);
-    if (agents != lastAgentsContent_) RefreshSystemPromptAgents();
+    for (Thread& t : threads_) {
+        if (t.cwd == activeCwd_ && agents != t.lastAgentsContent)
+            RefreshSystemPrompt(t);
+    }
 }
 
 void ChatFrame::OnTreeRefresh(wxCommandEvent&) {
@@ -3635,8 +4238,9 @@ void ChatFrame::OnExport(wxCommandEvent&) {
     if (path.find(".gritsession") == std::string::npos)
         path += ".gritsession";
 
+    const Thread& t = Active();
     nlohmann::json j;
-    j["version"] = HistoryHasImages(history_) ? 2 : 1;
+    j["version"] = HistoryHasImages(t.history) ? 2 : 1;
     j["exportedAt"] = []() {
         auto now = std::chrono::system_clock::now();
         auto t = std::chrono::system_clock::to_time_t(now);
@@ -3644,12 +4248,12 @@ void ChatFrame::OnExport(wxCommandEvent&) {
         std::strftime(buf, sizeof(buf), "%Y-%m-%dT%H:%M:%S", std::gmtime(&t));
         return std::string(buf);
     }();
-    j["messages"] = history_;
+    j["messages"] = t.history;
 
     std::string err;
     bool ok = false;
-    if (HistoryHasImages(history_)) {
-        ok = ExportToZip(path, j, CollectImageRefs(history_), err);
+    if (HistoryHasImages(t.history)) {
+        ok = ExportToZip(path, j, CollectImageRefs(t.history), err);
     } else {
         std::ofstream f(path, std::ios::binary | std::ios::trunc);
         ok = (bool)f;
@@ -3666,7 +4270,7 @@ void ChatFrame::OnExport(wxCommandEvent&) {
                      wxOK | wxICON_ERROR, this);
         return;
     }
-    wxMessageBox(FormatU8("Session exported ({} messages).", history_.size()),
+    wxMessageBox(FormatU8("Session exported ({} messages).", t.history.size()),
                  "Export", wxOK | wxICON_INFORMATION, this);
 }
 
@@ -3808,7 +4412,8 @@ void ChatFrame::ShowImportDialog() {
     refLabel_->SetLabel(wxString::FromUTF8("Referenced Session: ") + displayName
                         + wxString::FromUTF8(" \xe2\x80\x94 "));
     changeBtn_->Show();
-    importPanel_->Layout();
+    ShowLeftView(false);
+    loadView_->Layout();
 
     // Split to show the import panel on the left.
     if (!splitter_->IsSplit()) {
@@ -3825,12 +4430,15 @@ void ChatFrame::OnSend(wxCommandEvent&) {
     text.Trim().Trim(false);
     if (text.IsEmpty() && pendingImages_.empty()) return;
 
+    Thread& t = Active();
+    if (!t.parent.empty()) return;  // subagent threads are view-only
+
     // Agent busy: append to the queue (the Send button is "Add" while busy).
     // Reaching kMaxQueue_ disables the button — defensive check for a
     // synthesized event from MCP / Enter key.
-    if (streaming_) {
-        if (pendingQueue_.size() >= kMaxQueue_) return;
-        EnqueueMessage(text);
+    if (t.streaming) {
+        if (t.pendingQueue.size() >= kMaxQueue_) return;
+        EnqueueMessage(t, text);
         input_->Clear();
         return;
     }
@@ -3839,19 +4447,21 @@ void ChatFrame::OnSend(wxCommandEvent&) {
     std::vector<PendingImage> images = std::move(pendingImages_);
     pendingImages_.clear();
     RebuildImageRow();
-    StartTurn(text, std::move(images));
+    StartTurn(t, text, std::move(images));
 }
 
-void ChatFrame::StartTurn(const wxString& userText,
+void ChatFrame::StartTurn(Thread& t, const wxString& userText,
                         std::vector<PendingImage> images,
                         const std::string& hiddenInstructions) {
-    overflowRetried_ = false;
-    turnModelIndex_ = currentModelIndex_;
-    const ModelRoute route = RouteForIndex(currentModelIndex_, remoteModels_);
+    t.overflowRetried = false;
+    t.stopRequested = false;
+    t.failure.clear();
+    t.turnModelIndex = ModelIndexFor(t);
+    const ModelRoute route = RouteForIndex(t.turnModelIndex, remoteModels_);
     const std::string modelId = route.model;
-    RenderModelSwitchNotice(modelId);
+    RenderModelSwitchNotice(t, modelId);
     // Render the user prompt block (skipped for image-only messages).
-    if (!userText.IsEmpty()) {
+    if (!userText.IsEmpty() && Shown(t)) {
         Block ub;
         ub.type = BlockType::UserPrompt;
         ub.rawText = userText;
@@ -3862,7 +4472,7 @@ void ChatFrame::StartTurn(const wxString& userText,
         canvas_->AddBlock(std::move(ub));
     }
     for (const auto& pi : images) {
-        EmitImageBlock(pi.hash, pi.mime, pi.name);
+        EmitImageBlock(t, pi.hash, pi.mime, pi.name);
     }
 
     // "model" records where the turn was sent, so a restored or exported
@@ -3872,6 +4482,30 @@ void ChatFrame::StartTurn(const wxString& userText,
         {"content", userText.ToStdString(wxConvUTF8) + hiddenInstructions},
         {"model", modelId},
     };
+    // Other top-level threads working in the same checkout right now. The
+    // model gets this note after the message (the system prompt says what to
+    // do about it), only when it changed since the previous message.
+    if (t.parent.empty()) {
+        const std::string checkout = CheckoutOf(t.cwd);
+        std::string others;
+        for (const Thread& o : threads_) {
+            if (&o == &t || !o.streaming || !o.parent.empty() || CheckoutOf(o.cwd) != checkout)
+                continue;
+            others += (others.empty() ? "\"" : ", \"")
+                      + ThreadLabel(o.id, o.cwd, o.title).utf8_string() + "\"";
+        }
+        // The last note this thread's model got, and so what it believes now.
+        auto noted = [](const nlohmann::json& m) {
+            return IsUserTurn(m) && !StringField(m, "note").empty();
+        };
+        auto last = std::ranges::find_if(t.history.rbegin(), t.history.rend(), noted);
+        const std::string given =
+            last == t.history.rend() ? std::string() : StringField(*last, "note");
+        const std::string none = "No other thread is working in " + checkout + " now.";
+        const std::string note =
+            others.empty() ? none : "Also working in " + checkout + " right now: " + others + ".";
+        if (note != given && !(note == none && given.empty())) userMsg["note"] = note;
+    }
     if (!images.empty()) {
         nlohmann::json arr = nlohmann::json::array();
         for (const auto& pi : images) {
@@ -3881,23 +4515,32 @@ void ChatFrame::StartTurn(const wxString& userText,
         }
         userMsg["images"] = std::move(arr);
     }
-    history_.push_back(std::move(userMsg));
+    t.history.push_back(std::move(userMsg));
+    t.turnPrompt = userText.utf8_string();
+    if (t.title.empty()) t.title = DefaultTitle(t.turnPrompt);
 
-    streaming_ = true;
-    canvas_->SetThinking(true);
-    UpdateQueueUI();  // Send becomes "Add", chip row stays visible if non-empty.
-    toolIter_ = 0;
+    t.streaming = true;
+    t.toolIter = 0;
+    if (Shown(t)) {
+        canvas_->SetThinking(true);
+        UpdateQueueUI();  // Send becomes "Add", chip row stays visible if non-empty.
+    }
 
-    StartCompletion();
+    StartCompletion(t);
+    RefreshSessionChoice();  // marks the thread as running
 }
 
-void ChatFrame::EnqueueMessage(const wxString& text) {
+int ChatFrame::ModelIndexFor(const Thread& t) const {
+    return t.parent.empty() ? currentModelIndex_ : t.turnModelIndex;
+}
+
+void ChatFrame::EnqueueMessage(Thread& t, const wxString& text) {
     QueuedMessage q;
     q.text = text.ToStdString(wxConvUTF8);
     q.images = std::move(pendingImages_);
     pendingImages_.clear();
     RebuildImageRow();
-    pendingQueue_.push_back(std::move(q));
+    t.pendingQueue.push_back(std::move(q));
     UpdateQueueUI();
 }
 
@@ -3926,28 +4569,32 @@ void ChatFrame::OpenDebugWindow() {
 #endif
 }
 
-nlohmann::json ChatFrame::BuildModelView() const {
+nlohmann::json ChatFrame::BuildModelView(const Thread& t) const {
     nlohmann::json view = nlohmann::json::array();
 
     // System prompt is always the head.
-    if (!history_.empty() && history_[0].is_object()
-        && history_[0].value("role", std::string{}) == "system") {
-        view.push_back(history_[0]);
+    if (!t.history.empty() && t.history[0].is_object()
+        && t.history[0].value("role", std::string{}) == "system") {
+        view.push_back(t.history[0]);
     }
 
     // Summary checkpoints become the new head after compaction.
-    for (const auto& m : history_) {
+    for (const auto& m : t.history) {
         if (!m.is_object() || m.value("compacted", false)) continue;
         if (m.value("isSummary", false)) view.push_back(m);
     }
 
     // Non-hidden, non-summary, non-system tail.
     nlohmann::json tail = nlohmann::json::array();
-    for (const auto& m : history_) {
+    for (const auto& m : t.history) {
         if (!m.is_object() || m.value("compacted", false)) continue;
         if (m.value("isSummary", false)) continue;
         if (m.value("role", std::string{}) == "system") continue;
         tail.push_back(m);
+        if (std::string note = StringField(m, "note");
+            !note.empty() && tail.back()["content"].is_string())
+            tail.back()["content"] = tail.back()["content"].get<std::string>()
+                                     + "\n\n[gritcode: " + note + "]";
     }
 
     PruneToolOutputs(tail);
@@ -4017,67 +4664,64 @@ Block ChatFrame::MakeImageBlock(const std::string& hash, const std::string& mime
     return b;
 }
 
-void ChatFrame::EmitImageBlock(const std::string& hash, const std::string& mime,
+void ChatFrame::EmitImageBlock(Thread& t, const std::string& hash, const std::string& mime,
                                const std::string& name) {
-    canvas_->AddBlock(MakeImageBlock(hash, mime, name));
+    if (Shown(t)) canvas_->AddBlock(MakeImageBlock(hash, mime, name));
 }
 
-void ChatFrame::StartCompletion() {
+std::unique_ptr<MdStream> ChatFrame::MakeMdStream(Thread& t) {
+    return std::make_unique<MdStream>([this, &t](Block b) {
+        if (Shown(t)) canvas_->AddBlock(std::move(b));
+    });
+}
+
+
+void ChatFrame::StartCompletion(Thread& t) {
     // A Claude turn never takes the HTTP path: Claude Code runs its own agent
     // loop and manages (and compacts) its own context, so gritcode's
     // compaction doesn't apply either.
-    const ModelRoute turnRoute = RouteForIndex(turnModelIndex_, remoteModels_);
+    const ModelRoute turnRoute = RouteForIndex(t.turnModelIndex, remoteModels_);
     if (turnRoute.claudeCli) {
-        claudeModel_ = turnRoute.model;
-        claudeRetriedFresh_ = false;
-        StartClaudeTurn();
+        t.claudeModel = turnRoute.model;
+        t.claudeRetriedFresh = false;
+        StartClaudeTurn(t);
         return;
     }
     // Compaction preflight. If the rendered request would overflow the
     // model's context window, we summarize the head of history first via
     // a separate streaming request; the summary completion path will
     // call DoSendActualRequest itself once history has been rewritten.
-    // Skipped while compacting_ is true so a chained ApplyCompaction
+    // Skipped while t.compacting is true so a chained ApplyCompaction
     // doesn't re-evaluate the same condition.
-    if (!compacting_ && MaybeCompactThenSend()) return;
-    DoSendActualRequest();
+    if (!t.compacting && MaybeCompactThenSend(t)) return;
+    DoSendActualRequest(t);
 }
 
-void ChatFrame::DoSendActualRequest() {
-    // Re-sync the process cwd to the active session right before every model
-    // turn. The bash/list_directory/read_file/etc. tools fork in the process
-    // cwd, so this must match activeCwd_ or the agent ends up operating in the
-    // previous session's folder. Cheap (one syscall) and covers any call site
-    // that forgets to chdir after changing activeCwd_.
-    ChdirToCwd(activeCwd_);
-
+void ChatFrame::DoSendActualRequest(Thread& t) {
     // Reset per-completion stream state.
-    activeAssistantText_.clear();
-    activeReasoning_.clear();
-    activeToolCalls_.clear();
-    thinkingEmitted_ = false;
-    liveThinkingIdx_ = -1;
-    finishReason_.clear();
-    sseBuf_.clear();
-    mdStream_ = std::make_unique<MdStream>([this](Block b) {
-        canvas_->AddBlock(std::move(b));
-    });
+    t.activeAssistantText.clear();
+    t.activeReasoning.clear();
+    t.activeToolCalls.clear();
+    t.thinkingEmitted = false;
+    t.liveThinkingIdx = -1;
+    t.finishReason.clear();
+    t.sseBuf.clear();
+    t.mdStream = MakeMdStream(t);
 
     ModelRoute route =
-        CompletionRoute(currentModelIndex_, turnModelIndex_, remoteModels_);
-    requestModel_ = route.model;
+        CompletionRoute(ModelIndexFor(t), t.turnModelIndex, remoteModels_);
+    t.requestModel = route.model;
 
-    // Build an outbound copy of history with the active cwd appended to the
+    // Build an outbound copy of history with the thread's cwd appended to the
     // system prompt. Done per-request rather than baked into stored history
-    // so the cwd stays current if the user switches sessions mid-conversation
-    // and doesn't accumulate across turns.
-    nlohmann::json messages = BuildModelView();
+    // so it doesn't accumulate across turns.
+    nlohmann::json messages = BuildModelView(t);
     if (!messages.empty() && messages[0].is_object()
         && messages[0].value("role", std::string{}) == "system") {
         std::string base = messages[0].value("content", std::string{});
         std::string extra;
-        if (!activeCwd_.empty())
-            extra += "\n\nWorking directory: " + activeCwd_;
+        if (!t.cwd.empty())
+            extra += "\n\nWorking directory: " + t.cwd;
         // When the user disabled Grit History tools, explicitly countermand
         // the baked "use grit_history_search" system-prompt guidance so the
         // agent neither attempts the (now-absent) tools nor leans on local
@@ -4103,6 +4747,10 @@ void ChatFrame::DoSendActualRequest() {
         if (!m.is_object()) continue;
         m.erase("model");
         m.erase("claudeSessionId");
+        if (auto calls = m.find("tool_calls"); calls != m.end() && calls->is_array()) {
+            for (auto& tc : *calls)
+                if (tc.is_object()) tc.erase("thread");
+        }
     }
 
     // Defensive: drop consecutive same-role user/assistant messages. Both
@@ -4150,7 +4798,7 @@ void ChatFrame::DoSendActualRequest() {
     // `content`) so one message can't dominate the tail. The call already ran
     // (its result follows it in the history), so the model only needs the
     // shape of the arguments to stay coherent, not the full payload. The
-    // durable history_ is untouched — this only affects the outbound request.
+    // durable history is untouched — this only affects the outbound request.
     for (auto& m : messages) {
         if (!m.is_object() || m.value("role", std::string{}) != "assistant"
             || !m.contains("tool_calls") || !m["tool_calls"].is_array()) {
@@ -4208,10 +4856,10 @@ void ChatFrame::DoSendActualRequest() {
     if (route.needsApiKey) {
         apiKey = Preferences::GetApiKey(route.provider);
         if (apiKey.IsEmpty()) {
-            RenderErrorBlock(
+            // A failed turn like any other: the unsent message is rolled back.
+            HandleCompletion(t,
                 "No API key configured for the selected model. "
                 "Open Settings (gear icon) to add one.");
-            FinalizeTurn(true);
             return;
         }
     }
@@ -4229,14 +4877,15 @@ void ChatFrame::DoSendActualRequest() {
     int avail = route.contextWindow - promptTokens - 8000;
     if (avail < 8000) avail = 8000;
     if (maxTokens > avail) maxTokens = avail;
-    requestMaxTokens_ = maxTokens;
+    t.requestMaxTokens = maxTokens;
 
     nlohmann::json req;
     req["model"] = route.model;
     req["stream"] = true;
     req["max_tokens"] = maxTokens;
     req["messages"] = std::move(messages);
-    req["tools"] = GetToolDefinitions(Preferences::GetEnableGritHistory());
+    req["tools"] = GetToolDefinitions(Preferences::GetEnableGritHistory(),
+                                      /*subagent=*/!t.parent.empty());
     // DeepSeek thinking effort ("high" is the API default; "max" is opt-in
     // from Settings).
     if (route.provider == Preferences::Provider::DeepSeek && route.needsApiKey) {
@@ -4281,113 +4930,107 @@ void ChatFrame::DoSendActualRequest() {
     // connection in a recoverable amount of time.
     spec.idleTimeoutSeconds = 60;
 
-    request_ = StreamingWebRequest(
+    ++t.gen;
+    t.request = StreamingWebRequest(
         this, std::move(spec),
-        [this](std::string_view chunk) { OnStreamData(chunk); },
-        [this](WebResponse resp) { OnStreamDone(std::move(resp)); });
+        [this, id = t.id, gen = t.gen](std::string_view chunk) {
+            if (Thread* t = Find(id, gen)) OnStreamData(*t, chunk);
+        },
+        [this, id = t.id, gen = t.gen](WebResponse resp) {
+            if (Thread* t = Find(id, gen)) OnStreamDone(*t, std::move(resp));
+        });
 }
 
-void ChatFrame::OnStreamData(std::string_view chunk) {
-    if (chunk.empty()) return;
-    sseBuf_.append(chunk.data(), chunk.size());
+void ChatFrame::OnStreamData(Thread& t, std::string_view chunk, bool streamEnded) {
+    if (chunk.empty() && !streamEnded) return;
+    for (const std::string& payload : TakeSseEvents(t.sseBuf, chunk, streamEnded)) {
+        if (payload == "[DONE]") continue;
+        try {
+            auto j = nlohmann::json::parse(payload);
+            if (!j.contains("choices") || j["choices"].empty()) continue;
+            const auto& choice = j["choices"][0];
+            if (choice.contains("finish_reason")
+                && choice["finish_reason"].is_string())
+                t.finishReason = choice["finish_reason"].get<std::string>();
+            if (!choice.contains("delta")) continue;
+            const auto& delta = choice["delta"];
 
-    size_t pos;
-    while ((pos = sseBuf_.find("\n\n")) != std::string::npos) {
-        std::string event = sseBuf_.substr(0, pos);
-        sseBuf_.erase(0, pos + 2);
-
-        std::istringstream stream(event);
-        std::string line;
-        while (std::getline(stream, line)) {
-            if (!line.empty() && line.back() == '\r') line.pop_back();
-            if (line.rfind("data: ", 0) != 0) continue;
-            std::string payload = line.substr(6);
-            if (payload == "[DONE]") continue;
-            try {
-                auto j = nlohmann::json::parse(payload);
-                if (!j.contains("choices") || j["choices"].empty()) continue;
-                const auto& choice = j["choices"][0];
-                if (choice.contains("finish_reason")
-                    && choice["finish_reason"].is_string())
-                    finishReason_ = choice["finish_reason"].get<std::string>();
-                if (!choice.contains("delta")) continue;
-                const auto& delta = choice["delta"];
-
-                // ---- text content ----
-                // DeepSeek streams reasoning bytes in `reasoning_content` and
-                // visible bytes in `content` (potentially in the same delta).
-                // Other providers may use `reasoning` or `reasoning_text`. We
-                // capture reasoning into activeReasoning_ so it can be round-
-                // tripped on the next request — DeepSeek requires this on every
-                // assistant message in history or returns 400.
-                for (const char* f : {"reasoning_content", "reasoning", "reasoning_text"}) {
-                    if (delta.contains(f) && delta[f].is_string()) {
-                        activeReasoning_ += delta[f].get<std::string>();
-                        UpdateLiveThinking();
-                        break;
-                    }
+            // ---- text content ----
+            // DeepSeek streams reasoning bytes in `reasoning_content` and
+            // visible bytes in `content` (potentially in the same delta).
+            // Other providers may use `reasoning` or `reasoning_text`. We
+            // capture reasoning into t.activeReasoning so it can be round-
+            // tripped on the next request — DeepSeek requires this on every
+            // assistant message in history or returns 400.
+            for (const char* f : {"reasoning_content", "reasoning", "reasoning_text"}) {
+                if (delta.contains(f) && delta[f].is_string()) {
+                    t.activeReasoning += delta[f].get<std::string>();
+                    UpdateLiveThinking(t);
+                    break;
                 }
-                if (delta.contains("content") && delta["content"].is_string()) {
-                    std::string content = delta["content"].get<std::string>();
-                    if (!content.empty()) {
-                        // First non-reasoning byte of this round: emit the
-                        // thinking block now so it lands before any content
-                        // block the markdown stream is about to push out.
-                        EmitPendingThinking();
-                        activeAssistantText_ += content;
-                        if (mdStream_) mdStream_->Feed(wxString::FromUTF8(content));
-                    }
-                }
-
-                // ---- tool_calls ----
-                if (delta.contains("tool_calls") && delta["tool_calls"].is_array()
-                    && !delta["tool_calls"].empty()) {
-                    // Same as the content case — render thinking before any
-                    // tool block lands. RenderToolBlock fires later in
-                    // HandleCompletion, but emitting here keeps the order
-                    // consistent regardless of when the model interleaves
-                    // tool_calls and content.
-                    EmitPendingThinking();
-                    for (const auto& tc : delta["tool_calls"]) {
-                        int idx = tc.value("index", 0);
-                        if ((int)activeToolCalls_.size() <= idx)
-                            activeToolCalls_.resize(idx + 1);
-                        auto& cur = activeToolCalls_[idx];
-                        if (tc.contains("id") && tc["id"].is_string())
-                            cur.id = tc["id"].get<std::string>();
-                        if (tc.contains("function") && tc["function"].is_object()) {
-                            const auto& fn = tc["function"];
-                            if (fn.contains("name") && fn["name"].is_string())
-                                cur.name = fn["name"].get<std::string>();
-                            if (fn.contains("arguments") && fn["arguments"].is_string())
-                                cur.args += fn["arguments"].get<std::string>();
-                        }
-                    }
-                }
-            } catch (...) {
-                // Ignore malformed events (keepalives, partial JSON, etc.).
             }
+            if (delta.contains("content") && delta["content"].is_string()) {
+                std::string content = delta["content"].get<std::string>();
+                if (!content.empty()) {
+                    // First non-reasoning byte of this round: emit the
+                    // thinking block now so it lands before any content
+                    // block the markdown stream is about to push out.
+                    EmitPendingThinking(t);
+                    t.activeAssistantText += content;
+                    if (t.mdStream) t.mdStream->Feed(wxString::FromUTF8(content));
+                }
+            }
+
+            // ---- tool_calls ----
+            if (delta.contains("tool_calls") && delta["tool_calls"].is_array()
+                && !delta["tool_calls"].empty()) {
+                // Same as the content case — render thinking before any
+                // tool block lands. RenderToolBlock fires later in
+                // HandleCompletion, but emitting here keeps the order
+                // consistent regardless of when the model interleaves
+                // tool_calls and content.
+                EmitPendingThinking(t);
+                for (const auto& tc : delta["tool_calls"]) {
+                    int idx = tc.value("index", 0);
+                    if ((int)t.activeToolCalls.size() <= idx)
+                        t.activeToolCalls.resize(idx + 1);
+                    auto& cur = t.activeToolCalls[idx];
+                    if (tc.contains("id") && tc["id"].is_string())
+                        cur.id = tc["id"].get<std::string>();
+                    if (tc.contains("function") && tc["function"].is_object()) {
+                        const auto& fn = tc["function"];
+                        if (fn.contains("name") && fn["name"].is_string())
+                            cur.name = fn["name"].get<std::string>();
+                        if (fn.contains("arguments") && fn["arguments"].is_string())
+                            cur.args += fn["arguments"].get<std::string>();
+                    }
+                }
+            }
+        } catch (...) {
+            // Ignore malformed events (keepalives, partial JSON, etc.).
         }
     }
 }
 
-void ChatFrame::OnStreamDone(WebResponse resp) {
+void ChatFrame::OnStreamDone(Thread& t, WebResponse resp) {
     // The user closed the window while a stream was in flight. The Cancel
     // already short-circuited the worker; just complete the close now.
     if (quitRequested_) {
         Close();
         return;
     }
+    // A last event the server didn't end with a blank line.
+    if (resp.ok) OnStreamData(t, {}, /*streamEnded=*/true);
 
     // Flush markdown parser before deciding what to do next — any pending
     // paragraph/code block needs to land before tool blocks or the next turn.
-    if (mdStream_) mdStream_->Flush();
-    mdStream_.reset();
+    if (t.mdStream) t.mdStream->Flush();
+    t.mdStream.reset();
 
     if (!resp.ok && resp.error == "cancelled") {
-        if (!streaming_) return;
-        RenderErrorBlock("Cancelled.");
-        FinalizeTurn(true);
+        if (!t.streaming) return;
+        RenderErrorBlock(t, "Cancelled.");
+        FinalizeTurn(t, true);
         return;
     }
 
@@ -4395,26 +5038,26 @@ void ChatFrame::OnStreamDone(WebResponse resp) {
         wxString detail = FormatU8(
             "Authentication failed (HTTP {}). Check your API key in Settings.",
             resp.status);
-        wxString body = ExtractErrorBody();
+        wxString body = ExtractErrorBody(t);
         if (!body.IsEmpty() && body.length() < 400) {
             detail += "\n\n" + body;
         }
-        HandleCompletion(detail);
+        HandleCompletion(t, detail);
         return;
     }
 
     if (!resp.ok) {
         // Layer 3: context-overflow recovery. Force one compaction and
         // retry; if it overflows again, fall through to the error path.
-        if (resp.status == 400 && !overflowRetried_) {
+        if (resp.status == 400 && !t.overflowRetried) {
             std::string errBody =
-                ExtractErrorBody().ToStdString(wxConvUTF8);
+                ExtractErrorBody(t).ToStdString(wxConvUTF8);
             bool isOverflow =
                 errBody.find("context") != std::string::npos
                 && (errBody.find("token") != std::string::npos
                     || errBody.find("maximum") != std::string::npos);
-            if (isOverflow && ForceCompactForOverflow()) {
-                overflowRetried_ = true;
+            if (isOverflow && ForceCompactForOverflow(t)) {
+                t.overflowRetried = true;
                 return;
             }
         }
@@ -4424,9 +5067,9 @@ void ChatFrame::OnStreamDone(WebResponse resp) {
         // explanation + a link to Settings instead of a raw curl error, so it
         // doesn't read as a gritcode failure.
         ModelRoute route =
-            CompletionRoute(currentModelIndex_, turnModelIndex_, remoteModels_);
+            CompletionRoute(ModelIndexFor(t), t.turnModelIndex, remoteModels_);
         if (!route.needsApiKey && resp.networkError) {
-            HandleCompletion(wxString(), /*freeModelStall=*/true);
+            HandleCompletion(t, wxString(), /*freeModelStall=*/true);
             return;
         }
 
@@ -4436,21 +5079,21 @@ void ChatFrame::OnStreamDone(WebResponse resp) {
         } else {
             detail = "Error: " + wxString::FromUTF8(resp.error);
         }
-        wxString body = ExtractErrorBody();
+        wxString body = ExtractErrorBody(t);
         if (!body.IsEmpty()) detail += "\n\n" + body;
-        HandleCompletion(detail);
+        HandleCompletion(t, detail);
         return;
     }
 
-    HandleCompletion(wxString());
+    HandleCompletion(t, wxString());
 }
 
-wxString ChatFrame::ExtractErrorBody() const {
-    if (sseBuf_.empty()) return wxString();
+wxString ChatFrame::ExtractErrorBody(const Thread& t) {
+    if (t.sseBuf.empty()) return wxString();
     // Try to pretty-print a JSON error like
     // {"error":{"message":"...","type":"...","code":"..."}}.
     try {
-        auto j = nlohmann::json::parse(sseBuf_);
+        auto j = nlohmann::json::parse(t.sseBuf);
         if (j.is_object() && j.contains("error")) {
             const auto& err = j["error"];
             if (err.is_object() && err.contains("message")
@@ -4461,63 +5104,69 @@ wxString ChatFrame::ExtractErrorBody() const {
         }
     } catch (...) {}
     // Fall back to the raw body, capped so we don't dump megabytes.
-    std::string body = sseBuf_;
+    std::string body = t.sseBuf;
     if (body.size() > 800) body = body.substr(0, 800) + "…";
     return wxString::FromUTF8(body);
 }
 
-void ChatFrame::HandleCompletion(const wxString& errorIfFailed,
+void ChatFrame::HandleCompletion(Thread& t, const wxString& errorIfFailed,
                                  bool freeModelStall) {
     // Pure-reasoning response (model returned reasoning_content but no content
     // or tool_calls): emit the thinking block here so the user sees what the
     // model produced. No-op if a prior content/tool delta already emitted it.
-    EmitPendingThinking();
+    EmitPendingThinking(t);
 
     if (!errorIfFailed.IsEmpty() || freeModelStall) {
-        if (freeModelStall) RenderFreeModelStallNotice();
-        else RenderErrorBlock(errorIfFailed);
-        // Roll back the failed turn from history_: drop any tool messages plus
+        // A subagent's turn is never retried: its history stays, showing the
+        // task and how far it got.
+        const bool rollBack = t.parent.empty();
+        ShowTurnFailure(t, freeModelStall ? FreeModelStallNotice()
+                                          : NoticeBlock(errorIfFailed),
+                        /*promptRolledBack=*/rollBack);
+        // Roll back the failed turn from t.history: drop any tool messages plus
         // the trailing user message that triggered this turn. Without this,
         // every retry would carry a growing tail of orphan user messages and
         // every subsequent request would 400 (consecutive same-role rule).
         // The canvas keeps the rendered prompt + error blocks so the user sees
         // what happened — only the model's view of history is rewound.
-        while (!history_.empty()) {
-            std::string role = history_.back().value("role", std::string{});
+        while (rollBack && !t.history.empty()) {
+            std::string role = t.history.back().value("role", std::string{});
             if (role == "tool" || role == "assistant") {
-                history_.pop_back();
+                t.history.pop_back();
                 continue;
             }
             if (role == "user") {
-                history_.pop_back();
+                t.history.pop_back();
             }
             break;
         }
-        FinalizeTurn(true);
+        FinalizeTurn(t, true);
         return;
     }
 
     // The reply stopped at max_tokens. With tool calls the truncated
     // arguments already produce a retry error for the model; for a plain
     // reply, tell the user instead of ending silently.
-    if (finishReason_ == "length" && activeToolCalls_.empty()) {
-        RenderErrorBlock(FormatU8(
+    if (t.finishReason == "length" && t.activeToolCalls.empty()) {
+        RenderErrorBlock(t, FormatU8(
             "The reply was cut off: it reached the output limit ({} tokens). "
             "Say \"continue\" to let the model pick up where it stopped.",
-            requestMaxTokens_));
+            t.requestMaxTokens));
     }
 
-    if (activeToolCalls_.empty()) {
+    if (t.activeToolCalls.empty()) {
         // Plain assistant message — record and finish.
-        if (!activeAssistantText_.empty() || !activeReasoning_.empty()) {
+        if (!t.activeAssistantText.empty() || !t.activeReasoning.empty()) {
             nlohmann::json msg = {{"role", "assistant"},
-                                  {"content", activeAssistantText_},
-                                  {"model", requestModel_}};
-            if (!activeReasoning_.empty())
-                msg["reasoning_content"] = activeReasoning_;
-            history_.push_back(std::move(msg));
+                                  {"content", std::move(t.activeAssistantText)},
+                                  {"model", t.requestModel}};
+            if (!t.activeReasoning.empty())
+                msg["reasoning_content"] = std::move(t.activeReasoning);
+            t.history.push_back(std::move(msg));
         }
-        FinalizeTurn();
+        t.activeAssistantText.clear();
+        t.activeReasoning.clear();
+        FinalizeTurn(t);
         return;
     }
 
@@ -4525,22 +5174,25 @@ void ChatFrame::HandleCompletion(const wxString& errorIfFailed,
     // may have produced both content and tool_calls in one turn, so include
     // both. content can be null per OpenAI spec when only tool_calls exist.
     nlohmann::json assistantMsg = {{"role", "assistant"},
-                                   {"model", requestModel_}};
-    if (activeAssistantText_.empty())
+                                   {"model", t.requestModel}};
+    if (t.activeAssistantText.empty())
         assistantMsg["content"] = nullptr;
     else
-        assistantMsg["content"] = activeAssistantText_;
-    if (!activeReasoning_.empty())
-        assistantMsg["reasoning_content"] = activeReasoning_;
+        assistantMsg["content"] = t.activeAssistantText;
+    if (!t.activeReasoning.empty())
+        assistantMsg["reasoning_content"] = t.activeReasoning;
     assistantMsg["tool_calls"] = nlohmann::json::array();
-    for (const auto& tc : activeToolCalls_) {
+    for (const auto& tc : t.activeToolCalls) {
         assistantMsg["tool_calls"].push_back({
             {"id", tc.id},
             {"type", "function"},
             {"function", {{"name", tc.name}, {"arguments", tc.args}}},
         });
     }
-    history_.push_back(std::move(assistantMsg));
+    t.history.push_back(std::move(assistantMsg));
+    // Now in history: nothing of this round is in flight while tools run.
+    t.activeAssistantText.clear();
+    t.activeReasoning.clear();
 
     // Dispatch each tool on a worker thread so blocking I/O (bash popen,
     // file reads, web fetches) never freezes the UI. Pre-parse arguments on
@@ -4554,8 +5206,12 @@ void ChatFrame::HandleCompletion(const wxString& errorIfFailed,
         std::string parseError;  // non-empty: skip dispatch, surface this as the result
     };
     auto jobs = std::make_shared<std::vector<ToolJob>>();
-    jobs->reserve(activeToolCalls_.size());
-    for (const auto& tc : activeToolCalls_) {
+    jobs->reserve(t.activeToolCalls.size());
+    // `task` calls run as child threads instead, once the worker is started.
+    std::vector<ToolJob> tasks;
+    t.toolBatch.clear();
+    for (const auto& tc : t.activeToolCalls) {
+        t.toolBatch.push_back({tc.id, tc.name, tc.args, std::string()});
         ToolJob job;
         job.id = tc.id;
         job.name = tc.name;
@@ -4582,22 +5238,42 @@ void ChatFrame::HandleCompletion(const wxString& errorIfFailed,
                     "Retry, splitting large content into smaller calls if needed.";
             }
         }
+        if (job.parseError.empty() && job.name == "task" && t.parent.empty()) {
+            if (!StringField(job.argsParsed, "prompt").empty()) {
+                tasks.push_back(std::move(job));
+                continue;
+            }
+            job.parseError = "Error: task needs a prompt with the complete instructions.";
+        }
+        if (job.parseError.empty() && !t.parent.empty() && IsWriteTool(job.name)) {
+            job.parseError = "Error: " + job.name + " isn't available: subagents are "
+                             "read-only. Describe the change in your report instead.";
+        }
         jobs->push_back(std::move(job));
     }
 
     auto token = std::make_shared<ToolCancelToken>();
-    currentToolToken_ = token;
+    t.currentToolToken = token;
+    t.toolWorkerRunning = true;
 
     // OnToolBatchDone only runs after the previous worker exits, so by the
     // time we dispatch a new batch the prior thread is finished — join() is
     // a non-blocking handoff that lets us reuse the std::thread slot without
     // detaching (detach makes destructor cleanup impossible).
-    if (toolWorker_.joinable()) toolWorker_.join();
+    if (t.toolWorker.joinable()) t.toolWorker.join();
     bool enableGrit = Preferences::GetEnableGritHistory();
-    toolWorker_ = std::thread([this, jobs, token, cwd = activeCwd_,
-                               enableGrit]() {
-        auto results = std::make_shared<std::vector<ToolBatchEntry>>();
-        results->reserve(jobs->size());
+    // History search leaves out this thread (it's in context), unless
+    // compaction summarised part of it away: then its old turns are worth
+    // finding again.
+    const bool compacted = std::ranges::any_of(t.history, [](const nlohmann::json& m) {
+        return m.is_object() && m.value("isSummary", false);
+    });
+    ++t.gen;
+    t.toolWorker = std::thread([this, jobs, token, cwd = t.cwd, enableGrit,
+                                searchExclude = compacted ? std::string() : t.id,
+                                id = t.id, gen = t.gen]() {
+        std::vector<ToolBatchEntry> results;
+        results.reserve(jobs->size());
         for (auto& job : *jobs) {
             std::string r;
             if (token->cancelled.load()) {
@@ -4606,22 +5282,30 @@ void ChatFrame::HandleCompletion(const wxString& errorIfFailed,
                 r = std::move(job.parseError);
             } else {
                 r = DispatchTool(job.name, job.argsParsed, token.get(),
-                                 &memory_, cwd, enableGrit);
+                                 &memory_, cwd, enableGrit, searchExclude);
             }
-            results->push_back({std::move(job.id), std::move(job.name),
-                                std::move(job.argsJson), std::move(r)});
+            results.push_back({std::move(job.id), std::move(job.name),
+                               std::move(job.argsJson), std::move(r)});
         }
-        auto* ev = new wxThreadEvent(wxEVT_TOOL_BATCH_DONE);
-        ev->SetPayload(results);
-        wxQueueEvent(this, ev);
+        CallAfter([this, id, gen, results = std::move(results)]() mutable {
+            Thread* t = Find(id, gen);
+            if (!t) return;
+            for (auto& r : results) {
+                auto e = std::ranges::find(t->toolBatch, r.id, &ToolBatchEntry::id);
+                if (e != t->toolBatch.end()) e->result = std::move(r.result);
+            }
+            t->toolWorkerRunning = false;
+            OnToolBatchDone(*t);
+        });
     });
+
+    for (const ToolJob& task : tasks) {
+        StartSubagent(t, task.id, StringField(task.argsParsed, "description"),
+                      StringField(task.argsParsed, "prompt"));
+    }
 }
 
-void ChatFrame::OnToolBatchDone(wxThreadEvent& e) {
-    auto results = e.GetPayload<std::shared_ptr<std::vector<ToolBatchEntry>>>();
-    bool wasCancelled = currentToolToken_ && currentToolToken_->cancelled.load();
-    currentToolToken_.reset();
-
+void ChatFrame::OnToolBatchDone(Thread& t) {
     // User closed the window mid-batch — OnClose vetoed and is waiting for us
     // to complete this phase. Re-fire Close so the second pass through OnClose
     // sees an idle frame and lets the destruction proceed.
@@ -4629,63 +5313,85 @@ void ChatFrame::OnToolBatchDone(wxThreadEvent& e) {
         Close();
         return;
     }
+    if (t.toolWorkerRunning || HasRunningChild(t)) return;
 
-    if (!results) return;
+    bool wasCancelled = t.currentToolToken && t.currentToolToken->cancelled.load();
+    t.currentToolToken.reset();
 
-    for (auto& r : *results) {
-        RenderToolBlock(r.name, r.argsJson, r.result);
-        history_.push_back({
+    for (auto& r : t.toolBatch) {
+        const Thread* child = ChildFor(t, r.id);
+        RenderToolBlock(t, r.name, r.argsJson, r.result, child ? child->id : std::string());
+        t.history.push_back({
             {"role", "tool"},
             {"tool_call_id", r.id},
             {"name", r.name},
-            {"content", r.result},
+            {"content", std::move(r.result)},
         });
     }
+    t.toolBatch.clear();
 
     if (wasCancelled) {
         // User hit Escape during tool execution. The assistant's tool_calls
         // message and any tool results (real or "[cancelled]") are already in
         // history, so the next user turn replays cleanly. Stop the loop here
         // and surface a marker block.
-        RenderErrorBlock("Cancelled.");
-        FinalizeTurn(true);
+        RenderErrorBlock(t, "Cancelled.");
+        FinalizeTurn(t, true);
         return;
     }
 
-    toolIter_++;
+    t.toolIter++;
 
     // Continue the conversation with another completion request.
-    StartCompletion();
+    StartCompletion(t);
 }
 
-void ChatFrame::FinalizeTurn(bool wasCancelledOrError) {
+void ChatFrame::FinalizeTurn(Thread& t, bool wasCancelledOrError) {
+    if (!Shown(t) && t.parent.empty() && !t.stopRequested) t.unseen = true;
+    // Claude Code subagents still running when the run ends (cancelled,
+    // failed, or their end never reported) end with it. A tool batch waits
+    // for its `task` subagents, so those are done by now.
+    for (Thread& c : threads_) {
+        if (c.parent == t.id && c.streaming)
+            FinishClaudeSubagent(c, "The subagent was stopped: its parent's turn ended first.");
+    }
     // A cancelled/failed round may never reach EmitPendingThinking; don't
     // leave its Thinking block live with stale text.
-    if (liveThinkingIdx_ >= 0) {
-        canvas_->UpdateThinkingBlock(liveThinkingIdx_,
-                                     wxString::FromUTF8(activeReasoning_), false);
-        liveThinkingIdx_ = -1;
+    if (t.liveThinkingIdx >= 0 && Shown(t)) {
+        canvas_->UpdateThinkingBlock(t.liveThinkingIdx,
+                                     wxString::FromUTF8(t.activeReasoning), false);
     }
-    canvas_->SetThinking(false);
-    streaming_ = false;
-    activeAssistantText_.clear();
-    activeToolCalls_.clear();
-    PersistActive();
-    // Title may have changed (first user message defines it) — refresh the
-    // dropdown so the new label shows up.
+    t.liveThinkingIdx = -1;
+    if (Shown(t)) canvas_->SetThinking(false);
+    t.streaming = false;
+    t.activeAssistantText.clear();
+    t.activeReasoning.clear();
+    t.activeToolCalls.clear();
+    t.mdStream.reset();
+    // A subagent cancelled in the background keeps saying so until viewed,
+    // as a failure does (cancelling drew "Cancelled." only if shown).
+    if (!t.parent.empty() && wasCancelledOrError && t.failure.empty() && !Shown(t))
+        t.failureNotice = NoticeBlock("Cancelled.");
+    Persist(t);
+    // Title and running mark changed — refresh the dropdown so the new
+    // label shows up.
     RefreshSessionChoice();
+
+    if (!t.parentToolId.empty()) ReportToParent(t, wasCancelledOrError);
 
     // Natural completion: auto-dispatch the next queued message so back-to-
     // back turns flow without a click. DispatchNextQueued -> StartTurn flips
-    // streaming_ back on so UpdateQueueUI never observes the (idle, queue
+    // t.streaming back on so UpdateQueueUI never observes the (idle, queue
     // non-empty) intermediate state and the input stays visible the whole
     // time. Error/cancel: drop into idle-queue mode (Continue / Clear) if
     // the queue is non-empty, so the user decides what to do.
-    if (!wasCancelledOrError && !pendingQueue_.empty()) {
-        DispatchNextQueued();
+    if (!wasCancelledOrError && !t.pendingQueue.empty()) {
+        DispatchNextQueued(t);
         return;
     }
+    if (!Shown(t)) return;
     UpdateQueueUI();
+
     // Put the cursor back in the input, but only if the user is already here:
     // on wxGTK, SetFocus() on an inactive window calls gtk_window_present(),
     // and Wayland compositors (Hyprland) then switch workspaces and pull the
@@ -4693,48 +5399,133 @@ void ChatFrame::FinalizeTurn(bool wasCancelledOrError) {
     if (input_->IsShown() && IsActive()) input_->SetFocus();
 }
 
-void ChatFrame::RenderToolBlock(const std::string& name,
-                                const std::string& argsJson,
-                                const std::string& result) {
-    // Compact the args JSON for display: parse + dump to drop whitespace.
-    std::string displayArgs = argsJson;
-    try {
-        if (!argsJson.empty()) {
-            displayArgs = nlohmann::json::parse(argsJson).dump(
-                -1, ' ', false, nlohmann::json::error_handler_t::replace);
-        }
-    } catch (...) { /* show raw */ }
+ChatFrame::Thread* ChatFrame::ChildFor(const Thread& t, const std::string& toolId) {
+    auto it = std::ranges::find_if(threads_, [&](const Thread& c) {
+        return c.parent == t.id && c.parentToolId == toolId;
+    });
+    return it != threads_.end() ? &*it : nullptr;
+}
 
-    std::string preview = result;
-    constexpr size_t kPreviewCap = 4000;
-    if (preview.size() > kPreviewCap) {
-        preview.resize(kPreviewCap);
-        preview += "\n... [preview truncated; full output sent to model]";
+bool ChatFrame::HasRunningChild(const Thread& t) const {
+    return std::ranges::any_of(threads_, [&](const Thread& c) {
+        return c.parent == t.id && c.streaming;
+    });
+}
+
+ChatFrame::Thread& ChatFrame::OpenChild(Thread& parent, const std::string& toolId,
+                                        const std::string& description) {
+    Thread& c = OpenThread(SessionStore::NewThreadId(), parent.cwd);
+    c.parent = parent.id;
+    c.parentToolId = toolId;
+    c.title = DefaultTitle(description.empty() ? std::string("Subagent") : description);
+    if (Shown(parent))
+        canvas_->AddBlock(ThreadLinkBlock("Subagent started: ", c.id, ThreadLabelOf(c.id)));
+    return c;
+}
+
+void ChatFrame::StartSubagent(Thread& parent, const std::string& toolId,
+                              const std::string& description, const std::string& prompt) {
+    Thread& c = OpenChild(parent, toolId, description);
+    c.turnModelIndex = SubagentModelIndex(parent.requestModel, parent.turnModelIndex,
+                                          remoteModels_);
+    RefreshSystemPrompt(c);  // now with the subagent note
+    // Recorded on the call (the parent's last message), so the restored
+    // parent links to the child.
+    for (auto& tc : parent.history.back()["tool_calls"]) {
+        if (StringField(tc, "id") == toolId) tc["thread"] = c.id;
     }
-
-    Block b;
-    b.type = BlockType::ToolCall;
-    b.toolName = wxString::FromUTF8(name);
-    b.toolArgs = wxString::FromUTF8(displayArgs);
-    b.toolResult = wxString::FromUTF8(preview);
-    b.toolExpanded = false;
-    // visibleText layout:
-    //   [0, headerLen)            "toolName(args)"
-    //   [headerLen, headerLen+2)  "\n\n" separator
-    //   [headerLen+2, end)        toolResult
-    // Header chars are selectable in the rendered header strip; body chars
-    // are selectable only when expanded. Selecting across a collapsed block
-    // (drag from another block, through this one) still grabs the full
-    // visibleText, so Ctrl+C captures both the header and the hidden body.
-    b.visibleText = b.toolName + "(" + b.toolArgs + ")\n\n" + b.toolResult;
-    canvas_->AddBlock(std::move(b));
+    StartTurn(c, wxString::FromUTF8(prompt));
 }
 
-void ChatFrame::RenderErrorBlock(const wxString& msg) {
-    canvas_->AddBlock(NoticeBlock(msg));
+void ChatFrame::ReportToParent(Thread& child, bool failed) {
+    Thread* p = Find(child.parent);
+    if (!p) return;
+    // A Claude Code subagent's result arrives in its parent's stream instead.
+    auto e = std::ranges::find(p->toolBatch, child.parentToolId, &ToolBatchEntry::id);
+    if (e == p->toolBatch.end()) return;
+    if (failed) {
+        e->result = child.failure.empty()
+            ? "Error: the subagent was cancelled."
+            : "Error: the subagent failed: " + child.failure;
+    } else {
+        const auto& last = child.history.back();
+        const std::string report = StringField(last, "role") == "assistant"
+                                       ? StringField(last, "content") : std::string();
+        e->result = report.empty() ? "The subagent finished without a report."
+                                   : Truncated(report, 30'000);
+    }
+    OnToolBatchDone(*p);
 }
 
-void ChatFrame::RenderFreeModelStallNotice() {
+ChatFrame::Thread& ChatFrame::StartClaudeSubagent(Thread& parent, const std::string& toolId,
+                                                  const nlohmann::json& input) {
+    Thread& c = OpenChild(parent, toolId, StringField(input, "description"));
+    // The subagent's own events arrive in the parent's stream; this thread
+    // assembles them like a turn of its own (see HandleClaudeEvent).
+    c.claudeModel = parent.claudeModel;
+    c.history.push_back({{"role", "user"},
+                         {"content", StringField(input, "prompt")},
+                         {"model", c.claudeModel}});
+    c.streaming = true;
+    c.mdStream = MakeMdStream(c);
+    RefreshSessionChoice();
+    return c;
+}
+
+void ChatFrame::FinishClaudeSubagent(Thread& c, const std::string& failure) {
+    if (!c.streaming) return;
+    if (c.mdStream) c.mdStream->Flush();
+    c.mdStream.reset();
+    EmitPendingThinking(c);
+    FlushClaudePendingMessage(c);
+    if (!failure.empty()) {
+        ShowTurnFailure(c, NoticeBlock(wxString::FromUTF8(failure)), false);
+        // The parent shows it as well, and records it with its Agent call's
+        // result (which, for a background subagent, only said it started).
+        if (Thread* p = Find(c.parent)) {
+            for (auto& m : p->history) {
+                if (StringField(m, "role") == "tool"
+                    && StringField(m, "tool_call_id") == c.parentToolId)
+                    m["content"] = StringField(m, "content") + "\n\n" + failure;
+            }
+            if (Shown(*p))
+                canvas_->AddBlock(ThreadLinkBlock(wxString::FromUTF8(failure + " Open: "),
+                                                  c.id, ThreadLabelOf(c.id)));
+        }
+    }
+    FinalizeTurn(c, !failure.empty());
+}
+
+void ChatFrame::RenderToolBlock(Thread& t, const std::string& name,
+                                const std::string& argsJson,
+                                const std::string& result,
+                                const std::string& childId) {
+    if (!Shown(t)) return;
+    canvas_->AddBlock(ToolBlock(name, argsJson, result));
+    if (!childId.empty())
+        canvas_->AddBlock(ThreadLinkBlock("Subagent thread: ", childId, ThreadLabelOf(childId)));
+}
+
+void ChatFrame::RenderErrorBlock(Thread& t, const wxString& msg) {
+    if (Shown(t)) canvas_->AddBlock(NoticeBlock(msg));
+}
+
+void ChatFrame::AddLocalBlock(Thread& t, Block b) {
+    if (Shown(t)) canvas_->AddBlock(b);
+    t.localBlocks.push_back({t.history.size(), std::move(b)});
+}
+
+void ChatFrame::ShowTurnFailure(Thread& t, Block notice, bool promptRolledBack) {
+    t.failure = notice.visibleText.utf8_string();
+    if (Shown(t)) {
+        canvas_->AddBlock(std::move(notice));
+        return;
+    }
+    t.failureNotice = std::move(notice);
+    t.failedPrompt = promptRolledBack ? t.turnPrompt : std::string();
+}
+
+Block ChatFrame::FreeModelStallNotice() {
     wxString text =
         "The free model stopped responding. Free models can lose their "
         "connection from time to time. For a reliable experience, set up "
@@ -4756,12 +5547,11 @@ void ChatFrame::RenderFreeModelStallNotice() {
     r2.bold = true;
     r2.link = "gritcode://settings";
     b.runs.push_back(r2);
-
-    canvas_->AddBlock(std::move(b));
+    return b;
 }
 
-void ChatFrame::RenderThinkingBlock(const wxString& text) {
-    if (text.IsEmpty()) return;
+void ChatFrame::RenderThinkingBlock(Thread& t, const wxString& text) {
+    if (text.IsEmpty() || !Shown(t)) return;
     Block b;
     b.type = BlockType::Thinking;
     b.rawText = text;
@@ -4770,75 +5560,78 @@ void ChatFrame::RenderThinkingBlock(const wxString& text) {
     canvas_->AddBlock(std::move(b));
 }
 
-void ChatFrame::EmitPendingThinking() {
-    if (thinkingEmitted_) return;
-    thinkingEmitted_ = true;
-    if (liveThinkingIdx_ >= 0) {
+void ChatFrame::EmitPendingThinking(Thread& t) {
+    if (t.thinkingEmitted) return;
+    t.thinkingEmitted = true;
+    // liveThinkingIdx is only set while the thread is shown.
+    if (t.liveThinkingIdx >= 0) {
         // The block is already on the canvas: give it the complete reasoning
         // and end live mode, after which it behaves like any Thinking block.
-        canvas_->UpdateThinkingBlock(liveThinkingIdx_,
-                                     wxString::FromUTF8(activeReasoning_), false);
-        liveThinkingIdx_ = -1;
+        canvas_->UpdateThinkingBlock(t.liveThinkingIdx,
+                                     wxString::FromUTF8(t.activeReasoning), false);
+        t.liveThinkingIdx = -1;
         return;
     }
-    if (activeReasoning_.empty()) return;
-    RenderThinkingBlock(wxString::FromUTF8(activeReasoning_));
+    if (t.activeReasoning.empty()) return;
+    RenderThinkingBlock(t, wxString::FromUTF8(t.activeReasoning));
 }
 
-void ChatFrame::UpdateLiveThinking() {
-    if (thinkingEmitted_ || activeReasoning_.empty()) return;
+void ChatFrame::UpdateLiveThinking(Thread& t) {
+    if (t.thinkingEmitted || t.activeReasoning.empty() || !Shown(t)) return;
+
     const auto now = std::chrono::steady_clock::now();
-    if (liveThinkingIdx_ < 0) {
+    if (t.liveThinkingIdx < 0) {
         Block b;
         b.type = BlockType::Thinking;
-        b.rawText = wxString::FromUTF8(activeReasoning_);
+        b.rawText = wxString::FromUTF8(t.activeReasoning);
         b.visibleText = b.rawText;
         b.toolExpanded = false;  // collapsed, like every Thinking block
         b.thinkingLive = true;
         canvas_->AddBlock(std::move(b));
-        liveThinkingIdx_ = (int)canvas_->Blocks().size() - 1;
-        liveThinkingLastUpdate_ = now;
-        liveThinkingLayoutCost_ = {};
+        t.liveThinkingIdx = (int)canvas_->Blocks().size() - 1;
+        t.liveThinkingLastUpdate = now;
+        t.liveThinkingLayoutCost = {};
         return;
     }
     // A collapsed block only draws its header, so its text can wait until the
     // round finalizes it. When expanded, refresh it in chunks, not per token.
     const auto& blocks = canvas_->Blocks();
-    if (liveThinkingIdx_ >= (int)blocks.size()
-        || !blocks[liveThinkingIdx_].toolExpanded)
+    if (t.liveThinkingIdx >= (int)blocks.size()
+        || !blocks[t.liveThinkingIdx].toolExpanded)
         return;
     // Each refresh re-wraps the whole reasoning, which gets slower as it
     // grows, so the interval grows with it: at least 500 ms, and 20x the last
     // re-layout, keeping layout under ~5% of the UI thread on long runs.
     const auto interval = std::max<std::chrono::steady_clock::duration>(
-        std::chrono::milliseconds(500), liveThinkingLayoutCost_ * 20);
-    if (now - liveThinkingLastUpdate_ < interval) return;
-    canvas_->UpdateThinkingBlock(liveThinkingIdx_,
-                                 wxString::FromUTF8(activeReasoning_), true);
-    liveThinkingLastUpdate_ = std::chrono::steady_clock::now();
-    liveThinkingLayoutCost_ = liveThinkingLastUpdate_ - now;
+        std::chrono::milliseconds(500), t.liveThinkingLayoutCost * 20);
+    if (now - t.liveThinkingLastUpdate < interval) return;
+    canvas_->UpdateThinkingBlock(t.liveThinkingIdx,
+                                 wxString::FromUTF8(t.activeReasoning), true);
+    t.liveThinkingLastUpdate = std::chrono::steady_clock::now();
+    t.liveThinkingLayoutCost = t.liveThinkingLastUpdate - now;
 }
 
-void ChatFrame::DispatchNextQueued() {
-    if (pendingQueue_.empty()) return;
-    QueuedMessage next = std::move(pendingQueue_.front());
-    pendingQueue_.erase(pendingQueue_.begin());
-    StartTurn(wxString::FromUTF8(next.text), std::move(next.images));
+void ChatFrame::DispatchNextQueued(Thread& t) {
+    if (t.pendingQueue.empty()) return;
+    QueuedMessage next = std::move(t.pendingQueue.front());
+    t.pendingQueue.erase(t.pendingQueue.begin());
+    StartTurn(t, wxString::FromUTF8(next.text), std::move(next.images));
 }
 
 void ChatFrame::OnContinueQueue(wxCommandEvent&) {
-    DispatchNextQueued();
+    DispatchNextQueued(Active());
 }
 
 void ChatFrame::OnClearQueue(wxCommandEvent&) {
-    pendingQueue_.clear();
+    Active().pendingQueue.clear();
     UpdateQueueUI();
     if (input_->IsShown()) input_->SetFocus();
 }
 
 void ChatFrame::UpdateQueueUI() {
-    const bool busy = streaming_;
-    const bool hasQueue = !pendingQueue_.empty();
+    const Thread& t = Active();
+    const bool busy = t.streaming;
+    const bool hasQueue = !t.pendingQueue.empty();
     const bool idleQueueMode = !busy && hasQueue;
 
     // Normal vs idle-queue: input + Send swap with Continue + Clear.
@@ -4849,14 +5642,18 @@ void ChatFrame::UpdateQueueUI() {
 
     if (busy) {
         sendBtn_->SetLabel("Add");
-        sendBtn_->Enable(pendingQueue_.size() < kMaxQueue_);
+        sendBtn_->Enable(t.pendingQueue.size() < kMaxQueue_);
     } else {
         sendBtn_->SetLabel("Send");
         sendBtn_->Enable(true);
     }
+    // Subagent threads are view-only.
+    const bool viewOnly = !t.parent.empty();
+    input_->Enable(!viewOnly);
+    if (viewOnly) sendBtn_->Enable(false);
     if (idleQueueMode) {
         continueQueueBtn_->SetLabel(
-            FormatU8("Continue ({} queued)", pendingQueue_.size()));
+            FormatU8("Continue ({} queued)", t.pendingQueue.size()));
     }
 
     chipRow_->Show(hasQueue);
@@ -4882,8 +5679,9 @@ void ChatFrame::RebuildChips() {
     wxColour chipBg = shift(winBg, 22);
 
     constexpr size_t kMaxChars = 60;
-    for (size_t i = 0; i < pendingQueue_.size(); ++i) {
-        const QueuedMessage& q = pendingQueue_[i];
+    const Thread& t = Active();
+    for (size_t i = 0; i < t.pendingQueue.size(); ++i) {
+        const QueuedMessage& q = t.pendingQueue[i];
         wxString full = wxString::FromUTF8(q.text);
         wxString label = full;
         label.Replace("\n", " ");
@@ -4932,13 +5730,15 @@ void ChatFrame::RebuildChips() {
         std::string entry = q.text;
         close->Bind(wxEVT_LEFT_DOWN, [this, entry](wxMouseEvent&) {
             CallAfter([this, entry]() {
+                Thread& t = Active();
                 auto it = std::find_if(
-                    pendingQueue_.begin(), pendingQueue_.end(),
+
+                    t.pendingQueue.begin(), t.pendingQueue.end(),
                     [&](const QueuedMessage& q) { return q.text == entry; });
-                if (it == pendingQueue_.end()) return;
-                pendingQueue_.erase(it);
+                if (it == t.pendingQueue.end()) return;
+                t.pendingQueue.erase(it);
                 UpdateQueueUI();
-                if (!streaming_ && pendingQueue_.empty() && input_->IsShown())
+                if (!t.streaming && t.pendingQueue.empty() && input_->IsShown())
                     input_->SetFocus();
             });
         });
@@ -4953,7 +5753,7 @@ void ChatFrame::RebuildChips() {
 //
 // Goal: when the rendered history would overflow the model's context window,
 // replace the oldest portion with a real LLM-generated summary — the same
-// strategy opencode uses. Persisting the summary in history_ (rather than
+// strategy opencode uses. Persisting the summary in history (rather than
 // only rewriting the wire request) keeps every subsequent turn within
 // budget; without that, history would keep growing and we'd re-"compact"
 // the same head on every send.
@@ -4962,31 +5762,31 @@ void ChatFrame::RebuildChips() {
 //   1. StartCompletion → MaybeCompactThenSend. If history fits the budget,
 //      return false → caller proceeds to DoSendActualRequest.
 //   2. Over budget: pick the most recent user message as the split point.
-//      Head = history_[0..split), tail = history_[split..] stays intact
+//      Head = history[0..split), tail = history[split..] stays intact
 //      (so we never break tool_call / tool_result pairs).
-//   3. Fire an async summary request on `request_` with the summary
+//   3. Fire an async summary request on the thread's `request` with the summary
 //      callbacks (OnSummaryStreamData / OnSummaryStreamDone). The UI
 //      shows a notice so the extra round-trip doesn't look like a hang.
 //   4. ApplyCompaction (on the GUI thread, after the summary returns)
 //      replaces the head with a single isSummary user-role message,
 //      persists, and calls DoSendActualRequest to fire the real request.
-//   5. historyCompactBaseCount_ is bumped to the post-compaction size so
+//   5. historyCompactBaseCount is bumped to the post-compaction size so
 //      MaybeCompactThenSend won't re-compact until enough new messages
 //      have accumulated.
 // ---------------------------------------------------------------------------
 
-bool ChatFrame::MaybeCompactThenSend() {
-    int histSize = (int)history_.size();
+bool ChatFrame::MaybeCompactThenSend(Thread& t) {
+    int histSize = (int)t.history.size();
 
     // Hysteresis: require some growth since last compaction before retrying.
-    int growth = histSize - historyCompactBaseCount_;
-    if (growth < 5 && historyCompactBaseCount_ > 0) return false;
+    int growth = histSize - t.historyCompactBaseCount;
+    if (growth < 5 && t.historyCompactBaseCount > 0) return false;
 
     // Select the token-budget tail: the most recent ~kTailBudgetTokens of
     // conversation stays verbatim; everything before it is the head we
     // summarize. This replaces the old "keep 2 user turns" rule (which was
     // unbounded) with OpenCode's bounded preserveRecentBudget.
-    int splitIdx = SelectTailSplit();
+    int splitIdx = SelectTailSplit(t);
     // Nothing older than the protected tail to summarize.
     if (splitIdx <= 1) return false;
 
@@ -4994,23 +5794,23 @@ bool ChatFrame::MaybeCompactThenSend() {
     // rendered view would exceed the context window minus a reserve. This is
     // ~contextWindow (≈980K for DeepSeek) instead of the old 150K head budget,
     // so compaction fires ~7x less often.
-    nlohmann::json view = BuildModelView();
+    nlohmann::json view = BuildModelView(t);
     int viewTokens = EstimatePromptTokens(view);
     ModelRoute route =
-        CompletionRoute(currentModelIndex_, turnModelIndex_, remoteModels_);
+        CompletionRoute(ModelIndexFor(t), t.turnModelIndex, remoteModels_);
     int usable = route.contextWindow - kBufferTokens;
     if (viewTokens < usable) return false;
 
-    RunSummaryThenSend(splitIdx);
+    RunSummaryThenSend(t, splitIdx);
     return true;
 }
 
-int ChatFrame::SelectTailSplit() const {
-    int histSize = (int)history_.size();
+int ChatFrame::SelectTailSplit(const Thread& t) {
+    int histSize = (int)t.history.size();
     int tailTokens = 0;
     int splitIdx = histSize;
     for (int i = histSize - 1; i >= 0; --i) {
-        const auto& m = history_[i];
+        const auto& m = t.history[i];
         if (!m.is_object()) continue;
         if (m.value("compacted", false)) continue;
         // A summary checkpoint is a head boundary: everything older than it
@@ -5026,34 +5826,34 @@ int ChatFrame::SelectTailSplit() const {
     return splitIdx;
 }
 
-bool ChatFrame::ForceCompactForOverflow() {
+bool ChatFrame::ForceCompactForOverflow(Thread& t) {
     // Keep only the most recent user turn verbatim; summarize everything
     // before it. This is more aggressive than the normal 2-turn keep.
     int splitIdx = -1;
-    for (int i = (int)history_.size() - 1; i >= 0; --i) {
-        if (!history_[i].is_object()) continue;
-        if (history_[i].value("compacted", false)) continue;
-        if (history_[i].value("role", std::string{}) != "user") continue;
-        if (history_[i].value("isSummary", false)) continue;
+    for (int i = (int)t.history.size() - 1; i >= 0; --i) {
+        if (!t.history[i].is_object()) continue;
+        if (t.history[i].value("compacted", false)) continue;
+        if (t.history[i].value("role", std::string{}) != "user") continue;
+        if (t.history[i].value("isSummary", false)) continue;
         splitIdx = i;
         break;
     }
     if (splitIdx <= 1) return false;
-    RunSummaryThenSend(splitIdx);
+    RunSummaryThenSend(t, splitIdx);
     return true;
 }
 
-void ChatFrame::RunSummaryThenSend(int splitIdx) {
-    compacting_ = true;
-    compactionSplitIdx_ = splitIdx;
-    compactionHeadCount_ = splitIdx;
-    summarySseBuf_.clear();
-    summaryText_.clear();
+void ChatFrame::RunSummaryThenSend(Thread& t, int splitIdx) {
+    t.compacting = true;
+    t.compactionSplitIdx = splitIdx;
+    t.compactionHeadCount = splitIdx;
+    t.summarySseBuf.clear();
+    t.summaryText.clear();
 
-    RenderErrorBlock(FormatU8(
+    RenderErrorBlock(t, FormatU8(
         "📦 Compacting context - summarizing {} older messages before "
         "continuing. This usually takes a few seconds…",
-        compactionHeadCount_));
+        t.compactionHeadCount));
 
     // Render the head as plain text. We feed the summary model a flat
     // transcript rather than the raw tool_calls / tool_result structure —
@@ -5069,7 +5869,7 @@ void ChatFrame::RunSummaryThenSend(int splitIdx) {
     headText.reserve(16384);
     std::string previousSummary;
     for (int i = 0; i < splitIdx; ++i) {
-        const auto& m = history_[i];
+        const auto& m = t.history[i];
         if (!m.is_object()) continue;
         if (m.value("compacted", false)) continue;  // already summarized
         if (m.value("isSummary", false)) {
@@ -5104,7 +5904,7 @@ void ChatFrame::RunSummaryThenSend(int splitIdx) {
     // Cap the summary-call input so the summary request itself doesn't
     // overflow. Budget = context window − response budget − prompt overhead.
     ModelRoute route =
-        CompletionRoute(currentModelIndex_, turnModelIndex_, remoteModels_);
+        CompletionRoute(ModelIndexFor(t), t.turnModelIndex, remoteModels_);
     size_t maxChars = (size_t)(route.contextWindow - 6000) * 4;
     if (maxChars < 40000) maxChars = 40000;
     if (headText.size() > maxChars) {
@@ -5164,7 +5964,7 @@ void ChatFrame::RunSummaryThenSend(int splitIdx) {
             // without a summary, then send the actual request. The user
             // already saw the compaction notice; ApplyCompaction will add
             // a follow-up explaining the fallback.
-            ApplyCompaction(false, std::string{}, "no API key configured");
+            ApplyCompaction(t, false, std::string{}, "no API key configured");
             return;
         }
     }
@@ -5197,66 +5997,60 @@ void ChatFrame::RunSummaryThenSend(int splitIdx) {
     }
     spec.idleTimeoutSeconds = 60;
 
-    request_ = StreamingWebRequest(
+    ++t.gen;
+    t.request = StreamingWebRequest(
         this, std::move(spec),
-        [this](std::string_view chunk) { OnSummaryStreamData(chunk); },
-        [this](WebResponse resp) { OnSummaryStreamDone(std::move(resp)); });
+        [this, id = t.id, gen = t.gen](std::string_view chunk) {
+            if (Thread* t = Find(id, gen)) OnSummaryStreamData(*t, chunk);
+        },
+        [this, id = t.id, gen = t.gen](WebResponse resp) {
+            if (Thread* t = Find(id, gen)) OnSummaryStreamDone(*t, std::move(resp));
+        });
 }
 
-void ChatFrame::OnSummaryStreamData(std::string_view chunk) {
-    if (chunk.empty()) return;
-    summarySseBuf_.append(chunk.data(), chunk.size());
-
-    size_t pos;
-    while ((pos = summarySseBuf_.find("\n\n")) != std::string::npos) {
-        std::string event = summarySseBuf_.substr(0, pos);
-        summarySseBuf_.erase(0, pos + 2);
-        std::istringstream stream(event);
-        std::string line;
-        while (std::getline(stream, line)) {
-            if (!line.empty() && line.back() == '\r') line.pop_back();
-            if (line.rfind("data: ", 0) != 0) continue;
-            std::string payload = line.substr(6);
-            if (payload == "[DONE]") continue;
-            try {
-                auto j = nlohmann::json::parse(payload);
-                if (!j.contains("choices") || j["choices"].empty()) continue;
-                const auto& choice = j["choices"][0];
-                if (!choice.contains("delta")) continue;
-                const auto& delta = choice["delta"];
-                if (delta.contains("content") && delta["content"].is_string()) {
-                    summaryText_ += delta["content"].get<std::string>();
-                }
-            } catch (...) {
-                // Tolerate keepalives / partial JSON / malformed events.
+void ChatFrame::OnSummaryStreamData(Thread& t, std::string_view chunk, bool streamEnded) {
+    if (chunk.empty() && !streamEnded) return;
+    for (const std::string& payload : TakeSseEvents(t.summarySseBuf, chunk, streamEnded)) {
+        if (payload == "[DONE]") continue;
+        try {
+            auto j = nlohmann::json::parse(payload);
+            if (!j.contains("choices") || j["choices"].empty()) continue;
+            const auto& choice = j["choices"][0];
+            if (!choice.contains("delta")) continue;
+            const auto& delta = choice["delta"];
+            if (delta.contains("content") && delta["content"].is_string()) {
+                t.summaryText += delta["content"].get<std::string>();
             }
+        } catch (...) {
+            // Tolerate keepalives / partial JSON / malformed events.
         }
     }
 }
 
-void ChatFrame::OnSummaryStreamDone(WebResponse resp) {
+void ChatFrame::OnSummaryStreamDone(Thread& t, WebResponse resp) {
   try {
     if (quitRequested_) { Close(); return; }
+    if (resp.ok) OnSummaryStreamData(t, {}, /*streamEnded=*/true);
     // User hit Escape during the summary call — abort the whole turn rather
     // than dropping the head with no summary and continuing.
     if (!resp.ok && resp.error == "cancelled") {
-        compacting_ = false;
-        compactionSplitIdx_ = -1;
-        compactionHeadCount_ = 0;
-        summaryText_.clear();
-        summarySseBuf_.clear();
-        RenderErrorBlock("Cancelled.");
-        FinalizeTurn(true);
+        t.compacting = false;
+        t.compactionSplitIdx = -1;
+        t.compactionHeadCount = 0;
+        t.summaryText.clear();
+        t.summarySseBuf.clear();
+        RenderErrorBlock(t, "Cancelled.");
+        FinalizeTurn(t, true);
         return;
     }
     if (!resp.ok) {
         std::string err = resp.error.empty() ? "HTTP error" : resp.error;
-        ApplyCompaction(false, std::string{}, err);
+        ApplyCompaction(t, false, std::string{}, err);
         return;
     }
     // Trim so whitespace-only/empty summaries count as failures and fall
     // back to the "context dropped" path instead of an empty checkpoint.
-    std::string summary = summaryText_;
+    std::string summary = t.summaryText;
     while (!summary.empty() && (summary.back() == '\n' || summary.back() == '\r'
                                 || summary.back() == ' ' || summary.back() == '\t'))
         summary.pop_back();
@@ -5265,28 +6059,28 @@ void ChatFrame::OnSummaryStreamDone(WebResponse resp) {
                                      || summary[lead] == ' ' || summary[lead] == '\t'))
         ++lead;
     summary = summary.substr(lead);
-    ApplyCompaction(!summary.empty(), summary, std::string{});
+    ApplyCompaction(t, !summary.empty(), summary, std::string{});
   } catch (const std::exception& e) {
     std::fprintf(stderr, "[OnSummaryStreamDone] exception: %s\n", e.what());
     throw;
   }
 }
 
-void ChatFrame::ApplyCompaction(bool success, const std::string& summary,
+void ChatFrame::ApplyCompaction(Thread& t, bool success, const std::string& summary,
                                 const std::string& error) {
   try {
-    int splitIdx = compactionSplitIdx_;
-    int origHeadCount = compactionHeadCount_;
-    compactionSplitIdx_ = -1;
-    compactionHeadCount_ = 0;
-    summaryText_.clear();
-    summarySseBuf_.clear();
+    int splitIdx = t.compactionSplitIdx;
+    int origHeadCount = t.compactionHeadCount;
+    t.compactionSplitIdx = -1;
+    t.compactionHeadCount = 0;
+    t.summaryText.clear();
+    t.summarySseBuf.clear();
 
     // Defensive: history could have changed shape under us (shouldn't on
     // the GUI thread, but be safe).
-    if (splitIdx <= 0 || splitIdx > (int)history_.size()) {
-        compacting_ = false;
-        DoSendActualRequest();
+    if (splitIdx <= 0 || splitIdx > (int)t.history.size()) {
+        t.compacting = false;
+        DoSendActualRequest(t);
         return;
     }
 
@@ -5297,18 +6091,18 @@ void ChatFrame::ApplyCompaction(bool success, const std::string& summary,
             "compacted into this summary to fit the model's context "
             "window. Treat it as authoritative background for continuing "
             "the current task.]\n\n" + summary;
-        RenderErrorBlock(FormatU8(
+        RenderErrorBlock(t, FormatU8(
             "📦 Context compacted: {} older messages replaced by a summary.",
             origHeadCount));
     } else {
         // Fallback — even a failed summary should shrink history,
         // otherwise the very next request would hit the same overflow.
-        // historyCompactBaseCount_ still gates re-entry.
+        // t.historyCompactBaseCount still gates re-entry.
         summaryBody =
             "[Prior conversation context was dropped to fit the model's "
             "context window. Summary unavailable" +
             (error.empty() ? std::string{} : (": " + error)) + ".]";
-        RenderErrorBlock(FormatU8(
+        RenderErrorBlock(t, FormatU8(
             "⚠️ Compaction summary failed{} - dropping {} older messages "
             "without a summary so the next request can fit.",
             error.empty() ? std::string{} : (" (" + error + ")"),
@@ -5320,9 +6114,9 @@ void ChatFrame::ApplyCompaction(bool success, const std::string& summary,
     // head of the model view. The session file keeps every message.
     std::string ts = SessionStore::NowIso();
     for (int i = 0; i < splitIdx; ++i) {
-        if (!history_[i].is_object()) continue;
-        history_[i]["compacted"] = true;
-        history_[i]["compactedAt"] = ts;
+        if (!t.history[i].is_object()) continue;
+        t.history[i]["compacted"] = true;
+        t.history[i]["compactedAt"] = ts;
     }
 
     nlohmann::json summaryMsg = {
@@ -5332,7 +6126,7 @@ void ChatFrame::ApplyCompaction(bool success, const std::string& summary,
     };
 
 #ifndef NDEBUG
-    // Log before moving summaryMsg into history_ — a moved-from json is null
+    // Log before moving summaryMsg into t.history — a moved-from json is null
     // and reading its content would throw type_error.
     LogDebug("=== COMPACTION split=" + std::to_string(splitIdx)
              + " hidden=" + std::to_string(origHeadCount)
@@ -5340,13 +6134,13 @@ void ChatFrame::ApplyCompaction(bool success, const std::string& summary,
     LogDebug(summaryMsg["content"].get<std::string>());
 #endif
 
-    history_.push_back(std::move(summaryMsg));
+    t.history.push_back(std::move(summaryMsg));
 
-    historyCompactBaseCount_ = (int)history_.size();
-    PersistActive();
+    t.historyCompactBaseCount = (int)t.history.size();
+    Persist(t);
 
-    compacting_ = false;
-    DoSendActualRequest();
+    t.compacting = false;
+    DoSendActualRequest(t);
   } catch (const std::exception& e) {
     std::fprintf(stderr, "[ApplyCompaction] exception: %s\n", e.what());
     throw;
@@ -5362,7 +6156,7 @@ void ChatFrame::ApplyCompaction(bool success, const std::string& summary,
 // Code runs its own agent loop and tools; gritcode renders its events:
 //   - stream_event text/thinking deltas stream into the canvas,
 //   - "assistant" events carry the finished blocks (text, tool_use), which
-//     are recorded in history_ as OpenAI-style assistant messages,
+//     are recorded in history as OpenAI-style assistant messages,
 //   - "user" events carry tool_results, rendered as tool blocks and recorded
 //     as role=tool messages,
 //   - "result" ends the turn (is_error for failures).
@@ -5384,17 +6178,17 @@ constexpr size_t kClaudeToolResultMaxChars = 30'000;
 
 }  // namespace
 
-void ChatFrame::RenderModelSwitchNotice(const std::string& modelId) {
+void ChatFrame::RenderModelSwitchNotice(Thread& t, const std::string& modelId) {
     ModelSwitchTracker tracker;
-    for (const auto& m : history_) {
+    for (const auto& m : t.history) {
         if (IsUserTurn(m)) tracker.Next(m, false);
     }
     wxString notice = tracker.Next(nlohmann::json{{"model", modelId}}, false);
-    if (!notice.IsEmpty()) RenderErrorBlock(notice);
+    if (!notice.IsEmpty()) RenderErrorBlock(t, notice);
 }
 
-void ChatFrame::StartClaudeTurn(bool fresh) {
-    claudeTurnHistoryStart_ = history_.size();
+void ChatFrame::StartClaudeTurn(Thread& t, bool fresh) {
+    t.claudeTurnHistoryStart = t.history.size();
 
     const std::string exe = FindClaudeExecutable();
     if (exe.empty()) {
@@ -5409,21 +6203,22 @@ void ChatFrame::StartClaudeTurn(bool fresh) {
         b.runs.push_back(link);
         b.rawText += linkText;
         b.visibleText += linkText;
-        canvas_->AddBlock(std::move(b));
-        if (!history_.empty() && IsUserTurn(history_.back())) history_.pop_back();
-        FinalizeTurn(true);
+        const bool rolledBack = !t.history.empty() && IsUserTurn(t.history.back());
+        if (rolledBack) t.history.pop_back();
+        ShowTurnFailure(t, std::move(b), rolledBack);
+        FinalizeTurn(t, true);
         return;
     }
 
     // Resume the latest Claude Code session in this gritcode session. What
     // other models said after it (or the whole conversation, when there is
     // no Claude session yet) goes in front of the message as a transcript.
-    const size_t userIdx = history_.size() - 1;
+    const size_t userIdx = t.history.size() - 1;
     std::string resumeId;
     size_t since = 0;
     if (!fresh) {
         for (size_t i = userIdx; i-- > 0;) {
-            std::string sid = StringField(history_[i], "claudeSessionId");
+            std::string sid = StringField(t.history[i], "claudeSessionId");
             if (!sid.empty()) {
                 resumeId = sid;
                 since = i + 1;
@@ -5433,21 +6228,23 @@ void ChatFrame::StartClaudeTurn(bool fresh) {
     }
     std::string text;
     {
-        std::string t = HandoverTranscript(history_, since, userIdx,
-                                           /*skipClaude=*/!resumeId.empty());
-        if (!t.empty()) {
+        std::string transcript = HandoverTranscript(t.history, since, userIdx,
+                                                    /*skipClaude=*/!resumeId.empty());
+        if (!transcript.empty()) {
             text = resumeId.empty()
                 ? "[This conversation started in gritcode with another model. "
                   "Transcript so far, for context:]\n\n"
                 : "[Since your last reply, this gritcode conversation "
                   "continued with another model. What happened since, for "
                   "context:]\n\n";
-            text += t + "[End of transcript. The user's new message follows.]\n\n";
+            text += transcript + "[End of transcript. The user's new message follows.]\n\n";
         }
     }
 
-    const auto& userMsg = history_[userIdx];
+    const auto& userMsg = t.history[userIdx];
     text += StringField(userMsg, "content");
+    if (std::string note = StringField(userMsg, "note"); !note.empty())
+        text += "\n\n[gritcode: " + note + "]";
     nlohmann::json content = nlohmann::json::array();
     if (userMsg.contains("images") && userMsg["images"].is_array()) {
         for (const auto& img : userMsg["images"]) {
@@ -5479,8 +6276,8 @@ void ChatFrame::StartClaudeTurn(bool fresh) {
 
     // Extra context and config go through files: that keeps a large
     // AGENTS.md clear of argv limits and Windows command-line quoting.
-    claudeTempFiles_.clear();
-    auto writeTemp = [this](const std::string& content) -> std::string {
+    t.claudeTempFiles.clear();
+    auto writeTemp = [&t](const std::string& content) -> std::string {
         wxString tmp = wxFileName::CreateTempFileName("gritclaude");
         if (tmp.empty()) return std::string();
         std::ofstream f(tmp.ToStdString(wxConvUTF8), std::ios::binary | std::ios::trunc);
@@ -5490,8 +6287,8 @@ void ChatFrame::StartClaudeTurn(bool fresh) {
             wxRemoveFile(tmp);
             return std::string();
         }
-        claudeTempFiles_.push_back(tmp.ToStdString(wxConvUTF8));
-        return claudeTempFiles_.back();
+        t.claudeTempFiles.push_back(tmp.ToStdString(wxConvUTF8));
+        return t.claudeTempFiles.back();
     };
 
     // Project instructions: Claude Code reads CLAUDE.md itself but not
@@ -5505,8 +6302,10 @@ void ChatFrame::StartClaudeTurn(bool fresh) {
         "run_project tool (mcp__gritcode__run_project): 'get' shows it, "
         "'detect' suggests one, 'set' stores it (test it with Bash first, and "
         "pass cwd = the project root), 'forget' removes it.";
-    const std::string agents = LoadAgentsInstructions(activeCwd_);
+    const std::string agents = LoadAgentsInstructions(t.cwd);
     if (!agents.empty()) append += "\n\n" + agents;
+    if (std::string folder = FolderContext(t); !folder.empty())
+        append += "\n\n" + folder;
     const std::string promptFile = writeTemp(append);
 
     // gritcode's own stdio MCP server, in its run_project-only mode, so the
@@ -5517,7 +6316,7 @@ void ChatFrame::StartClaudeTurn(bool fresh) {
             {"gritcode", {
                 {"type", "stdio"},
                 {"command", wxStandardPaths::Get().GetExecutablePath().utf8_string()},
-                {"args", {"--mcp-stdio", "--run-project", activeCwd_}},
+                {"args", {"--mcp-stdio", "--run-project", t.cwd}},
             }},
         }},
     };
@@ -5526,14 +6325,14 @@ void ChatFrame::StartClaudeTurn(bool fresh) {
 
     ClaudeRunSpec spec;
     spec.executable = exe;
-    spec.cwd = activeCwd_;
+    spec.cwd = t.cwd;
     spec.args = {
         "-p",
         "--input-format", "stream-json",
         "--output-format", "stream-json",
         "--verbose",
         "--include-partial-messages",
-        "--model", claudeModel_,
+        "--model", t.claudeModel,
         // gritcode's own agent runs its tools without confirmation, and a
         // headless run has nobody to answer a prompt: Claude gets the same.
         "--permission-mode", "bypassPermissions",
@@ -5560,74 +6359,86 @@ void ChatFrame::StartClaudeTurn(bool fresh) {
                         + "\n";
 
     // Reset per-run stream state.
-    claudeBuf_.clear();
-    claudeSessionId_.clear();
-    claudeResumed_ = !resumeId.empty();
-    claudeResultSeen_ = false;
-    claudeIsError_ = false;
-    claudeErrorText_.clear();
-    claudeMsgId_.clear();
-    claudeStreamMsgId_.clear();
-    claudePendingMsg_ = nullptr;
-    claudeStreamedMsgIds_.clear();
-    claudeToolUses_.clear();
-    activeAssistantText_.clear();
-    activeReasoning_.clear();
-    thinkingEmitted_ = false;
-    liveThinkingIdx_ = -1;
-    mdStream_ = std::make_unique<MdStream>([this](Block b) {
-        canvas_->AddBlock(std::move(b));
-    });
+    t.claudeBuf.clear();
+    t.claudeSessionId.clear();
+    t.claudeResumed = !resumeId.empty();
+    t.claudeResultSeen = false;
+    t.claudeIsError = false;
+    t.claudeErrorText.clear();
+    t.claudeMsgId.clear();
+    t.claudeStreamMsgId.clear();
+    t.claudePendingMsg = nullptr;
+    t.claudeStreamedMsgIds.clear();
+    t.claudeToolUses.clear();
+    t.activeAssistantText.clear();
+    t.activeReasoning.clear();
+    t.thinkingEmitted = false;
+    t.liveThinkingIdx = -1;
+    t.mdStream = MakeMdStream(t);
 
-    LogDebug("=== CLAUDE model=" + claudeModel_
+    LogDebug("=== CLAUDE model=" + t.claudeModel
+
              + (resumeId.empty() ? std::string(" (new session)")
                                  : " resume=" + resumeId)
              + " stdin_bytes=" + std::to_string(spec.stdinPayload.size())
              + " ===");
 
-    ChdirToCwd(activeCwd_);
-    claudeProc_ = ClaudeAgentProcess(
+    ++t.gen;
+    t.claudeProc = ClaudeAgentProcess(
         this, std::move(spec),
-        [this](std::string_view chunk) { OnClaudeData(chunk); },
-        [this](ClaudeProcessResult res) { OnClaudeDone(std::move(res)); });
+        [this, id = t.id, gen = t.gen](std::string_view chunk) {
+            if (Thread* t = Find(id, gen)) OnClaudeData(*t, chunk);
+        },
+        [this, id = t.id, gen = t.gen](ClaudeProcessResult res) {
+            if (Thread* t = Find(id, gen)) OnClaudeDone(*t, std::move(res));
+        });
 }
 
-void ChatFrame::OnClaudeData(std::string_view chunk) {
-    claudeBuf_.append(chunk.data(), chunk.size());
+void ChatFrame::OnClaudeData(Thread& t, std::string_view chunk) {
+    t.claudeBuf.append(chunk.data(), chunk.size());
     size_t start = 0;
     size_t nl;
-    while ((nl = claudeBuf_.find('\n', start)) != std::string::npos) {
-        std::string_view line(claudeBuf_.data() + start, nl - start);
+    while ((nl = t.claudeBuf.find('\n', start)) != std::string::npos) {
+        std::string_view line(t.claudeBuf.data() + start, nl - start);
         start = nl + 1;
         if (!line.empty() && line.back() == '\r') line.remove_suffix(1);
         if (line.empty() || line.front() != '{') continue;
         try {
-            HandleClaudeEvent(nlohmann::json::parse(line));
+            HandleClaudeEvent(t, nlohmann::json::parse(line));
         } catch (const std::exception& e) {
             LogDebug(std::string("claude: skipped event: ") + e.what());
         }
     }
-    claudeBuf_.erase(0, start);
+    t.claudeBuf.erase(0, start);
 }
 
-void ChatFrame::HandleClaudeEvent(const nlohmann::json& ev) {
+void ChatFrame::HandleClaudeEvent(Thread& t, const nlohmann::json& ev) {
     if (!ev.is_object()) return;
     const std::string type = StringField(ev, "type");
 
     if (type == "system") {
-        if (StringField(ev, "subtype") == "init") {
-            claudeSessionId_ = StringField(ev, "session_id");
-            LogDebug("claude: session " + claudeSessionId_ + " model "
+        const std::string subtype = StringField(ev, "subtype");
+        if (subtype == "init") {
+            t.claudeSessionId = StringField(ev, "session_id");
+            LogDebug("claude: session " + t.claudeSessionId + " model "
                      + StringField(ev, "model"));
+        } else if (subtype == "task_notification") {
+            // A subagent run in the background has ended.
+            if (Thread* c = ChildFor(t, StringField(ev, "tool_use_id"))) {
+                const std::string status = StringField(ev, "status");
+                FinishClaudeSubagent(*c, status == "completed"
+                                             ? std::string()
+                                             : "The subagent ended: " + status + ".");
+            }
         }
         return;
     }
     if (type == "result") {
-        claudeResultSeen_ = true;
+        t.claudeResultSeen = true;
         auto isErr = ev.find("is_error");
-        claudeIsError_ = isErr != ev.end() && isErr->is_boolean() && isErr->get<bool>();
-        if (claudeSessionId_.empty()) claudeSessionId_ = StringField(ev, "session_id");
-        if (claudeIsError_) {
+        t.claudeIsError = isErr != ev.end() && isErr->is_boolean() && isErr->get<bool>();
+        if (t.claudeSessionId.empty()) t.claudeSessionId = StringField(ev, "session_id");
+        if (t.claudeIsError) {
             std::string msg;
             auto errs = ev.find("errors");
             if (errs != ev.end() && errs->is_array()) {
@@ -5639,15 +6450,20 @@ void ChatFrame::HandleClaudeEvent(const nlohmann::json& ev) {
             }
             if (msg.empty()) msg = StringField(ev, "result");
             if (msg.empty()) msg = StringField(ev, "subtype");
-            claudeErrorText_ = msg;
+            t.claudeErrorText = msg;
         }
         return;
     }
 
-    // Subagent traffic (parent_tool_use_id set) stays inside the Agent tool's
-    // own result; only the main conversation is rendered and recorded.
-    auto parent = ev.find("parent_tool_use_id");
-    if (parent != ev.end() && !parent->is_null()) return;
+    // Subagent traffic (parent_tool_use_id set) goes to the subagent's child
+    // thread, which assembles it with the code below. Nested subagents'
+    // traffic has no thread and is dropped.
+    auto parentId = ev.find("parent_tool_use_id");
+    if (parentId != ev.end() && !parentId->is_null() && t.parent.empty()) {
+        if (Thread* c = ChildFor(t, StringField(ev, "parent_tool_use_id")))
+            HandleClaudeEvent(*c, ev);
+        return;
+    }
 
     if (type == "stream_event") {
         auto eIt = ev.find("event");
@@ -5655,36 +6471,41 @@ void ChatFrame::HandleClaudeEvent(const nlohmann::json& ev) {
         const auto& e = *eIt;
         const std::string et = StringField(e, "type");
         if (et == "message_start") {
-            // A new API round: settle the previous round's thinking.
-            EmitPendingThinking();
-            activeReasoning_.clear();
-            thinkingEmitted_ = false;
-            liveThinkingIdx_ = -1;
+            // A new API round: settle the previous round's thinking and
+            // record its message, so the in-flight text (shown again when
+            // switching back to this thread) is only this round's.
+            EmitPendingThinking(t);
+            FlushClaudePendingMessage(t);
+            t.activeAssistantText.clear();
+            t.activeReasoning.clear();
+
+            t.thinkingEmitted = false;
+            t.liveThinkingIdx = -1;
             auto msg = e.find("message");
-            claudeStreamMsgId_ = msg != e.end() ? StringField(*msg, "id") : std::string();
+            t.claudeStreamMsgId = msg != e.end() ? StringField(*msg, "id") : std::string();
         } else if (et == "content_block_start") {
             auto block = e.find("content_block");
             if (block != e.end() && StringField(*block, "type") == "tool_use")
-                EmitPendingThinking();
+                EmitPendingThinking(t);
         } else if (et == "content_block_delta") {
             auto dIt = e.find("delta");
             if (dIt == e.end() || !dIt->is_object()) return;
             const std::string dt = StringField(*dIt, "type");
             if (dt == "text_delta") {
-                const std::string t = StringField(*dIt, "text");
-                if (t.empty()) return;
-                EmitPendingThinking();
-                claudeStreamedMsgIds_.insert(claudeStreamMsgId_);
-                activeAssistantText_ += t;
-                if (mdStream_) mdStream_->Feed(wxString::FromUTF8(t));
+                const std::string text = StringField(*dIt, "text");
+                if (text.empty()) return;
+                EmitPendingThinking(t);
+                t.claudeStreamedMsgIds.insert(t.claudeStreamMsgId);
+                t.activeAssistantText += text;
+                if (t.mdStream) t.mdStream->Feed(wxString::FromUTF8(text));
             } else if (dt == "thinking_delta") {
-                activeReasoning_ += StringField(*dIt, "thinking");
-                UpdateLiveThinking();
+                t.activeReasoning += StringField(*dIt, "thinking");
+                UpdateLiveThinking(t);
             }
         } else if (et == "content_block_stop") {
             // Close the markdown block so a following tool call or text block
             // starts on its own.
-            if (mdStream_) mdStream_->Flush();
+            if (t.mdStream) t.mdStream->Flush();
         }
         return;
     }
@@ -5703,38 +6524,40 @@ void ChatFrame::HandleClaudeEvent(const nlohmann::json& ev) {
         const std::string id = StringField(msg, "id");
         // Claude Code sends one "assistant" event per finished content block;
         // blocks of the same API message share its id.
-        if (id != claudeMsgId_ || !claudePendingMsg_.is_object()) {
-            FlushClaudePendingMessage();
-            claudeMsgId_ = id;
-            claudePendingMsg_ = {{"role", "assistant"},
+        if (id != t.claudeMsgId || !t.claudePendingMsg.is_object()) {
+            FlushClaudePendingMessage(t);
+            t.claudeMsgId = id;
+            t.claudePendingMsg = {{"role", "assistant"},
                                  {"content", ""},
-                                 {"model", claudeModel_}};
-            if (!claudeSessionId_.empty())
-                claudePendingMsg_["claudeSessionId"] = claudeSessionId_;
+                                 {"model", t.claudeModel}};
+            if (!t.claudeSessionId.empty())
+                t.claudePendingMsg["claudeSessionId"] = t.claudeSessionId;
         }
         auto blocks = msg.find("content");
         if (blocks == msg.end() || !blocks->is_array()) return;
         for (const auto& b : *blocks) {
             const std::string bt = StringField(b, "type");
             if (bt == "text") {
-                const std::string t = StringField(b, "text");
-                if (t.empty()) continue;
-                std::string c = StringField(claudePendingMsg_, "content");
+                const std::string text = StringField(b, "text");
+                if (text.empty()) continue;
+                std::string c = StringField(t.claudePendingMsg, "content");
                 if (!c.empty()) c += "\n\n";
-                claudePendingMsg_["content"] = c + t;
+                t.claudePendingMsg["content"] = c + text;
                 // Not streamed as deltas (an older CLI, say): render it whole.
-                if (!claudeStreamedMsgIds_.count(id) && mdStream_) {
-                    EmitPendingThinking();
-                    mdStream_->Feed(wxString::FromUTF8(t));
-                    mdStream_->Flush();
+                if (!t.claudeStreamedMsgIds.count(id) && t.mdStream) {
+                    EmitPendingThinking(t);
+                    t.mdStream->Feed(wxString::FromUTF8(text));
+                    t.mdStream->Flush();
                 }
             } else if (bt == "thinking") {
-                const std::string t = StringField(b, "thinking");
-                if (t.empty()) continue;
-                std::string r = StringField(claudePendingMsg_, "reasoning_content");
+                const std::string thinking = StringField(b, "thinking");
+                if (thinking.empty()) continue;
+                std::string r = StringField(t.claudePendingMsg, "reasoning_content");
                 if (!r.empty()) r += "\n\n";
-                claudePendingMsg_["reasoning_content"] = r + t;
-                if (activeReasoning_.empty() && !thinkingEmitted_) activeReasoning_ = t;
+                t.claudePendingMsg["reasoning_content"] = r + thinking;
+                if (t.activeReasoning.empty() && !t.thinkingEmitted)
+                    t.activeReasoning = thinking;
+
             } else if (bt == "tool_use") {
                 const std::string toolId = StringField(b, "id");
                 const std::string name = StringField(b, "name");
@@ -5742,14 +6565,20 @@ void ChatFrame::HandleClaudeEvent(const nlohmann::json& ev) {
                 std::string args = input != b.end()
                     ? input->dump(-1, ' ', false, nlohmann::json::error_handler_t::replace)
                     : std::string("{}");
-                claudeToolUses_[toolId] = {name, args};
-                if (!claudePendingMsg_.contains("tool_calls"))
-                    claudePendingMsg_["tool_calls"] = nlohmann::json::array();
-                claudePendingMsg_["tool_calls"].push_back({
+                t.claudeToolUses[toolId] = {name, args};
+                if (!t.claudePendingMsg.contains("tool_calls"))
+                    t.claudePendingMsg["tool_calls"] = nlohmann::json::array();
+                nlohmann::json call = {
                     {"id", toolId},
                     {"type", "function"},
                     {"function", {{"name", name}, {"arguments", args}}},
-                });
+                };
+                // Claude Code's subagent tool (Task in older CLIs).
+                if (t.parent.empty() && (name == "Agent" || name == "Task")) {
+                    call["thread"] = StartClaudeSubagent(
+                        t, toolId, input != b.end() ? *input : nlohmann::json()).id;
+                }
+                t.claudePendingMsg["tool_calls"].push_back(std::move(call));
             }
         }
         return;
@@ -5762,10 +6591,10 @@ void ChatFrame::HandleClaudeEvent(const nlohmann::json& ev) {
         if (blocks == msgIt->end() || !blocks->is_array()) return;
         for (const auto& b : *blocks) {
             if (StringField(b, "type") != "tool_result") continue;
-            // The calls this result answers go into history_ first.
-            FlushClaudePendingMessage();
-            if (mdStream_) mdStream_->Flush();
-            EmitPendingThinking();
+            // The calls this result answers go into history first.
+            FlushClaudePendingMessage(t);
+            if (t.mdStream) t.mdStream->Flush();
+            EmitPendingThinking(t);
 
             const std::string toolId = StringField(b, "tool_use_id");
             auto rc = b.find("content");
@@ -5774,71 +6603,83 @@ void ChatFrame::HandleClaudeEvent(const nlohmann::json& ev) {
                 result.resize(kClaudeToolResultMaxChars);
                 result += "\n[output truncated]";
             }
-            auto use = claudeToolUses_.find(toolId);
-            const std::string name = use != claudeToolUses_.end() ? use->second.first
+            auto use = t.claudeToolUses.find(toolId);
+            const std::string name = use != t.claudeToolUses.end() ? use->second.first
                                                                   : std::string("tool");
-            const std::string args = use != claudeToolUses_.end() ? use->second.second
+            const std::string args = use != t.claudeToolUses.end() ? use->second.second
                                                                   : std::string();
-            RenderToolBlock(name, args, result);
-            history_.push_back({
+            Thread* child = ChildFor(t, toolId);
+            RenderToolBlock(t, name, args, result, child ? child->id : std::string());
+            // The subagent's result ends its thread, unless it was started in
+            // the background: then this only says so, and its
+            // task_notification follows when it ends.
+            auto info = ev.find("tool_use_result");
+            const bool async = info != ev.end() && info->is_object()
+                               && info->value("isAsync", false);
+            if (child && !async) {
+                const bool isError = b.value("is_error", false);
+                FinishClaudeSubagent(*child, isError ? "The subagent failed: " + result
+                                                     : std::string());
+            }
+            t.history.push_back({
                 {"role", "tool"},
                 {"tool_call_id", toolId},
                 {"name", name},
                 {"content", result},
-                {"model", claudeModel_},
+                {"model", t.claudeModel},
             });
         }
     }
 }
 
-void ChatFrame::FlushClaudePendingMessage() {
-    if (!claudePendingMsg_.is_object()) return;
-    nlohmann::json msg = std::move(claudePendingMsg_);
-    claudePendingMsg_ = nullptr;
+void ChatFrame::FlushClaudePendingMessage(Thread& t) {
+    if (!t.claudePendingMsg.is_object()) return;
+    nlohmann::json msg = std::move(t.claudePendingMsg);
+    t.claudePendingMsg = nullptr;
     const bool hasTools = msg.contains("tool_calls") && !msg["tool_calls"].empty();
     const bool hasText = !StringField(msg, "content").empty();
     if (!hasText && !hasTools && StringField(msg, "reasoning_content").empty())
         return;
     // OpenAI shape: content is null when a message only calls tools.
     if (!hasText && hasTools) msg["content"] = nullptr;
-    history_.push_back(std::move(msg));
+    t.history.push_back(std::move(msg));
 }
 
-void ChatFrame::OnClaudeDone(ClaudeProcessResult res) {
-    if (!claudeBuf_.empty()) OnClaudeData("\n");  // a final unterminated line
-    for (const auto& f : claudeTempFiles_) wxRemoveFile(wxString::FromUTF8(f));
-    claudeTempFiles_.clear();
+void ChatFrame::OnClaudeDone(Thread& t, ClaudeProcessResult res) {
+    if (!t.claudeBuf.empty()) OnClaudeData(t, "\n");  // a final unterminated line
+    for (const auto& f : t.claudeTempFiles) wxRemoveFile(wxString::FromUTF8(f));
+    t.claudeTempFiles.clear();
     if (quitRequested_) {
         Close();
         return;
     }
 
-    if (mdStream_) mdStream_->Flush();
-    mdStream_.reset();
-    EmitPendingThinking();
-    FlushClaudePendingMessage();
+    if (t.mdStream) t.mdStream->Flush();
+    t.mdStream.reset();
+    EmitPendingThinking(t);
+    FlushClaudePendingMessage(t);
 
     LogDebug("=== CLAUDE done exit=" + std::to_string(res.exitCode)
              + (res.cancelled ? " cancelled" : "")
-             + (claudeResultSeen_ ? (claudeIsError_ ? " result=error" : " result=ok")
+             + (t.claudeResultSeen ? (t.claudeIsError ? " result=error" : " result=ok")
                                   : " no-result")
              + " ===");
     if (!res.stderrTail.empty()) LogDebug("claude stderr: " + res.stderrTail);
 
     if (!res.started) {
-        FailClaudeTurn("couldn't start claude (" + res.error + ")");
+        FailClaudeTurn(t, "couldn't start claude (" + res.error + ")");
         return;
     }
     if (res.cancelled) {
         // SIGINT let Claude Code record the partial turn; what we already
         // recorded stays too, so the next turn resumes consistently.
-        RenderErrorBlock("Cancelled.");
-        FinalizeTurn(true);
+        RenderErrorBlock(t, "Cancelled.");
+        FinalizeTurn(t, true);
         return;
     }
 
-    std::string detail = claudeErrorText_;
-    if (detail.empty() && !claudeResultSeen_) {
+    std::string detail = t.claudeErrorText;
+    if (detail.empty() && !t.claudeResultSeen) {
         detail = res.stderrTail;
         while (!detail.empty() && std::isspace((unsigned char)detail.back()))
             detail.pop_back();
@@ -5847,24 +6688,24 @@ void ChatFrame::OnClaudeDone(ClaudeProcessResult res) {
     // Claude Code prunes old session transcripts; a gritcode session can
     // outlive the Claude session it points at. Start a new one and hand over
     // the whole conversation instead.
-    if (claudeResumed_ && !claudeRetriedFresh_
+    if (t.claudeResumed && !t.claudeRetriedFresh
         && detail.find("No conversation found") != std::string::npos) {
-        claudeRetriedFresh_ = true;
+        t.claudeRetriedFresh = true;
         LogDebug("claude: session gone, retrying without --resume");
-        StartClaudeTurn(/*fresh=*/true);
+        StartClaudeTurn(t, /*fresh=*/true);
         return;
     }
 
-    if (claudeResultSeen_ && !claudeIsError_) {
-        FinalizeTurn();
+    if (t.claudeResultSeen && !t.claudeIsError) {
+        FinalizeTurn(t);
         return;
     }
     if (detail.empty())
         detail = "Claude Code exited with status " + std::to_string(res.exitCode) + ".";
-    FailClaudeTurn(detail);
+    FailClaudeTurn(t, detail);
 }
 
-void ChatFrame::FailClaudeTurn(const std::string& detail) {
+void ChatFrame::FailClaudeTurn(Thread& t, const std::string& detail) {
     std::string shown = detail;
     if (shown.size() > 1500) shown = shown.substr(0, 1500) + "…";
     std::string lower = detail;
@@ -5882,12 +6723,11 @@ void ChatFrame::FailClaudeTurn(const std::string& detail) {
     } else {
         msg = "Claude Code error: " + wxString::FromUTF8(shown);
     }
-    RenderErrorBlock(msg);
-
     // Nothing from this turn was recorded: drop the unanswered user message,
     // as the HTTP error path does, so it isn't sent again with the next one.
-    if (history_.size() == claudeTurnHistoryStart_ && !history_.empty()
-        && IsUserTurn(history_.back()))
-        history_.pop_back();
-    FinalizeTurn(true);
+    const bool rolledBack = t.history.size() == t.claudeTurnHistoryStart
+                            && !t.history.empty() && IsUserTurn(t.history.back());
+    if (rolledBack) t.history.pop_back();
+    ShowTurnFailure(t, NoticeBlock(msg), rolledBack);
+    FinalizeTurn(t, true);
 }

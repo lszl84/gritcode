@@ -4,69 +4,79 @@
 #include <string>
 #include <vector>
 
-// On-disk persistence for chat sessions, keyed by working directory (one
-// session per folder). Storage layout mirrors gritcode:
-//   ~/.local/share/gritcode/sessions/<hash>.json   (per-session)
-//   ~/.local/share/gritcode/sessions.json          (index of cwds)
+// On-disk persistence for chat threads. Every thread has its own session
+// file; a folder's first thread uses the id derived from its cwd, so the
+// one-session-per-folder layout of older versions stays readable as is:
+//   ~/.local/share/gritcode/sessions/<id>.json   (per-thread)
+//   ~/.local/share/gritcode/sessions.json        (index)
+// The index keeps `sessions` (each folder's first thread, all that 0.5.x
+// reads) and adds `threads` for the others, which 0.5.x ignores.
+// Each folder can also have a project brief, keyed like its first thread:
+//   ~/.local/share/gritcode/briefs/<id>.md
 // Writes are atomic (temp file then rename) so a crash mid-write can't
 // corrupt the index or any session file.
 class SessionStore {
 public:
     struct Entry {
-        std::string id;        // 16-hex hash of cwd
+        std::string id;        // 16 hex; IdForCwd(cwd) for a folder's first thread
         std::string cwd;       // absolute path
         std::string lastUsed;  // ISO 8601, used for sorting (most recent first)
+        std::string title;     // empty until the first user message
+        std::string parent;    // parent thread id, empty for top-level threads
     };
 
     // Loads the index from disk, creating storage directories if needed.
     void Init();
 
     // Index entries sorted by lastUsed descending. Empty after Init() if no
-    // sessions have been created yet.
+    // threads have been created yet.
     const std::vector<Entry>& List() const { return entries_; }
 
-    // The cwd that was active when the app was last closed, or std::nullopt
-    // if none recorded.
+    // The cwd / thread that was active when the app was last closed, or
+    // std::nullopt if none recorded.
     std::optional<std::string> LastActiveCwd() const { return lastActiveCwd_; }
+    std::optional<std::string> LastActiveThread() const { return lastActiveThread_; }
 
-    // Stable id for a cwd (16-hex hash). Same cwd always maps to same id.
+    // Stable id for a cwd (16-hex hash): the id of the folder's first thread.
     static std::string IdForCwd(const std::string& cwd);
+    // Random 16-hex id for an additional thread.
+    static std::string NewThreadId();
 
-    // Reads the full session file for the given cwd. Returns false if the
-    // file is missing or malformed; outHistory is unchanged in that case.
-    bool Load(const std::string& cwd,
+    // Reads the messages of thread `id`. Returns false if the file is
+    // missing or malformed; outHistory is unchanged in that case.
+    bool Load(const std::string& id,
               std::vector<nlohmann::json>& outHistory) const;
 
-    // Writes the full session and updates the index (lastUsed timestamp).
-    // Creates a new entry if this cwd hasn't been seen before. This is the
-    // synchronous variant used where the UI thread must block (startup seed,
-    // new-session create); the hot persist path splits it into the two
-    // methods below so the heavy parts can run on a worker thread.
-    void Save(const std::string& cwd,
-              const std::vector<nlohmann::json>& history);
+    // Writes the full session (lastUsed = now) and updates the index. This is
+    // the synchronous variant used where the UI thread must block (startup
+    // seed, new folder); the hot persist path splits it into the two methods
+    // below so the heavy part can run on a worker thread.
+    void Save(Entry e, const std::vector<nlohmann::json>& history);
 
-    // Thread-safe: writes only the per-session JSON file (no index mutation).
-    // Uses `lastUsed` as the recorded timestamp so the caller can keep the
-    // index entry consistent with the file. Safe to call from a worker.
-    void WriteSessionFile(const std::string& cwd,
-                          const std::vector<nlohmann::json>& history,
-                          const std::string& lastUsed) const;
+    // Thread-safe: writes only the session file (no index mutation). Safe to
+    // call from a worker.
+    void WriteSessionFile(const Entry& e,
+                          const std::vector<nlohmann::json>& history) const;
 
-    // UI-thread only: update the in-memory index (lastUsed) + write
-    // sessions.json. Cheap relative to WriteSessionFile.
-    void UpdateIndex(const std::string& cwd, const std::string& lastUsed);
+    // UI-thread only: insert or update the entry + write sessions.json.
+    // Cheap relative to WriteSessionFile.
+    void UpdateIndex(const Entry& e);
 
-    // ISO-8601 "now" string used as lastUsed. Exposed so callers can compute
-    // one timestamp and feed it to both WriteSessionFile and UpdateIndex.
+    // ISO-8601 "now" string used as lastUsed.
     static std::string NowIso();
 
-    // Persists the "lastActiveCwd" pointer in the index without touching
-    // session files. Called when the user switches sessions.
-    void SetLastActiveCwd(const std::string& cwd);
+    // The folder's project brief, empty when it has none. Saving an empty
+    // brief removes it; false when the file can't be written.
+    std::string LoadBrief(const std::string& cwd) const;
+    bool SaveBrief(const std::string& cwd, const std::string& text) const;
 
-    // Register a fresh session for cwd in the index even if no history yet.
-    // Lets a brand-new session show up in the dropdown immediately.
-    void RegisterCwd(const std::string& cwd);
+    // Where agents put the git worktrees they create:
+    // <data dir>/worktrees/<repo name>/<branch>.
+    std::string WorktreesDir() const { return root_ + "/worktrees"; }
+
+    // Persists the last active folder and thread in the index without
+    // touching session files. Called when the user switches threads.
+    void SetLastActive(const std::string& cwd, const std::string& threadId);
 
 private:
     std::string root_;         // ~/.local/share/gritcode
@@ -75,12 +85,16 @@ private:
 
     std::vector<Entry> entries_;
     std::optional<std::string> lastActiveCwd_;
+    std::optional<std::string> lastActiveThread_;
 
+    std::string BriefPath(const std::string& cwd) const;
     // Re-sort entries_ by lastUsed descending after a mutation.
     void SortEntries();
-    // Persist entries_ + lastActiveCwd_ to indexPath_ atomically.
+    // Persist entries_ + the last-active pointers to indexPath_ atomically.
     void WriteIndex() const;
-    // Load index file; populates entries_ and lastActiveCwd_. Silent on
-    // missing file (treated as empty index).
+    // Load index file; populates entries_ and the last-active pointers.
+    // Silent on missing file (treated as empty index). Session files the
+    // index doesn't list (0.5.x rewrites it without `threads`) are added
+    // from their headers.
     void ReadIndex();
 };

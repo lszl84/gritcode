@@ -3,6 +3,7 @@
 #include <wx/fileconf.h>
 #include <wx/filename.h>
 #include <wx/stdpaths.h>
+#include <cstdlib>
 #if wxUSE_SECRETSTORE
 #include <wx/secretstore.h>
 #else
@@ -21,6 +22,7 @@ const wxString kUsername      = "api_key";
 const char* kModelIndexKey    = "/UI/LastModelIndex";
 const char* kModelExplicitKey = "/UI/ModelExplicit";
 const char* kEnableGritKey    = "/UI/EnableGritHistory";
+const char* kLeftThreadsKey   = "/UI/LeftPaneThreads";
 const char* kReasoningEffortKey = "/DeepSeek/ReasoningEffort";
 const char* kClaudeEffortKey  = "/Claude/Effort";
 
@@ -123,6 +125,18 @@ bool Preferences::GetEnableGritHistory() {
     return v;
 }
 
+bool Preferences::GetLeftPaneThreads() {
+    bool v = false;
+    wxConfigBase::Get()->Read(kLeftThreadsKey, &v, false);
+    return v;
+}
+
+void Preferences::SetLeftPaneThreads(bool threads) {
+    auto* cfg = wxConfigBase::Get();
+    cfg->Write(kLeftThreadsKey, threads);
+    cfg->Flush();
+}
+
 void Preferences::SetEnableGritHistory(bool enabled) {
     auto* cfg = wxConfigBase::Get();
     if (!cfg) return;
@@ -133,6 +147,12 @@ void Preferences::SetEnableGritHistory(bool enabled) {
 // ---- OS keyring (wxSecretStore / libsecret) ----
 
 wxString Preferences::GetApiKey(Provider p) {
+    // Test/dev hook for headless instances with no keyring (the hidden test
+    // launcher gives them a private D-Bus): a key from the environment,
+    // never stored.
+    if (const char* key = std::getenv("GRIT_DEEPSEEK_API_KEY");
+        key && *key && p == Provider::DeepSeek)
+        return wxString::FromUTF8(key);
 #if wxUSE_SECRETSTORE
     wxSecretStore store = wxSecretStore::GetDefault();
     if (!store.IsOk()) return wxString();

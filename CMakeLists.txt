@@ -252,8 +252,10 @@ set(SRCS
     src/shell_env.cpp
     src/preferences.cpp
     src/settings_dialog.cpp
+    src/project_brief.cpp
     src/streaming_web_request.cpp
     src/run_config_store.cpp
+    src/thread_list.cpp
 )
 
 # macOS-only native styling (Objective-C++); see src/mac_style.h.

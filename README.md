@@ -22,8 +22,11 @@ Get both from the [latest release](https://github.com/lszl84/gritcode/releases/l
 - **An agent with real tools:** bash, read, write and edit files, list, grep, web search and URL fetch, with collapsible tool-call cards and thinking blocks
 - **▶ Play:** the agent saves your project's run command, then one click builds and runs it with no AI round-trip. Output lands in the chat.
 - **Built-in editor:** a file tree plus tree-sitter syntax highlighting, smart indentation and save
-- **Sessions:** per-project history in SQLite. Export a session to a `.gritsession` file (images included) and replay its prompts in a new project.
-- **Cross-project memory:** full-text search over past sessions, available to the agent through `grit_history_search` and `grit_history_fetch`
+- **Threads:** several conversations per folder, all running at once, so an unrelated task starts with a clean context. Switch between them in the left pane; a mark tells you when one finished or failed while you were elsewhere.
+- **Subagents:** DeepSeek and Kilo models can hand work to subagents running in the background, and Claude Code's own subagents show up too. Each one is a thread under its parent that you can open and follow live.
+- **Project brief:** the first new thread in a folder writes a short brief of the project, and every new thread starts with it
+- **Sessions:** history in SQLite. Export a thread to a `.gritsession` file (images included) and replay its prompts in a new project.
+- **Cross-project memory:** full-text search over past conversations, available to the agent through `grit_history_search` and `grit_history_fetch`, across all projects or just the folder's other threads
 - **Cheap long sessions:** compaction only near the context limit, a token-budgeted tail and chained summaries
 - **Vision:** drag screenshots into the message box
 - **Streaming markdown:** headings, tables and code blocks render live
@@ -68,7 +71,7 @@ Click the ⚙ gear button in the bottom toolbar to open Settings, then paste you
 
 The Model dropdown also offers **Claude (Opus 5.5)** and **Claude (Sonnet 5)**. These run your installed [Claude Code](https://code.claude.com/docs/en/setup) (the `claude` command) headlessly, so you need Claude Code installed and signed in: run `claude` once in a terminal and log in. Gritcode never sees your Claude credentials; usage goes to your own Claude account or API key.
 
-With Claude selected, Claude Code runs its own agent loop and tools (Bash, Read, Edit, …), and Gritcode shows them in the chat. As with Gritcode's own agent, tools run without confirmation prompts. The ▶ Play button works the same with Claude: Gritcode gives Claude its `run_project` tool so it can set up the run command. Each Gritcode session resumes the same Claude Code session, and when you switch models mid-session the other model gets a transcript of what happened. Claude's effort level is in Settings.
+With Claude selected, Claude Code runs its own agent loop and tools (Bash, Read, Edit, …), and Gritcode shows them in the chat. As with Gritcode's own agent, tools run without confirmation prompts. The ▶ Play button works the same with Claude: Gritcode gives Claude its `run_project` tool so it can set up the run command. Each Gritcode thread resumes its own Claude Code session, and when you switch models mid-thread the other model gets a transcript of what happened. Claude Code's subagents appear as threads under the one that started them. The project brief is written with Sonnet through the same Claude Code install, so nothing goes to another provider. Claude's effort level is in Settings.
 
 ## Support Gritcode
 

@@ -9,6 +9,9 @@ Usage:
     python3 scripts/grit.py last                # last assistant text
     python3 scripts/grit.py conversation        # full history JSON
     python3 scripts/grit.py cancel              # cancel in-flight request
+    python3 scripts/grit.py threads             # threads, all folders
+    python3 scripts/grit.py newthread [cwd]     # new thread (active folder by default)
+    python3 scripts/grit.py thread <id>         # make thread <id> active
 """
 
 import json
@@ -18,13 +21,17 @@ import time
 
 
 class Grit:
-    def __init__(self, host="127.0.0.1", base_port=8765):
+    # `port` connects to that port only. Tests must pass it: without it the
+    # client also tries the next five ports, where the user's own gritcode
+    # windows listen (8765, 8766, ...).
+    def __init__(self, host="127.0.0.1", base_port=8765, port=None):
         self.host = host
-        self.base_port = base_port
+        self.base_port = port or base_port
+        self.ports = [port] if port else range(base_port, base_port + 6)
         self._id = 0
 
     def _call(self, method, params=None, timeout=10):
-        for p in range(self.base_port, self.base_port + 6):
+        for p in self.ports:
             try:
                 s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
                 s.settimeout(timeout)
@@ -33,7 +40,7 @@ class Grit:
             except (ConnectionRefusedError, OSError):
                 s.close()
         else:
-            raise ConnectionError(f"no MCP server on {self.host}:{self.base_port}-{self.base_port+5}")
+            raise ConnectionError(f"no MCP server on {self.host}:{list(self.ports)}")
 
         self._id += 1
         req = {"jsonrpc": "2.0", "id": self._id, "method": method}
@@ -84,6 +91,15 @@ class Grit:
 
     def new_session(self):
         return self._call("newSession")
+
+    def list_threads(self):
+        return self._call("listThreads")
+
+    def new_thread(self, cwd=""):
+        return self._call("newThread", {"cwd": cwd})
+
+    def select_thread(self, thread_id):
+        return self._call("selectThread", {"id": thread_id})
 
     def set_model(self, idx):
         return self._call("setModel", {"index": idx})
@@ -139,6 +155,16 @@ def main():
         print(json.dumps(g.switch_session(sys.argv[2]), indent=2))
     elif cmd == "new":
         print(json.dumps(g.new_session(), indent=2))
+    elif cmd == "threads":
+        print(json.dumps(g.list_threads(), indent=2))
+    elif cmd == "newthread":
+        print(json.dumps(g.new_thread(sys.argv[2] if len(sys.argv) > 2 else ""), indent=2))
+    elif cmd == "thread":
+        if len(sys.argv) < 3:
+            print("usage: thread <id>")
+            sys.exit(1)
+        print(json.dumps(g.select_thread(sys.argv[2]), indent=2))
+
     elif cmd == "model":
         if len(sys.argv) < 3:
             print("usage: model <index>  (0=OpenCode Free, 1=DeepSeek Flash, 2=DeepSeek Pro)")

@@ -46,10 +46,23 @@ std::string GetStringArg(const nlohmann::json& args, const char* key) {
     return v.get<std::string>();
 }
 
+// The bash timeout: `timeout_seconds` (a number, or a numeric string as some
+// models send) clamped to [1, 600], or 30 when it is missing or not positive.
+int BashTimeoutSeconds(const nlohmann::json& args) {
+    double t = 0;
+    if (args.is_object() && args.contains("timeout_seconds")) {
+        const auto& v = args["timeout_seconds"];
+        if (v.is_number()) t = v.get<double>();
+        else if (v.is_string()) try { t = std::stod(v.get<std::string>()); } catch (...) {}
+    }
+    if (!(t > 0)) return 30;  // also catches NaN
+    return (int)std::clamp(t, 1.0, 600.0);
+}
+
 // Expand a leading "~" (and "~/...") to $HOME and expand $VAR / ${VAR}
-// environment-variable references. Everything else (including relative
-// paths) is left untouched so the process cwd still resolves it.
-std::string ExpandPath(const std::string& path) {
+// environment-variable references, then resolve a relative path against
+// `cwd` (the thread's folder; the process cwd is never used).
+std::string ResolvePath(const std::string& path, const std::string& cwd) {
     if (path.empty()) return path;
     std::string out;
     out.reserve(path.size() + 16);
@@ -83,15 +96,17 @@ std::string ExpandPath(const std::string& path) {
         }
         out += path[i];
     }
+    std::filesystem::path p(out);
+    if (p.is_relative() && !cwd.empty()) return (std::filesystem::path(cwd) / p).string();
     return out;
 }
 
 // ---------------- file/shell tools ----------------
 
-std::string ToolReadFile(const nlohmann::json& args) {
+std::string ToolReadFile(const nlohmann::json& args, const std::string& cwd) {
     std::string path = GetStringArg(args, "path");
     if (path.empty()) return "Error: missing 'path' argument";
-    path = ExpandPath(path);
+    path = ResolvePath(path, cwd);
 
     std::ifstream f(path);
     if (!f) return "Error: cannot open " + path;
@@ -111,10 +126,10 @@ std::string ToolReadFile(const nlohmann::json& args) {
     return s;
 }
 
-std::string ToolWriteFile(const nlohmann::json& args) {
+std::string ToolWriteFile(const nlohmann::json& args, const std::string& cwd) {
     std::string path = GetStringArg(args, "path");
     if (path.empty()) return "Error: missing 'path' argument";
-    path = ExpandPath(path);
+    path = ResolvePath(path, cwd);
     if (!args.contains("content") || !args["content"].is_string())
         return "Error: missing 'content' argument";
     std::string content = args["content"].get<std::string>();
@@ -133,12 +148,12 @@ std::string ToolWriteFile(const nlohmann::json& args) {
     return "Wrote " + std::to_string(content.size()) + " bytes to " + path;
 }
 
-std::string ToolEditFile(const nlohmann::json& args) {
+std::string ToolEditFile(const nlohmann::json& args, const std::string& cwd) {
     std::string path = GetStringArg(args, "path");
     std::string oldStr = GetStringArg(args, "old_str");
     std::string newStr = GetStringArg(args, "new_str");
     if (path.empty()) return "Error: missing 'path' argument";
-    path = ExpandPath(path);
+    path = ResolvePath(path, cwd);
     if (oldStr.empty()) return "Error: 'old_str' must not be empty";
 
     std::ifstream in(path, std::ios::binary);
@@ -170,8 +185,9 @@ std::string ToolEditFile(const nlohmann::json& args) {
 
 // Shared Windows process runner. timeoutSeconds == 0 disables the timeout
 // (used by ToolBashDirect for long-running Play-button builds / dev servers).
+// The command runs in `cwd` (the process cwd when empty).
 static std::string RunCommandWin(const std::string& cmd, ToolCancelToken* token,
-                                 int timeoutSeconds) {
+                                 int timeoutSeconds, const std::string& cwd = {}) {
     if (cmd.empty()) return "Error: empty command";
     if (token && token->cancelled.load()) return "[cancelled]";
 
@@ -199,7 +215,8 @@ static std::string RunCommandWin(const std::string& cmd, ToolCancelToken* token,
     cmdBuf.push_back('\0');
 
     if (!CreateProcessA(nullptr, cmdBuf.data(), nullptr, nullptr, TRUE,
-                        CREATE_NO_WINDOW, nullptr, nullptr, &si, &pi)) {
+                        CREATE_NO_WINDOW, nullptr,
+                        cwd.empty() ? nullptr : cwd.c_str(), &si, &pi)) {
         CloseHandle(hRead);
         CloseHandle(hWrite);
         return "Error: CreateProcess failed (" + std::to_string(GetLastError()) + ")";
@@ -266,15 +283,16 @@ static std::string RunCommandWin(const std::string& cmd, ToolCancelToken* token,
     if (token && token->cancelled.load()) return "[cancelled]";
     if (truncated) out += "\n[output truncated]";
     if (out.empty()) out = "(no output)";
-    if (timedOut) out += "\n[timed out after 30s]";
+    if (timedOut) out += "\n[timed out after " + std::to_string(timeoutSeconds) + "s]";
 
     return out;
 }
 
-std::string ToolBash(const nlohmann::json& args, ToolCancelToken* token) {
+std::string ToolBash(const nlohmann::json& args, ToolCancelToken* token,
+                     const std::string& cwd) {
     std::string cmd = GetStringArg(args, "command");
     if (cmd.empty()) return "Error: missing 'command' argument";
-    return RunCommandWin(cmd, token, 30);
+    return RunCommandWin(cmd, token, BashTimeoutSeconds(args), cwd);
 }
 
 #else  // !_WIN32
@@ -285,11 +303,19 @@ std::string ToolBash(const nlohmann::json& args, ToolCancelToken* token) {
 //
 // Timeout is enforced in the parent (SIGTERM → 500 ms → SIGKILL on the
 // process group), not via an external `timeout` binary — that GNU utility
-// doesn't exist on macOS.
-std::string ToolBash(const nlohmann::json& args, ToolCancelToken* token) {
+// doesn't exist on macOS. Once bash is reaped after a timeout or Escape, the
+// group gets a final SIGKILL: bash can die on SIGTERM while a grandchild that
+// ignores it lives on.
+//
+// The child chdir()s into `cwd` (the thread's folder) before exec, so
+// threads in different folders can run bash at the same time.
+std::string ToolBash(const nlohmann::json& args, ToolCancelToken* token,
+                     const std::string& cwd) {
     std::string cmd = GetStringArg(args, "command");
     if (cmd.empty()) return "Error: missing 'command' argument";
     if (token && token->cancelled.load()) return "[cancelled]";
+    const int timeoutSeconds = BashTimeoutSeconds(args);
+    const char* dir = cwd.empty() ? nullptr : cwd.c_str();
 
     int pfd[2];
     if (pipe(pfd) < 0) return "Error: pipe failed";
@@ -308,6 +334,12 @@ std::string ToolBash(const nlohmann::json& args, ToolCancelToken* token) {
         setpgid(0, 0);
         dup2(pfd[1], STDOUT_FILENO);
         dup2(pfd[1], STDERR_FILENO);
+        // Never run the command somewhere else when the folder is gone.
+        if (dir && chdir(dir) != 0) {
+            const char msg[] = "Error: cannot enter the working directory\n";
+            (void)!write(STDOUT_FILENO, msg, sizeof msg - 1);
+            _exit(126);
+        }
         // pfd[0]/pfd[1] are O_CLOEXEC so they auto-close on exec.
         execlp("bash", "bash", "-c", cmd.c_str(),
                (char*)nullptr);
@@ -339,11 +371,11 @@ std::string ToolBash(const nlohmann::json& args, ToolCancelToken* token) {
     bool pipeEof = false;
     int status = 0;
     char buf[4096];
-    auto timeoutDeadline = std::chrono::steady_clock::now() + std::chrono::seconds(30);
+    auto timeoutDeadline = std::chrono::steady_clock::now() + std::chrono::seconds(timeoutSeconds);
     auto killDeadline = std::chrono::steady_clock::time_point::max();
 
     for (;;) {
-        // 30s timeout: same escalation as cancellation (SIGTERM → SIGKILL).
+        // Timeout: same escalation as cancellation (SIGTERM → SIGKILL).
         if (!sentTerm && std::chrono::steady_clock::now() >= timeoutDeadline) {
             timedOut = true;
             kill(-pid, SIGTERM);
@@ -394,6 +426,9 @@ std::string ToolBash(const nlohmann::json& args, ToolCancelToken* token) {
         }
     }
     close(pfd[0]);
+    // Only after a timeout or Escape: after a normal exit, `nohup … &`
+    // processes are meant to keep running.
+    if (sentTerm) kill(-pid, SIGKILL);
     if (token) token->activePgid.store(0);
 
     if (token && token->cancelled.load()) return "[cancelled]";
@@ -402,7 +437,7 @@ std::string ToolBash(const nlohmann::json& args, ToolCancelToken* token) {
     if (out.empty()) out = "(no output)";
 
     if (timedOut)
-        out += "\n[timed out after 30s]";
+        out += "\n[timed out after " + std::to_string(timeoutSeconds) + "s]";
     else if (WIFEXITED(status) && WEXITSTATUS(status) != 0)
         out += "\n[exit " + std::to_string(WEXITSTATUS(status)) + "]";
     else if (WIFSIGNALED(status))
@@ -413,10 +448,10 @@ std::string ToolBash(const nlohmann::json& args, ToolCancelToken* token) {
 
 #endif  // _WIN32
 
-std::string ToolListDirectory(const nlohmann::json& args) {
+std::string ToolListDirectory(const nlohmann::json& args, const std::string& cwd) {
     std::string path = GetStringArg(args, "path");
     if (path.empty()) path = ".";
-    path = ExpandPath(path);
+    path = ResolvePath(path, cwd);
 
     namespace fs = std::filesystem;
     std::error_code ec;
@@ -656,14 +691,10 @@ std::string ToolWebSearch(const nlohmann::json& args) {
     auto r = RequestSync(std::move(spec));
     if (!r.ok) return "Error: " + r.error;
 
-    // Walk SSE events, find the first `data: {...}` line and extract
+    // Walk SSE events, find the first `data: {...}` one and extract
     // result.content[0].text.
-    std::istringstream stream(r.body);
-    std::string line;
-    while (std::getline(stream, line)) {
-        if (!line.empty() && line.back() == '\r') line.pop_back();
-        if (line.rfind("data: ", 0) != 0) continue;
-        std::string payload = line.substr(6);
+    std::string sseBuf;
+    for (const std::string& payload : TakeSseEvents(sseBuf, r.body, /*streamEnded=*/true)) {
         try {
             auto j = nlohmann::json::parse(payload);
             if (j.contains("result") && j["result"].contains("content")
@@ -716,10 +747,10 @@ std::string MimeForImagePath(const std::string& path) {
     return {};
 }
 
-std::string ToolAskVision(const nlohmann::json& args) {
+std::string ToolAskVision(const nlohmann::json& args, const std::string& cwd) {
     std::string path = GetStringArg(args, "path");
     if (path.empty()) return "Error: missing 'path' argument";
-    path = ExpandPath(path);
+    path = ResolvePath(path, cwd);
 
     std::string question = GetStringArg(args, "question");
     if (question.empty()) {
@@ -931,7 +962,11 @@ std::string ToolBashDirect(const std::string& cmd, ToolCancelToken* token) {
 }
 #endif
 
-nlohmann::json GetToolDefinitions(bool includeGritHistory) {
+bool IsWriteTool(const std::string& name) {
+    return name == "write_file" || name == "edit_file" || name == "run_project";
+}
+
+nlohmann::json GetToolDefinitions(bool includeGritHistory, bool subagent) {
     using J = nlohmann::json;
     J tools = J::array();
 
@@ -965,14 +1000,20 @@ nlohmann::json GetToolDefinitions(bool includeGritHistory) {
 
     tools.push_back(ToolDef(
         "bash",
-        "Run a shell command. Captures stdout+stderr, 30 second timeout, runs in the application's cwd."
+        "Run a shell command. Captures stdout+stderr, runs in the project directory."
+        " Killed after `timeout_seconds` (default 30, max 600) with the output so far kept."
 #ifdef _WIN32
         " On Windows, uses cmd /c.",
 #else
         " Uses bash.",
 #endif
         {{"type", "object"},
-         {"properties", {{"command", StrParam("Shell command to execute.")}}},
+         {"properties", {
+             {"command", StrParam("Shell command to execute.")},
+             {"timeout_seconds", {{"type", "integer"},
+                                  {"description", "Seconds before the command is killed. "
+                                   "Default 30, max 600. Raise it for slow builds and tests."}}},
+         }},
          {"required", {"command"}}}));
 
     tools.push_back(ToolDef(
@@ -1015,21 +1056,28 @@ nlohmann::json GetToolDefinitions(bool includeGritHistory) {
         tools.push_back(ToolDef(
             "grit_history_search",
             "Search the transcripts of past gritcode conversations across "
-            "every project the user has worked on, including the current "
-            "session (the current session is NOT excluded - use it to "
-            "recover details that context compaction hid from view). "
+            "every project the user has worked on. The current thread is "
+            "excluded (its history is already in your context) unless context "
+            "compaction summarised part of it away; the other "
+            "threads of this folder are included, and they are where work "
+            "on this project that you don't see here happened - search them "
+            "with scope \"folder\" before redoing or guessing at it. "
             "This is the AUTHORITATIVE source of prior-conversation recall - use "
             "it first whenever the user references any past work (\"last time\", "
             "\"once again\", \"we had\", \"how did we\", \"in <project>\"). "
             "Query budget: typically 1-3 searches per user question. Start with "
             "ONE broad keyword query; only run more if the first returned strong "
-            "hits. Returns short snippets (~20-token window) with session_id, "
-            "turn_index, and full_chars - follow up with grit_history_fetch.",
+            "hits. Returns short snippets (~20-token window) with the thread "
+            "title, session_id, turn_index, and full_chars - follow up with "
+            "grit_history_fetch.",
             {{"type", "object"},
              {"properties", {
                  {"query", StrParam("2-5 keywords. FTS5 MATCH expression (phrases in quotes, AND/OR/NOT, prefix*).")},
                  {"limit", {{"type", "integer"},
                             {"description", "Max results (default 5, max 20)."}}},
+                 {"scope", {{"type", "string"}, {"enum", nlohmann::json::array({"all", "folder"})},
+                            {"description", "\"all\" (default): every project. "
+                                            "\"folder\": only this folder's threads."}}},
              }},
              {"required", {"query"}}}));
 
@@ -1084,6 +1132,33 @@ nlohmann::json GetToolDefinitions(bool includeGritHistory) {
          }},
          {"required", {"action"}}}));
 
+    if (subagent) {
+        J readOnly = J::array();
+        for (auto& t : tools) {
+            if (!IsWriteTool(t["function"]["name"].get<std::string>()))
+                readOnly.push_back(std::move(t));
+        }
+        return readOnly;
+    }
+
+    tools.push_back(ToolDef(
+        "task",
+        "Delegate a self-contained sub-task to a subagent: a separate agent with a "
+        "fresh context that works in the same folder and returns a concise report. "
+        "Use it for research that would otherwise fill your context (searching a "
+        "codebase, reading many files, comparing options), or to run independent "
+        "investigations at once: several task calls in one response run in "
+        "parallel. The subagent is read-only: it can read files, list "
+        "directories, search the web and run shell commands to inspect, but it "
+        "cannot edit files or start subagents, so make the changes yourself from "
+        "its report. It sees nothing of this conversation: the prompt must "
+        "contain everything it needs.",
+        {{"type", "object"},
+         {"properties", {
+             {"description", StrParam("Short label (3-6 words) shown to the user, e.g. 'Find config loading'.")},
+             {"prompt", StrParam("Complete instructions: the goal, relevant paths and context, and what to report back.")},
+         }},
+         {"required", {"description", "prompt"}}}));
     return tools;
 }
 
@@ -1222,7 +1297,8 @@ std::string ToolRunProject(const nlohmann::json& args, const std::string& curren
     return "Error: unknown action '" + action + "'. Use get, set, forget, or detect.";
 }
 
-std::string ToolGritHistorySearch(const nlohmann::json& args, MemoryDB* memory) {
+std::string ToolGritHistorySearch(const nlohmann::json& args, MemoryDB* memory,
+                                  const std::string& cwd, const std::string& threadId) {
     if (!memory || !memory->IsOpen()) return "Memory index is not available.";
     std::string query = GetStringArg(args, "query");
     if (query.empty()) return "Error: 'query' is required.";
@@ -1231,7 +1307,12 @@ std::string ToolGritHistorySearch(const nlohmann::json& args, MemoryDB* memory) 
         limit = args["limit"].get<int>();
     if (limit < 1) limit = 1;
     if (limit > 20) limit = 20;
-    auto hits = memory->Search(query, limit, std::string{});
+    const std::string scope = GetStringArg(args, "scope");
+    if (!scope.empty() && scope != "all" && scope != "folder")
+        return "Error: 'scope' must be \"all\" or \"folder\".";
+    if (scope == "folder" && cwd.empty())
+        return "Error: scope \"folder\" needs a current folder.";
+    auto hits = memory->Search(query, limit, threadId, scope == "folder" ? cwd : "");
     return MemoryDB::FormatSearchHits(hits);
 }
 
@@ -1259,16 +1340,18 @@ std::string DispatchTool(const std::string& name, const nlohmann::json& args,
                          ToolCancelToken* token,
                          MemoryDB* memory,
                          const std::string& currentCwd,
-                         bool enableGritHistory) {
+                         bool enableGritHistory,
+                         const std::string& threadId) {
     if (token && token->cancelled.load()) return "[cancelled]";
     try {
-        if (name == "read_file")     return CapOutput(ToolReadFile(args));
-        if (name == "write_file")    return CapOutput(ToolWriteFile(args));
-        if (name == "edit_file")     return CapOutput(ToolEditFile(args));
-        if (name == "bash")          return CapOutput(ToolBash(args, token));
-        if (name == "list_directory")return CapOutput(ToolListDirectory(args));
+        if (name == "read_file")     return CapOutput(ToolReadFile(args, currentCwd));
+        if (name == "write_file")    return CapOutput(ToolWriteFile(args, currentCwd));
+        if (name == "edit_file")     return CapOutput(ToolEditFile(args, currentCwd));
+        if (name == "bash")          return CapOutput(ToolBash(args, token, currentCwd));
+        if (name == "list_directory")return CapOutput(ToolListDirectory(args, currentCwd));
         if (name == "web_fetch")     return ToolWebFetch(args);   // already capped
-        if (name == "ask_vision")    return CapOutput(ToolAskVision(args));
+        if (name == "ask_vision")    return CapOutput(ToolAskVision(args, currentCwd));
+
         if (name == "web_search")    return ToolWebSearch(args);  // already capped
         if (name == "grit_history_search" || name == "grit_history_fetch") {
             if (!enableGritHistory)
@@ -1276,7 +1359,7 @@ std::string DispatchTool(const std::string& name, const nlohmann::json& args,
                        " is disabled by the user (Settings -> "
                        "Enable Grit History tools).";
             if (name == "grit_history_search")
-                return ToolGritHistorySearch(args, memory);
+                return ToolGritHistorySearch(args, memory, currentCwd, threadId);
             return ToolGritHistoryFetch(args, memory);
         }
         if (name == "run_project")

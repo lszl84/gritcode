@@ -2,6 +2,7 @@
 
 #ifndef _WIN32
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <fcntl.h>
 #include <netinet/in.h>
@@ -50,8 +51,12 @@ void MCPServer::ServerLoop() {
     addr.sin_family = AF_INET;
     addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
 
+    // GRIT_MCP_PORT pins the port (lets tests run several instances).
+    int firstPort = 8765, lastPort = 8770;
+    if (const char* env = std::getenv("GRIT_MCP_PORT"); env && *env)
+        firstPort = lastPort = std::atoi(env);
     bool bound = false;
-    for (int p = 8765; p <= 8770; ++p) {
+    for (int p = firstPort; p <= lastPort; ++p) {
         addr.sin_port = htons(p);
         if (bind(serverFd_, (struct sockaddr*)&addr, sizeof(addr)) == 0) {
             port_ = p;
@@ -60,7 +65,7 @@ void MCPServer::ServerLoop() {
         }
     }
     if (!bound) {
-        fprintf(stderr, "MCP: bind failed on ports 8765-8770\n");
+        fprintf(stderr, "MCP: bind failed on ports %d-%d\n", firstPort, lastPort);
         return;
     }
 
@@ -185,11 +190,15 @@ json MCPServer::HandleRequest(const json& request) {
         if (!cb_.play) return err(-32603, "not ready");
         return okResult(cb_.play());
     }
+    if (method == "setInput") {
+        if (!cb_.setInput) return err(-32603, "not ready");
+        return okResult(cb_.setInput(params.value("text", "")));
+    }
     if (method == "togglePanel") {
         if (!cb_.togglePanel) return err(-32603, "not ready");
         std::string panel = params.value("panel", std::string());
-        if (panel != "editor" && panel != "import")
-            return err(-32602, "'panel' must be \"editor\" or \"import\"");
+        if (panel != "editor" && panel != "import" && panel != "threads")
+            return err(-32602, "'panel' must be \"editor\", \"import\" or \"threads\"");
         return okResult(cb_.togglePanel(panel));
     }
     if (method == "getPanes") {
@@ -219,6 +228,20 @@ json MCPServer::HandleRequest(const json& request) {
     if (method == "newSession") {
         if (!cb_.newSession) return err(-32603, "not ready");
         return okResult(cb_.newSession());
+    }
+    if (method == "listThreads") {
+        if (!cb_.listThreads) return err(-32603, "not ready");
+        return okResult(cb_.listThreads());
+    }
+    if (method == "newThread") {
+        if (!cb_.newThread) return err(-32603, "not ready");
+        return okResult(cb_.newThread(params.value("cwd", "")));
+    }
+    if (method == "selectThread") {
+        if (!cb_.selectThread) return err(-32603, "not ready");
+        std::string id = params.value("id", "");
+        if (id.empty()) return err(-32602, "missing 'id' param");
+        return okResult(cb_.selectThread(id));
     }
     if (method == "setModel") {
         if (!cb_.setModel) return err(-32603, "not ready");
