@@ -529,9 +529,9 @@ private:
     };
     // The folder's titled top-level threads, most recent first.
     std::vector<FolderThread> FolderThreads(const std::string& cwd) const;
-    // The folder's project brief and a short list of its other threads, so a
-    // new thread knows what the project is and that parallel work exists.
-    // Empty when the folder has neither.
+    // The folder's project brief, a short list of its other threads, and in a
+    // git repo how to work alongside threads sharing its checkout, so a new
+    // thread knows what the project is and that parallel work exists.
     std::string FolderContext(const Thread& t) const;
 
     // A folder's project brief is written once, when the user starts a new

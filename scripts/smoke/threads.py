@@ -23,7 +23,7 @@ import time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path[:0] = [HERE, os.path.join(HERE, "..")]
-from fake_model import serve  # noqa: E402
+from fake_model import Handler, serve  # noqa: E402
 from grit import Grit  # noqa: E402
 
 LAUNCHER = os.path.expanduser("~/.local/share/grit-dev/run-hidden.sh")
@@ -101,6 +101,7 @@ def bash(cmd):
 A, B = os.path.join(DATA, "A"), os.path.join(DATA, "B")
 os.makedirs(A)
 os.makedirs(B)
+subprocess.run(["git", "init", "-q", B], check=True)  # B's threads share a git checkout
 pid, g = launch()
 g.set_model(0)
 
@@ -126,6 +127,18 @@ b2 = g.new_thread(B)["threadId"]
 g.send(bash("date +%s.%N > second_start"))
 now = threads(g)
 check(now[b]["running"] and now[b2]["running"], "both threads run at once")
+check(any("Also working in " + B in blk["preview"] for blk in g.blocks()),
+      "the second thread shows that the first is working there")
+if not LIVE:
+    end = time.time() + 10
+    sent = []
+    while time.time() < end and not sent:
+        sent = [m for m in Handler.requests if "second_start" in json.dumps(m[-1])]
+        time.sleep(0.2)
+    check(bool(sent) and f"[gritcode: Also working in {B} right now:" in sent[0][-1]["content"],
+          "and its model is told")
+    check(bool(sent) and "git worktree add -b" in sent[0][0]["content"],
+          "the system prompt of a thread in a git repo says when to use a worktree")
 check(wait_idle(g), "both turns finished")
 first, second = read(os.path.join(B, "first_done")), read(os.path.join(B, "second_start"))
 check(bool(first and second) and float(second) < float(first),

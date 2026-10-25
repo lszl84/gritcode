@@ -41,9 +41,24 @@ bash `chdir`s in the forked child. The process-wide `ChdirToCwd` goes away.
 
 ## Write safety
 
-Threads in one folder run at the same time, with no lock: two threads
-editing the same file can overwrite each other, and giving them separate work
-is up to the user. Isolating them (worktrees) comes later.
+Threads in one folder run at the same time, with no lock, so the agents
+keep out of each other's way themselves, without the user having to think
+about worktrees:
+
+- A top-level thread in a git repo gets rules in its system prompt: other
+  threads may share this checkout, so never change its branch or index
+  (switch, stash, reset, rebase, pull); work in place by default and re-read
+  a file right before editing it; use a git worktree
+  (`<data dir>/worktrees/<repo>/<branch>`) only when the user wants the work
+  on its own branch, or when another thread is working here right now and
+  the change is more than a small edit; when done there, commit and tell the
+  user how to merge, and leave the worktree.
+- "Right now" comes from a note on the user's message, written when the turn
+  starts: the titles of the other top-level threads running in the same
+  checkout (the repo, so subfolders count). It is stored as the message's
+  `note`, added after the message for the model (`[gritcode: ...]`) and shown
+  as a notice in the canvas, so the user sees what the agent was told. No
+  note, no reason for a worktree, so most work makes none.
 
 Subagents are read-only: `write_file`,
 `edit_file` and `run_project` are neither offered to them nor run for them,

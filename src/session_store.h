@@ -70,6 +70,10 @@ public:
     std::string LoadBrief(const std::string& cwd) const;
     bool SaveBrief(const std::string& cwd, const std::string& text) const;
 
+    // Where agents put the git worktrees they create:
+    // <data dir>/worktrees/<repo name>/<branch>.
+    std::string WorktreesDir() const { return root_ + "/worktrees"; }
+
     // Persists the last active folder and thread in the index without
     // touching session files. Called when the user switches threads.
     void SetLastActive(const std::string& cwd, const std::string& threadId);

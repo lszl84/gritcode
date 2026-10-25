@@ -719,6 +719,39 @@ std::string FindGitRoot(const std::string& cwd) {
     return std::string();
 }
 
+// For a top-level thread in a git repo. Threads share the checkout with no
+// lock, so the agent mustn't move its branch under the others, and takes
+// branch work, or bigger work while another thread is busy here, into a
+// worktree of its own. Small edits stay in place, so most work makes none.
+std::string SharedCheckoutNote(const std::string& repo, const std::string& worktreesDir) {
+    const std::string dir =
+        worktreesDir + "/" + std::filesystem::path(repo).filename().string() + "/<branch>";
+    return "Other conversation threads may work in " + repo + " at the same time: "
+           "they share its files and its checked-out branch. So:\n"
+           "- Don't change this checkout's branch or index (switching branches, "
+           "stash, reset, rebase, pull): it would change under the other threads. "
+           "If the user asks for that, say so and offer a worktree.\n"
+           "- By default, work here directly, and read a file again right before "
+           "editing it.\n"
+           "- Use a git worktree only when the user wants the work on its own branch, "
+           "or when another thread is working here right now (a note on the user's "
+           "message says so) and your change is more than a small edit: `git worktree "
+           "add -b <branch> " + dir + " HEAD` with a short branch name (or reuse one "
+           "from `git worktree list`), then work only there, with absolute paths and "
+           "`cd` in bash. Tell the user its path and branch, and that uncommitted "
+           "changes here aren't in it.\n"
+           "- When the work in a worktree is done, commit it there and tell the user "
+           "how to bring it in (`git merge <branch>` here). Leave the worktree unless "
+           "the user asks to remove it.";
+}
+
+// The repo `cwd` is in, else `cwd`: threads in folders of one repo share its
+// checkout.
+std::string CheckoutOf(const std::string& cwd) {
+    std::string repo = FindGitRoot(cwd);
+    return repo.empty() ? cwd : repo;
+}
+
 bool ReadTextFile(const std::string& path, std::string& out) {
     std::ifstream in(path, std::ios::binary);
     if (!in) return false;
@@ -2673,6 +2706,10 @@ std::string ChatFrame::FolderContext(const Thread& t) const {
                "history isn't available here; grit_history_search with scope "
                "\"folder\" finds what was said and done in them." + list;
     }
+    if (const std::string repo = FindGitRoot(t.cwd); !repo.empty() && t.parent.empty()) {
+        if (!out.empty()) out += "\n\n";
+        out += SharedCheckoutNote(repo, store_.WorktreesDir());
+    }
     return out;
 }
 
@@ -2790,6 +2827,8 @@ void ChatFrame::RestoreCanvasFromHistory() {
             ub.runs.push_back(r);
             ub.visibleText = text;
             canvas_->AddBlock(std::move(ub));
+            if (std::string note = StringField(m, "note"); !note.empty())
+                canvas_->AddBlock(NoticeBlock(wxString::FromUTF8(note)));
 
             if (m.contains("images") && m["images"].is_array()) {
                 for (const auto& img : m["images"]) {
@@ -4365,6 +4404,24 @@ void ChatFrame::StartTurn(Thread& t, const wxString& userText,
         {"content", userText.ToStdString(wxConvUTF8) + hiddenInstructions},
         {"model", modelId},
     };
+    // Other top-level threads working in the same checkout right now. The
+    // model gets this note after the message (the system prompt says what to
+    // do about it), and the canvas shows it.
+    if (t.parent.empty()) {
+        const std::string checkout = CheckoutOf(t.cwd);
+        std::string others;
+        for (const Thread& o : threads_) {
+            if (&o == &t || !o.streaming || !o.parent.empty() || CheckoutOf(o.cwd) != checkout)
+                continue;
+            others += (others.empty() ? "\"" : ", \"")
+                      + ThreadLabel(o.id, o.cwd, o.title).utf8_string() + "\"";
+        }
+        if (!others.empty()) {
+            const std::string note = "Also working in " + checkout + " right now: " + others + ".";
+            userMsg["note"] = note;
+            if (Shown(t)) canvas_->AddBlock(NoticeBlock(wxString::FromUTF8(note)));
+        }
+    }
     if (!images.empty()) {
         nlohmann::json arr = nlohmann::json::array();
         for (const auto& pi : images) {
@@ -4450,6 +4507,10 @@ nlohmann::json ChatFrame::BuildModelView(const Thread& t) const {
         if (m.value("isSummary", false)) continue;
         if (m.value("role", std::string{}) == "system") continue;
         tail.push_back(m);
+        if (std::string note = StringField(m, "note");
+            !note.empty() && tail.back()["content"].is_string())
+            tail.back()["content"] = tail.back()["content"].get<std::string>()
+                                     + "\n\n[gritcode: " + note + "]";
     }
 
     PruneToolOutputs(tail);
@@ -6123,6 +6184,8 @@ void ChatFrame::StartClaudeTurn(Thread& t, bool fresh) {
 
     const auto& userMsg = t.history[userIdx];
     text += StringField(userMsg, "content");
+    if (std::string note = StringField(userMsg, "note"); !note.empty())
+        text += "\n\n[gritcode: " + note + "]";
     nlohmann::json content = nlohmann::json::array();
     if (userMsg.contains("images") && userMsg["images"].is_array()) {
         for (const auto& img : userMsg["images"]) {
