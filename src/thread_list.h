@@ -5,7 +5,7 @@
 
 // One row of the thread pane.
 struct ThreadRow {
-    enum class State { Done, Running, Waiting, Failed };
+    enum class State { Done, Running, Failed };
     std::string id;
     wxString title;
     wxString detail;  // the current step while running, else when last used

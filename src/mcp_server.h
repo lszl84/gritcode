@@ -55,7 +55,7 @@ struct MCPCallbacks {
     std::function<nlohmann::json()> newSession;
 
     // Threads. listThreads returns {threads: [{id, cwd, title, lastUsed,
-    // loaded, running, waiting, failed}, ...], activeId}; `failed` marks a
+    // loaded, running, failed}, ...], activeId}; `failed` marks a
     // background failure not yet viewed. newThread adds an empty
     // thread in `cwd` (the active folder when empty) and makes it active;
     // selectThread makes thread `id` active. Both return {ok, ...}; every

@@ -118,11 +118,8 @@ try:
     b = g.new_thread(P)["threadId"]
     g.send("Say bye.")
     time.sleep(0.3)
-    if any(t["id"] == a and t["running"] for t in g.list_threads()["threads"]):
-        detail = rows(g)[b]["detail"]
-        check(detail.startswith("waiting for "), f"a queued row says what it waits for ({detail})")
-    else:
-        print("skip  the first turn already ended; no queued row to check")
+    step = rows(g)[b]["detail"]
+    check(step in ("thinking", "writing"), f"a second thread in the folder runs at once ({step})")
     g.cancel()
     g.select_thread(a)
     g.cancel()

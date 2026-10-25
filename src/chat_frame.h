@@ -142,11 +142,8 @@ private:
         std::vector<nlohmann::json> history;
         std::string lastAgentsContent;  // AGENTS.md text currently in history[0]
 
-        // True from StartTurn until FinalizeTurn, including while `waiting`.
+        // True from StartTurn until FinalizeTurn.
         bool streaming = false;
-        // The turn is queued behind another thread running in the same folder
-        // and starts when that one finishes (see StartNextWaiting).
-        bool waiting = false;
         // Pending user messages typed/queued while a turn was in flight. On
         // natural turn end the front auto-dispatches; on error/cancel we land
         // in idle-queue mode.
@@ -373,8 +370,7 @@ private:
     void RebuildChips();
 
     // Cancel whatever the thread has in flight: HTTP stream, tool batch, or
-    // both, or a turn still waiting for its folder. Safe to call when nothing
-    // is running. Wired to Escape.
+    // both. Safe to call when nothing is running. Wired to Escape.
     void RequestCancel(Thread& t);
     void OnSessionChoice(wxCommandEvent&);
     void OnModelChoice(wxCommandEvent&);
@@ -513,7 +509,7 @@ private:
     // Re-render every renderable message in the active thread's history —
     // user prompts as UserPrompt blocks, assistant content via MdStream, tool
     // call/result pairs as ToolCall blocks; system messages are skipped —
-    // followed by the in-flight turn (partial text, waiting notice).
+    // followed by the in-flight turn (partial text).
     void RestoreCanvasFromHistory();
 
     // System prompt for `t`: the static base, AGENTS.md (recorded in
@@ -652,10 +648,6 @@ private:
     void StartTurn(Thread& t, const wxString& userText,
                    std::vector<PendingImage> images = {},
                    const std::string& hiddenInstructions = std::string());
-    // The thread (other than `self`) running a turn in `cwd`, if any.
-    Thread* RunningIn(const std::string& cwd, const Thread& self);
-    // Start the first turn waiting for `cwd`, unless one is running there.
-    void StartNextWaiting(const std::string& cwd);
     void EnqueueMessage(Thread& t, const wxString& text);
     void LogDebug(const std::string& line);
     void OpenDebugWindow();
@@ -739,8 +731,6 @@ private:
                          const std::string& result,
                          const std::string& childId = std::string());
     void RenderErrorBlock(Thread& t, const wxString& msg);
-    // "Waiting for <thread> to finish" while t.waiting.
-    void RenderWaitingNotice(Thread& t);
     // A failed turn's notice: drawn now when `t` is shown, otherwise kept on
     // the thread (with the prompt when it was rolled back) until viewed.
     void ShowTurnFailure(Thread& t, Block notice, bool promptRolledBack);

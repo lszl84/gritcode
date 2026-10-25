@@ -50,9 +50,6 @@ void ThreadList::OnDrawItem(wxDC& dc, const wxRect& rect, size_t n) const {
     } else if (r.state == Running) {
         dc.SetTextForeground(selected ? fg : omarchy::Readable(accent, bg, 3.0));
         dc.DrawText(wxString::FromUTF8("\xE2\x97\x8F"), x, y);  // "●"
-    } else if (r.state == Waiting) {
-        dc.SetTextForeground(dim);
-        dc.DrawText(wxString::FromUTF8("\xE2\x97\x8B"), x, y);  // "○"
     }
     x += markW;
     const int textW = rect.GetRight() - pad - x;

@@ -148,7 +148,7 @@ try:
         ["grit_history_search", {"query": "zebracorn", "limit": 20}]]))
     end = time.time() + 60
     while time.time() < end and (time.sleep(0.5) or any(
-            t["running"] or t["waiting"] for t in g.list_threads()["threads"])):
+            t["running"] for t in g.list_threads()["threads"])):
         pass
     results = [m["content"] for m in g.conversation() if m["role"] == "tool"]
     check(len(results) == 2, "both searches ran")

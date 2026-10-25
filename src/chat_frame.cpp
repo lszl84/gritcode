@@ -1567,7 +1567,6 @@ ChatFrame::ChatFrame()
             return {
                 {"threadId", t.id},
                 {"streaming", t.streaming},
-                {"waiting", t.waiting},
                 {"toolIter", t.toolIter},
                 {"historyLen", (int)t.history.size()},
                 {"pendingQueue", std::move(queue)},
@@ -1653,8 +1652,7 @@ ChatFrame::ChatFrame()
                 arr.push_back({
                     {"id", id}, {"cwd", cwd}, {"title", title}, {"parent", parent},
                     {"lastUsed", lastUsed}, {"loaded", t != nullptr},
-                    {"running", t && t->streaming && !t->waiting},
-                    {"waiting", t && t->waiting},
+                    {"running", t && t->streaming},
                     {"failed", t && t->failureNotice.has_value()},
                 });
             };
@@ -2242,15 +2240,6 @@ void ChatFrame::OnCharHook(wxKeyEvent& e) {
 }
 
 void ChatFrame::RequestCancel(Thread& t) {
-    // A turn still waiting for its folder hasn't sent anything: drop its
-    // user message, as the error path does, and end it.
-    if (t.waiting) {
-        t.waiting = false;
-        if (!t.history.empty() && IsUserTurn(t.history.back())) t.history.pop_back();
-        RenderErrorBlock(t, "Cancelled.");
-        FinalizeTurn(t, true);
-        return;
-    }
     // A Claude Code subagent runs inside its parent's Claude Code process:
     // cancelling it cancels that run, which ends the subagent too.
     if (Thread* p = t.parent.empty() ? nullptr : Find(t.parent);
@@ -2370,7 +2359,7 @@ std::vector<ThreadRow> ChatFrame::FolderRows() {
         ThreadRow r{.id = t.id, .title = ThreadLabel(t.id, t.cwd, t.title),
                     .detail = LastUsedLabel(t.lastUsed)};
         if (t.streaming) {
-            r.state = t.waiting ? ThreadRow::State::Waiting : ThreadRow::State::Running;
+            r.state = ThreadRow::State::Running;
             r.detail = CurrentStep(t);
         } else if (t.failureNotice && !Shown(t)) {  // until viewed
             r.state = ThreadRow::State::Failed;
@@ -2404,11 +2393,6 @@ std::vector<ThreadRow> ChatFrame::FolderRows() {
 }
 
 wxString ChatFrame::CurrentStep(Thread& t) {
-    if (t.waiting) {
-        const Thread* r = RunningIn(t.cwd, t);
-        return "waiting for " + (r ? ThreadLabel(r->id, r->cwd, r->title)
-                                   : wxString("the folder"));
-    }
     if (t.compacting) return "compacting";
     // The tool calls without a result yet: a Claude message keeps its calls
     // until their first result arrives, other turns record them in history
@@ -2470,7 +2454,7 @@ void ChatFrame::UpdateThreadPane(std::vector<ThreadRow> rows) {
     // While a thread runs its step changes without a refresh from the turn
     // code, so poll at a low rate until none does.
     const bool running = std::ranges::any_of(rows, [](const ThreadRow& r) {
-        return r.state == ThreadRow::State::Running || r.state == ThreadRow::State::Waiting;
+        return r.state == ThreadRow::State::Running;
     });
     if (!running) threadPaneTimer_.Stop();
     else if (!threadPaneTimer_.IsRunning()) threadPaneTimer_.Start(1000);
@@ -2880,7 +2864,6 @@ void ChatFrame::RestoreCanvasFromHistory() {
         t.failureNotice.reset();
     }
     if (t.streaming) {
-        if (t.waiting) RenderWaitingNotice(t);
         if (t.thinkingEmitted) RenderThinkingBlock(t, wxString::FromUTF8(t.activeReasoning));
         else UpdateLiveThinking(t);
         if (t.mdStream) {
@@ -4402,52 +4385,13 @@ void ChatFrame::StartTurn(Thread& t, const wxString& userText,
         UpdateQueueUI();  // Send becomes "Add", chip row stays visible if non-empty.
     }
 
-    // One running turn per folder: until the other thread there finishes,
-    // this one waits (StartNextWaiting starts it).
-    if (RunningIn(t.cwd, t)) {
-        t.waiting = true;
-        RenderWaitingNotice(t);
-    } else {
-        StartCompletion(t);
-    }
+    StartCompletion(t);
     RefreshSessionChoice();  // marks the thread as running
-}
-
-ChatFrame::Thread* ChatFrame::RunningIn(const std::string& cwd, const Thread& self) {
-    // A thread and its subagents count as one owner of the folder (the
-    // subagents are read-only, see IsWriteTool).
-    auto family = [](const Thread& t) -> const std::string& {
-        return t.parent.empty() ? t.id : t.parent;
-    };
-    for (Thread& t : threads_) {
-        if (&t != &self && t.cwd == cwd && t.streaming && !t.waiting
-            && family(t) != family(self))
-            return &t;
-    }
-    return nullptr;
 }
 
 int ChatFrame::ModelIndexFor(const Thread& t) const {
     return t.parent.empty() ? currentModelIndex_ : t.turnModelIndex;
 }
-
-void ChatFrame::StartNextWaiting(const std::string& cwd) {
-    for (Thread& t : threads_) {
-        if (!t.waiting || t.cwd != cwd) continue;
-        if (RunningIn(cwd, t)) return;
-        t.waiting = false;
-        StartCompletion(t);
-        return;
-    }
-}
-
-void ChatFrame::RenderWaitingNotice(Thread& t) {
-    const Thread* other = RunningIn(t.cwd, t);
-    if (!other) return;
-    RenderErrorBlock(t, "Waiting for " + ThreadLabel(other->id, other->cwd, other->title)
-                        + wxString::FromUTF8(" to finish\xE2\x80\xA6"));
-}
-
 
 void ChatFrame::EnqueueMessage(Thread& t, const wxString& text) {
     QueuedMessage q;
@@ -5274,7 +5218,6 @@ void ChatFrame::FinalizeTurn(Thread& t, bool wasCancelledOrError) {
     t.liveThinkingIdx = -1;
     if (Shown(t)) canvas_->SetThinking(false);
     t.streaming = false;
-    t.waiting = false;
     t.activeAssistantText.clear();
     t.activeReasoning.clear();
     t.activeToolCalls.clear();
@@ -5288,9 +5231,6 @@ void ChatFrame::FinalizeTurn(Thread& t, bool wasCancelledOrError) {
     // label shows up.
     RefreshSessionChoice();
 
-    // The folder is free: a thread waiting for it goes before this thread's
-    // own queue, which would otherwise keep the folder to itself.
-    StartNextWaiting(t.cwd);
     if (!t.parentToolId.empty()) ReportToParent(t, wasCancelledOrError);
 
     // Natural completion: auto-dispatch the next queued message so back-to-

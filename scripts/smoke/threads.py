@@ -75,7 +75,7 @@ def threads(g):
 def wait_idle(g, timeout=240):
     end = time.time() + timeout
     while time.time() < end:
-        if not any(t["running"] or t["waiting"] for t in threads(g).values()):
+        if not any(t["running"] for t in threads(g).values()):
             return True
         time.sleep(1)
     return False
@@ -125,16 +125,16 @@ time.sleep(1)
 b2 = g.new_thread(B)["threadId"]
 g.send(bash("date +%s.%N > second_start"))
 now = threads(g)
-check(now[b]["running"] and now[b2]["waiting"], "the second thread waits")
-check(any("Waiting for" in blk["preview"] for blk in g.blocks()), "waiting notice shown")
+check(now[b]["running"] and now[b2]["running"], "both threads run at once")
 check(wait_idle(g), "both turns finished")
 first, second = read(os.path.join(B, "first_done")), read(os.path.join(B, "second_start"))
-check(bool(first and second) and float(second) > float(first),
-      "the second ran after the first finished")
+check(bool(first and second) and float(second) < float(first),
+      "the second ran while the first was still going")
 
 print("-- opening a folder")
 g.switch_session(A)
-check(g.switch_session(B).get("threadId") == b2, "it shows the folder's most recent thread")
+latest = max((t for t in threads(g).values() if t["cwd"] == B), key=lambda t: t["lastUsed"])
+check(g.switch_session(B).get("threadId") == latest["id"], "it shows the folder's most recent thread")
 
 if not LIVE:
     print("-- SSE framing")
@@ -147,32 +147,29 @@ if not LIVE:
         check(last["role"] == "assistant" and last["content"].startswith("Results:"),
               f"[{marker}] the reply after it arrived")
 
-print("-- a turn that fails in the background")
-g.select_thread(b)
-g.send(bash("sleep 8"))  # keeps the folder busy
-x = g.new_thread(B)["threadId"]
-g.set_model(1)  # a DeepSeek model: needs a key, and this HOME has none
-g.send("remember this prompt")
-check(threads(g)[x]["waiting"], "it waits for the folder")
-g.select_thread(b)
-g.cancel()  # b ends; x starts in the background and fails without a key
-end = time.time() + 60
-while time.time() < end and threads(g)[x]["waiting"]:
-    time.sleep(0.5)
-g.set_model(0)
-now = threads(g)
-check(now[x]["failed"] and not now[x]["running"], "it failed in the background")
-g.select_thread(x)
-check(any("No API key" in blk["preview"] for blk in g.blocks()), "its notice shows when viewed")
-check(g.status()["input"] == "remember this prompt", "its prompt is back in the input")
-check(not threads(g)[x]["failed"], "it is no longer marked as failed")
+x = None
+if not LIVE:
+    print("-- a turn that fails in the background")
+    x = g.new_thread(B)["threadId"]
+    g.send("FAIL-500 remember this prompt")  # the fake answers 500 after its delay
+    g.select_thread(b)  # so it fails while another thread is shown
+    end = time.time() + 60
+    while time.time() < end and threads(g)[x]["running"]:
+        time.sleep(0.5)
+    now = threads(g)
+    check(now[x]["failed"] and not now[x]["running"], "it failed in the background")
+    g.select_thread(x)
+    check(any("scripted failure" in blk["preview"] for blk in g.blocks()),
+          "its notice shows when viewed")
+    check(g.status()["input"] == "FAIL-500 remember this prompt", "its prompt is back in the input")
+    check(not threads(g)[x]["failed"], "it is no longer marked as failed")
 
 print("-- restart")
 stop(pid)
 pid, g = launch()
 now = threads(g)
-check({a, b, b2, x} <= now.keys(), "threads restored")
-check(g.status()["threadId"] == x, "last active thread restored")
+check({a, b, b2} | ({x} if x else set()) <= now.keys(), "threads restored")
+check(g.status()["threadId"] == (x or latest["id"]), "last active thread restored")
 
 check(now[b2]["title"].startswith("Call the bash tool"), "titles restored")
 

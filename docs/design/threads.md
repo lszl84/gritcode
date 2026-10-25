@@ -41,12 +41,11 @@ bash `chdir`s in the forked child. The process-wide `ChdirToCwd` goes away.
 
 ## Write safety
 
-One running turn per folder. Starting a turn while another thread in the same
-folder is running queues it (shown as "waiting for <thread>"). Real parallel
-writing in one folder comes later with worktrees.
+Threads in one folder run at the same time, with no lock: two threads
+editing the same file can overwrite each other, and giving them separate work
+is up to the user. Isolating them (worktrees) comes later.
 
-A thread and its subagents count as one owner of the folder, so a subagent
-never waits for its own parent. Subagents are read-only: `write_file`,
+Subagents are read-only: `write_file`,
 `edit_file` and `run_project` are neither offered to them nor run for them,
 and their prompt tells them to use bash only to inspect (a convention, not
 enforced). The parent makes the edits from their reports, so concurrent
@@ -150,10 +149,9 @@ bottom toolbar, like the main pane's, has two view icons, the current one in
 the text colour (remembered in preferences), and "+" (New thread) on the
 right in the Threads view. Session is the 0.5.x session reference,
 unchanged. Threads lists the folder's threads: per thread a state mark
-(● running, ○ waiting for the folder, ⚠ failed until viewed) with the title,
+(● running, ⚠ failed until viewed) with the title,
 subagents indented under their parent, and a dim line below: while running
-the current step (the tool it runs, "writing", "thinking", "waiting for
-<thread>"), after a failure its notice, otherwise when it was last used. The
+the current step (the tool it runs, "writing", "thinking"), after a failure its notice, otherwise when it was last used. The
 rows come from `FolderRows`; the step is derived from the thread's existing
 fields (pending tool calls in history or Claude's pending message, in-flight
 text), and a 1 s timer refreshes the list only while it is on screen and a
@@ -163,7 +161,7 @@ a running one offers "Stop". The agent map and the decision tray come later (see
 
 ## Steps
 
-1. Threads: struct, multi-thread runtime, store, per-thread cwd, write queue,
+1. Threads: struct, multi-thread runtime, store, per-thread cwd,
    thread switching. (done)
 2. Subagents: a DeepSeek `task` tool running a child thread headless, and
    Claude Code subagent events shown as child threads. (done)
@@ -176,7 +174,7 @@ a running one offers "Stop". The agent map and the decision tray come later (see
    first new thread, and a list of the folder's other threads in every
    thread's system prompt. (done)
 5. Thread list: a Threads view in the left pane listing the folder's threads
-   and their child threads with state (running, waiting, failed, done); the
+   and their child threads with state (running, failed, done); the
    session dropdown stays per folder. (done)
 6. Worktree threads: a thread can run in its own git worktree, so several
    threads write in one project at once; diff and merge back. Built, then

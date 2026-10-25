@@ -101,7 +101,7 @@ def children(g, parent):
 def wait_idle(g, timeout=60):
     end = time.time() + timeout
     while time.time() < end:
-        if not any(t["running"] or t["waiting"] for t in threads(g).values()):
+        if not any(t["running"] for t in threads(g).values()):
             return True
         time.sleep(0.5)
     return False
