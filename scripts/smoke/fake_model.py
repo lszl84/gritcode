@@ -79,10 +79,12 @@ def sse(delta, crlf, unterminated):
 
 class Handler(BaseHTTPRequestHandler):
     delay = 1.1
+    requests = []  # every request's messages, for tests that check what was sent
 
     def do_POST(self):
         request = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
         messages = request["messages"]
+        Handler.requests.append(messages)
         user = next((text_of(m) for m in reversed(messages) if m["role"] == "user"), "")
         directive = DIRECTIVE.search(user)
         markers = user[:directive.start()] if directive else user

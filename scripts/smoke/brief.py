@@ -9,7 +9,8 @@ Usage:
 
 Runs the app only through ~/.local/share/grit-dev/run-hidden.sh (invisible
 Xvfb, temp HOME and data dir), with the free model pointed at a local fake
-(fake_model.py), which answers a brief request with the material it got.
+(fake_model.py), which answers a brief request with the material it got,
+and a stand-in `claude` on PATH for the Claude case.
 """
 
 import json
@@ -24,7 +25,7 @@ import time
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
 from grit import Grit  # noqa: E402
-from fake_model import serve  # noqa: E402
+from fake_model import Handler, serve  # noqa: E402
 
 LAUNCHER = os.path.expanduser("~/.local/share/grit-dev/run-hidden.sh")
 BIN = os.path.abspath(sys.argv[1] if len(sys.argv) > 1 else "build/gritcode")
@@ -67,6 +68,24 @@ with open(os.path.join(P, "README.md"), "w") as f:
 # The fake model answers this folder's brief request with HTTP 500.
 with open(os.path.join(Q, "README.md"), "w") as f:
     f.write("FAIL-500\n")
+# Folder R is worked on with Claude: its brief must go through the Claude Code
+# CLI (here a stand-in that records what it got), never to the HTTP model.
+R = os.path.join(DATA, "R")
+os.makedirs(R)
+with open(os.path.join(R, "README.md"), "w") as f:
+    f.write("claude-readme-marker\n")
+FAKEBIN = os.path.join(DATA, "fakebin")
+os.makedirs(FAKEBIN)
+with open(os.path.join(FAKEBIN, "claude"), "w") as f:
+    f.write("""#!/bin/bash
+d=$(dirname "$0")
+printf '%s\\n' "$@" > "$d/args.txt"
+cat > "$d/stdin.txt"
+python3 -c 'import json,sys; print(json.dumps({"type": "result", "is_error": False,
+    "result": "Claude brief. " + open(sys.argv[1]).read().splitlines()[0]}))' "$d/stdin.txt"
+""")
+os.chmod(os.path.join(FAKEBIN, "claude"), 0o755)
+STUBS = os.path.expanduser("~/.local/share/grit-dev/stubs")
 # Folder P has two threads; the first has no id, so gritcode derives it from
 # the folder, which also names the folder's brief file.
 os.makedirs(os.path.join(DATA, "gritcode"))
@@ -81,7 +100,8 @@ BRIEFS = os.path.join(DATA, "gritcode", "briefs")
 
 env = dict(os.environ, GRIT_TEST_DATA=DATA)
 pid = int(subprocess.check_output([LAUNCHER, BIN, f"GRIT_MCP_PORT={PORT}",
-                                   f"GRIT_FREE_MODEL_URL={serve()}"],
+                                   f"GRIT_FREE_MODEL_URL={serve()}",
+                                   f"PATH={FAKEBIN}:{STUBS}:{os.environ['PATH']}"],
                                   env=env, stderr=subprocess.DEVNULL))
 try:
     # Wait for this instance's own port (Grit would also try the next ones).
@@ -138,6 +158,27 @@ try:
           "the failure is shown")
     check("scripted failure" in previews(g), "with the model's error")
     check(os.listdir(BRIEFS) == [first + ".md"], "no brief is saved for the folder")
+
+    print("-- Claude writes a Claude user's brief")
+    g.switch_session(R)
+    # Dropdown row 3: after Kilo Free and the two fallback DeepSeek models.
+    check(g.set_model(3).get("modelIndex") == 100, "Claude (Opus) is selected")
+    g.new_thread(R)
+    check(wait_for(lambda: "Writing a project brief for this folder with Claude (Sonnet"
+                   in previews(g) or len(os.listdir(BRIEFS)) == 2),
+          "it is written by Claude's Sonnet")
+    check(wait_for(lambda: len(os.listdir(BRIEFS)) == 2), "the brief is saved")
+    saved = [n for n in os.listdir(BRIEFS) if n != first + ".md"]
+    brief = open(os.path.join(BRIEFS, saved[0])).read() if saved else ""
+    check(brief == "Claude brief. Folder: " + R, f"from the CLI's result ({brief[:60]})")
+    args = open(os.path.join(FAKEBIN, "args.txt")).read().split("\n")
+    check(args[:1] == ["-p"] and "claude-sonnet-5" in args, "a print-mode run on Sonnet")
+    check("--tools" in args and args[args.index("--tools") + 1] == ""
+          and "--no-session-persistence" in args, "with no tools, not saved as a session")
+    check("claude-readme-marker" in open(os.path.join(FAKEBIN, "stdin.txt")).read(),
+          "the material goes in on stdin")
+    check(not any(R in json.dumps(m) for m in Handler.requests),
+          "nothing about the folder reached the other model")
 finally:
     os.kill(pid, 15)
 

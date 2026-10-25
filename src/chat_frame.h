@@ -18,6 +18,7 @@
 #include "md_parser.h"
 #include "mcp_server.h"
 #include "memory.h"
+#include "project_brief.h"
 #include "session_store.h"
 #include "streaming_web_request.h"
 #include "thread_list.h"
@@ -538,13 +539,14 @@ private:
     std::string FolderContext(const Thread& t) const;
 
     // A folder's project brief is written once, when the user starts a new
-    // thread in a folder without one, and its later new threads reuse it.
+    // thread in a folder without one, by the provider of the selected model
+    // (see BriefModelIndex), and its later new threads reuse it.
     // One job per folder; a failed one runs again at the next new thread.
     struct BriefJob {
         std::string cwd;
         wxString writer;  // the model's label
         bool running = false;
-        StreamingWebRequest request;
+        BriefRun run;
     };
     std::deque<BriefJob> briefJobs_;
     // Starts writing `cwd`'s brief; false when a job for it already runs.

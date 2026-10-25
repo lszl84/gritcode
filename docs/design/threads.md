@@ -104,10 +104,16 @@ project instructions (it is injected too). No brief means no section, as
 before.
 
 The brief is written automatically, once: when the user starts a new thread
-in a folder that has none, DeepSeek Flash (cheap and fast; the free model
-without a key; Claude's CLI doesn't fit one request) writes it in the
-background from the top-level entries, README, AGENTS.md and thread titles,
-and every later new thread there reuses it. It isn't editable for now.
+in a folder that has none, it is written in the background from the
+top-level entries, README, AGENTS.md and thread titles, and every later new
+thread there reuses it. It isn't editable for now. The writer is from the
+provider of the selected model, so the material goes nowhere the user's
+chats don't (`BriefModelIndex`): DeepSeek's Flash model for DeepSeek (cheap
+and fast), Sonnet through the Claude Code CLI for Claude (`claude -p
+--output-format json --tools "" --no-session-persistence`, the material on
+stdin, so no tools run and no session is kept), and the free model for
+itself.
+
 Nothing about it is silent: the new thread says it is being written and by
 which model, then shows the brief it starts with (every new thread shows the
 brief it starts with); a failure is shown with the model's error, and the

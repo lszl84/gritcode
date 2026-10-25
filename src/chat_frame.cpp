@@ -460,18 +460,17 @@ constexpr const char* kSubagentNote =
     "inspect (grep, git log, running tests). Nobody can answer questions, so "
     "state your assumptions in the report.";
 
-// Model that writes a project brief: DeepSeek Flash when there is a key (it
-// is cheap and fast), otherwise the free model. Claude runs through its CLI,
-// which doesn't fit a single request.
-ModelRoute BriefRoute(const std::vector<std::string>& remoteModels) {
-    if (!Preferences::HasApiKey(Preferences::Provider::DeepSeek))
-        return RouteForIndex(kModelKiloFree, remoteModels);
-    const std::vector<std::string>& ids = DeepseekModels(remoteModels);
-    auto flash = std::ranges::find_if(ids, [](const std::string& id) {
-        return id.find("flash") != std::string::npos;
-    });
-    return RouteForIndex(flash == ids.end() ? 1 : 1 + (int)(flash - ids.begin()),
-                         remoteModels);
+// Model that writes a project brief: one of the provider the user picked,
+// so the folder's README and file names go to no one else. DeepSeek: its
+// Flash model (cheap and fast); Claude: Sonnet, through the CLI; the free
+// model: itself.
+int BriefModelIndex(int idx, const std::vector<std::string>& remoteModels) {
+    const ModelRoute route = RouteForIndex(idx, remoteModels);
+    if (!route.claudeCli) return SubagentModelIndex(route.model, idx, remoteModels);
+    for (int i = 0; i < kClaudeModelCount; ++i)
+        if (std::string_view(kClaudeModels[i].id).find("sonnet") != std::string_view::npos)
+            return kClaudeIndexBase + i;
+    return idx;
 }
 
 // String field of a history/event object, or empty when missing or not a
@@ -2706,7 +2705,8 @@ bool ChatFrame::WriteProjectBrief(const std::string& cwd) {
     if (job->running) return false;
     std::vector<std::string> titles;
     for (const FolderThread& f : FolderThreads(cwd)) titles.push_back(f.title);
-    const ModelRoute route = BriefRoute(remoteModels_);
+    const ModelRoute route = RouteForIndex(BriefModelIndex(currentModelIndex_, remoteModels_),
+                                           remoteModels_);
     const BriefModel model{
         .url = route.url,
         .model = route.model,
@@ -2714,14 +2714,20 @@ bool ChatFrame::WriteProjectBrief(const std::string& cwd) {
                       ? Preferences::GetApiKey(route.provider).utf8_string()
                       : std::string(),
         .deepseek = route.needsApiKey,
+        .claudeExe = route.claudeCli ? FindClaudeExecutable() : std::string(),
         .label = ModelLabelForId(route.model),
     };
     job->writer = model.label;
     job->running = true;
-    job->request = WriteBrief(this, model, BriefMaterial(cwd, LoadAgentsInstructions(cwd), titles),
-                              [this, cwd](std::string brief, std::string error) {
-                                  OnBriefWritten(cwd, std::move(brief), std::move(error));
-                              });
+    if (route.claudeCli && model.claudeExe.empty()) {
+        CallAfter([this, cwd] { OnBriefWritten(cwd, {}, "Claude Code isn't installed"); });
+        return true;
+    }
+    job->run = WriteBrief(this, model, cwd,
+                          BriefMaterial(cwd, LoadAgentsInstructions(cwd), titles),
+                          [this, cwd](std::string brief, std::string error) {
+                              OnBriefWritten(cwd, std::move(brief), std::move(error));
+                          });
     return true;
 }
 

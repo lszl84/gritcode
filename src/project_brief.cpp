@@ -119,9 +119,46 @@ std::string BriefMaterial(const std::string& cwd, const std::string& agents,
     return out;
 }
 
-StreamingWebRequest WriteBrief(wxEvtHandler* target, const BriefModel& model,
-                               const std::string& material,
-                               std::function<void(std::string brief, std::string error)> done) {
+BriefRun WriteBrief(wxEvtHandler* target, const BriefModel& model, const std::string& cwd,
+                    const std::string& material,
+                    std::function<void(std::string brief, std::string error)> done) {
+    BriefRun run;
+    if (!model.claudeExe.empty()) {
+        // One print-mode run with no tools (the material is all it needs)
+        // that isn't kept among the user's Claude sessions.
+        ClaudeRunSpec spec;
+        spec.executable = model.claudeExe;
+        spec.cwd = cwd;
+        spec.args = {"-p", "--output-format", "json", "--model", model.model,
+                     "--system-prompt", kBriefPrompt, "--tools", "",
+                     "--no-session-persistence", "--strict-mcp-config"};
+        spec.stdinPayload = material;
+        auto out = std::make_shared<std::string>();
+        run.claude = ClaudeAgentProcess(
+            target, std::move(spec), [out](std::string_view chunk) { *out += chunk; },
+            [out, done = std::move(done)](ClaudeProcessResult res) {
+                if (!res.started) {
+                    done({}, res.error);
+                    return;
+                }
+                // --output-format json: one result object.
+                std::string brief, error;
+                try {
+                    const auto j = nlohmann::json::parse(*out);
+                    if (j.value("is_error", false))
+                        error = "Claude Code: " + Capped(j.value("result", std::string()), 300);
+                    else
+                        brief = Trimmed(j.value("result", std::string()));
+                } catch (...) {
+                    error = "Claude Code exited with status " + std::to_string(res.exitCode);
+                    if (std::string tail = Trimmed(res.stderrTail); !tail.empty())
+                        error += ": " + Capped(tail, 300);
+                }
+                if (error.empty() && brief.empty()) error = "the model returned no text";
+                done(std::move(brief), std::move(error));
+            });
+        return run;
+    }
     // Streamed events, and the raw body when the request fails.
     auto sse = std::make_shared<std::string>();
     auto text = std::make_shared<std::string>();
@@ -129,7 +166,7 @@ StreamingWebRequest WriteBrief(wxEvtHandler* target, const BriefModel& model,
         for (const std::string& payload : TakeSseEvents(*sse, chunk, ended))
             *text += DeltaText(payload);
     };
-    return StreamingWebRequest(
+    run.request = StreamingWebRequest(
         target, BriefRequest(model, material),
         [take](std::string_view chunk) { take(chunk, false); },
         [take, sse, text, done = std::move(done)](WebResponse resp) {
@@ -142,4 +179,5 @@ StreamingWebRequest WriteBrief(wxEvtHandler* target, const BriefModel& model,
             if (brief.empty()) done({}, "the model returned no text");
             else done(std::move(brief), {});
         });
+    return run;
 }
