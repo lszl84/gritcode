@@ -158,8 +158,13 @@ rebuild, as before; turns of sessions with no file any more stay searchable.
 ## UI
 
 The session dropdown stays at the folder level, as in 0.5.x: "New Session…"
-(pick a folder), then the folders, most recent first, a ● marking one with a
-running thread. Picking a folder opens its most recently used thread.
+(pick a folder), then the folders, most recent first. Picking a folder opens
+its most recently used thread. A mark before a folder says there is something
+there the user hasn't seen: "⚠" a thread failed, "●" one is working or
+finished since it was last viewed. The thread on screen never counts, so the
+closed dropdown (the current folder) is the in-folder indicator; subagents
+report through their parent; a turn the user stopped leaves nothing to see.
+The Threads list marks the same threads. In memory only (`Thread::unseen`).
 
 Threads are switched in the existing left pane (hamburger toggle). Its
 bottom toolbar, like the main pane's, has two view icons, the current one in

@@ -127,6 +127,37 @@ try:
     detail = rows(g)[a]["detail"]
     check(":" in detail, f"a stopped row shows its time again ({detail})")
 
+    print("-- marks")
+
+    def mark():  # the folder's mark in the session dropdown
+        label = next(x for x in panes(g)["sessions"] if x.endswith("/P"))
+        return label[:2] if label[:1] in ("\u25cf", "\u26a0") else ""
+
+    def wait_done(tid):
+        end = time.time() + 30
+        while time.time() < end and any(
+                t["id"] == tid and t["running"] for t in g.list_threads()["threads"]):
+            time.sleep(0.2)
+
+    g.select_thread(a)
+    g.send("Say hi.")
+    time.sleep(0.3)
+    check(mark() == "", "the thread on screen working alone sets no mark")
+    g.select_thread(b)
+    check(mark() == "\u25cf ", "another thread working marks the folder")
+    wait_done(a)
+    check(mark() == "\u25cf " and rows(g)[a]["state"] == "unseen",
+          "one that finished while not shown keeps the mark, in the list too")
+    g.select_thread(a)
+    check(mark() == "" and rows(g)[a]["state"] == "done", "viewing it clears the mark")
+    g.select_thread(b)
+    g.send("FAIL-500 oops")
+    g.select_thread(a)  # before the fake model's reply delay ends
+    wait_done(b)
+    check(mark() == "\u26a0 " and rows(g)[b]["state"] == "failed", "an unseen failure shows \u26a0")
+    g.select_thread(b)
+    check(mark() == "", "viewing it clears that too")
+
     print("-- switch")
     before = panes(g)
     g._call("togglePanel", {"panel": "import"})

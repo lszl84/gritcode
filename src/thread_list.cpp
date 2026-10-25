@@ -47,7 +47,7 @@ void ThreadList::OnDrawItem(wxDC& dc, const wxRect& rect, size_t n) const {
     if (r.state == Failed) {
         dc.SetTextForeground(selected ? fg : omarchy::Readable(red, bg, 3.0));
         dc.DrawText(wxString::FromUTF8("\xE2\x9A\xA0"), x, y);  // "⚠"
-    } else if (r.state == Running) {
+    } else if (r.state == Running || r.state == Unseen) {
         dc.SetTextForeground(selected ? fg : omarchy::Readable(accent, bg, 3.0));
         dc.DrawText(wxString::FromUTF8("\xE2\x97\x8F"), x, y);  // "●"
     }

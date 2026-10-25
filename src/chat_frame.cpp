@@ -1724,6 +1724,7 @@ ChatFrame::ChatFrame()
                     {"lastUsed", lastUsed}, {"loaded", t != nullptr},
                     {"running", t && t->streaming},
                     {"failed", t && t->failureNotice.has_value()},
+                    {"unseen", t && t->unseen},
                 });
             };
             for (const Thread& t : threads_)
@@ -1938,7 +1939,8 @@ ChatFrame::ChatFrame()
         nlohmann::json rows = nlohmann::json::array();
         for (const ThreadRow& r : threadList_->Rows())
             rows.push_back({{"id", r.id}, {"title", r.title.utf8_string()},
-                            {"detail", r.detail.utf8_string()}, {"child", r.child}});
+                            {"detail", r.detail.utf8_string()}, {"child", r.child},
+                            {"state", std::array{"done", "running", "unseen", "failed"}[(int)r.state]}});
         nlohmann::json sessions = nlohmann::json::array();
         for (unsigned i = 0; i < sessionChoice_->GetCount(); ++i)
             sessions.push_back(sessionChoice_->GetString(i).utf8_string());
@@ -2319,6 +2321,7 @@ void ChatFrame::RequestCancel(Thread& t) {
         RequestCancel(*p);
         return;
     }
+    if (t.streaming) t.stopRequested = true;
     // Idempotent on a finished request — Cancel just sets an atomic.
     t.request.Cancel();
     // A Claude turn gets SIGINT, so Claude Code ends it cleanly.
@@ -2436,6 +2439,8 @@ std::vector<ThreadRow> ChatFrame::FolderRows() {
         } else if (t.failureNotice && !Shown(t)) {  // until viewed
             r.state = ThreadRow::State::Failed;
             r.detail = t.failureNotice->visibleText.BeforeFirst('\n');
+        } else if (t.unseen) {
+            r.state = ThreadRow::State::Unseen;
         }
         rows.push_back({std::move(r), t.parent, t.lastUsed});
     }
@@ -2508,13 +2513,20 @@ void ChatFrame::RefreshSessionChoice() {
         sessionCwds_.insert(sessionCwds_.begin(), activeCwd_);
     sessionChoice_->Clear();
     sessionChoice_->Append(wxString::FromUTF8("New Session\xE2\x80\xA6"));
-    for (const std::string& cwd : sessionCwds_) {
-        const bool running = std::ranges::any_of(threads_, [&](const Thread& t) {
-            return t.cwd == cwd && t.streaming;
-        });
-        sessionChoice_->Append((running ? wxString::FromUTF8("\xE2\x97\x8F ") : wxString())
-                               + DisplayPath(cwd));
-    }
+    // What the user hasn't seen in a folder: "⚠ " a thread failed, "● " one
+    // is working or finished since it was last viewed. The thread on screen
+    // doesn't count, and subagents report through their parent.
+    auto mark = [this](const std::string& cwd) {
+        bool busy = false;
+        for (const Thread& t : threads_) {
+            if (&t == &Active() || !t.parent.empty() || t.cwd != cwd) continue;
+            if (t.failureNotice) return wxString::FromUTF8("\xE2\x9A\xA0 ");
+            busy = busy || t.streaming || t.unseen;
+        }
+        return busy ? wxString::FromUTF8("\xE2\x97\x8F ") : wxString();
+    };
+    for (const std::string& cwd : sessionCwds_)
+        sessionChoice_->Append(mark(cwd) + DisplayPath(cwd));
     auto active = std::ranges::find(sessionCwds_, activeCwd_);
     if (active != sessionCwds_.end())
         sessionChoice_->SetSelection(1 + (int)(active - sessionCwds_.begin()));
@@ -2661,6 +2673,7 @@ bool ChatFrame::ShowThread(const std::string& id) {
     if (!t.failedPrompt.empty() && input_->IsEmpty())
         input_->SetValue(wxString::FromUTF8(t.failedPrompt));
     t.failedPrompt.clear();
+    t.unseen = false;
     RefreshSessionChoice();
     if (otherFolder) {
         PopulateEditorTree();
@@ -4441,6 +4454,7 @@ void ChatFrame::StartTurn(Thread& t, const wxString& userText,
                         std::vector<PendingImage> images,
                         const std::string& hiddenInstructions) {
     t.overflowRetried = false;
+    t.stopRequested = false;
     t.failure.clear();
     t.turnModelIndex = ModelIndexFor(t);
     const ModelRoute route = RouteForIndex(t.turnModelIndex, remoteModels_);
@@ -5333,6 +5347,7 @@ void ChatFrame::OnToolBatchDone(Thread& t) {
 }
 
 void ChatFrame::FinalizeTurn(Thread& t, bool wasCancelledOrError) {
+    if (!Shown(t) && t.parent.empty() && !t.stopRequested) t.unseen = true;
     // Claude Code subagents still running when the run ends (cancelled,
     // failed, or their end never reported) end with it. A tool batch waits
     // for its `task` subagents, so those are done by now.

@@ -144,6 +144,11 @@ private:
 
         // True from StartTurn until FinalizeTurn.
         bool streaming = false;
+        // A turn of this top-level thread ended while it wasn't shown, and it
+        // hasn't been viewed since (marked in the dropdown and thread list).
+        // A turn the user stopped leaves nothing new to see.
+        bool unseen = false;
+        bool stopRequested = false;  // RequestCancel during this turn
         // The input as the user left it on switching away: text and images.
         wxString draft;
         std::vector<PendingImage> draftImages;
