@@ -21,7 +21,7 @@ const wxString kUsername      = "api_key";
 const char* kModelIndexKey    = "/UI/LastModelIndex";
 const char* kModelExplicitKey = "/UI/ModelExplicit";
 const char* kEnableGritKey    = "/UI/EnableGritHistory";
-const char* kThreadPaneKey    = "/UI/ShowThreadPane";
+const char* kLeftThreadsKey   = "/UI/LeftPaneThreads";
 const char* kReasoningEffortKey = "/DeepSeek/ReasoningEffort";
 const char* kClaudeEffortKey  = "/Claude/Effort";
 
@@ -124,15 +124,15 @@ bool Preferences::GetEnableGritHistory() {
     return v;
 }
 
-bool Preferences::GetShowThreadPane() {
+bool Preferences::GetLeftPaneThreads() {
     bool v = false;
-    wxConfigBase::Get()->Read(kThreadPaneKey, &v, false);
+    wxConfigBase::Get()->Read(kLeftThreadsKey, &v, false);
     return v;
 }
 
-void Preferences::SetShowThreadPane(bool show) {
+void Preferences::SetLeftPaneThreads(bool threads) {
     auto* cfg = wxConfigBase::Get();
-    cfg->Write(kThreadPaneKey, show);
+    cfg->Write(kLeftThreadsKey, threads);
     cfg->Flush();
 }
 

@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """
-Smoke test for the thread pane: its rows, toggle and remembered state.
+Smoke test for the left pane's Threads view and the folder-level session
+dropdown: rows, the Session | Threads switch and the remembered view.
 
 Usage:
     python3 scripts/smoke/thread_pane.py build/gritcode
@@ -68,10 +69,6 @@ with open(os.path.join(DATA, "gritcode", "sessions.json"), "w") as f:
                             "title": "Read the theme code",
                             "parent": "00000000000000aa"}],
                "lastActiveCwd": P}, f)
-# The pane was left open last time.
-os.makedirs(os.path.dirname(CONF))
-with open(CONF, "w") as f:
-    f.write("[UI]\nShowThreadPane=1\n")
 
 env = dict(os.environ, GRIT_TEST_DATA=DATA)
 pid = int(subprocess.check_output([LAUNCHER, BIN, f"GRIT_MCP_PORT={PORT}"],
@@ -85,9 +82,17 @@ try:
             time.sleep(0.2)
     g = Grit(port=PORT)
 
-    print("-- rows")
+    print("-- session dropdown")
     p = panes(g)
-    check(p["threads"] > 0, "the remembered pane is open at startup")
+    check(p["threads"] == 0 and p["import"] == 0, "the left pane starts closed")
+    s = p["sessions"]
+    check(len(s) == 3 and s[0].startswith("New Session") and s[1].endswith("/P")
+          and s[2].endswith("/Q"), f"it lists the folders, not threads ({s})")
+
+    print("-- rows")
+    g._call("togglePanel", {"panel": "threads"})
+    p = panes(g)
+    check(p["threads"] > 0, "the left pane opens on Threads")
     order = [r["id"] for r in p["threadRows"]]
     first = order[0] if order else ""
     check(order[1:] == ["00000000000000aa", "00000000000000ab"],
@@ -122,18 +127,22 @@ try:
     detail = rows(g)[a]["detail"]
     check(":" in detail, f"a stopped row shows its time again ({detail})")
 
-    print("-- toggle")
+    print("-- switch")
     before = panes(g)
+    g._call("togglePanel", {"panel": "import"})
+    p = panes(g)
+    check(p["threads"] == 0 and p["import"] == before["import"] > 0,
+          "Session swaps the view in the same pane")
+    check(p["window"] == before["window"], "the window keeps its width")
+    g._call("togglePanel", {"panel": "threads"})
+    check(panes(g)["threads"] > 0 and len(rows(g)) >= 5, "Threads shows it again, filled")
+    check("LeftPaneThreads=1" in open(CONF).read(), "the view is remembered")
     g._call("togglePanel", {"panel": "threads"})
     time.sleep(0.5)
     after = panes(g)
-    check(after["threads"] == 0, "toggling hides the pane")
-    check(after["chat"] == before["chat"], "the chat pane keeps its width")
-    check(after["window"] < before["window"], "the window shrinks")
-    check("ShowThreadPane=0" in open(CONF).read(), "the closed pane is remembered")
+    check(after["import"] == 0 and after["chat"] == before["chat"]
+          and after["window"] < before["window"], "closing keeps the chat width")
     g._call("togglePanel", {"panel": "threads"})
-    time.sleep(0.5)
-    check(panes(g)["threads"] > 0 and len(rows(g)) >= 5, "toggling shows it again, filled")
 
     print("-- another folder")
     q = g.switch_session(Q)["threadId"]

@@ -56,7 +56,7 @@ subagents never write under each other.
 ## Subagents
 
 A subagent is a child thread (`parent` set), one level deep, view-only, listed
-under its parent in the dropdown and linked from the parent's tool block.
+under its parent in the thread list and linked from the parent's tool block.
 
 - DeepSeek/Kilo: top-level threads get a `task` tool (description, prompt).
   Each call opens a child thread in the same folder with a fresh context (base
@@ -106,7 +106,7 @@ repo unasked, and AGENTS.md already is the versioned, in-repo place for
 project instructions (it is injected too). No brief means no section, as
 before.
 
-"Project brief…" in the thread dropdown opens a dialog to edit it. "Generate"
+"Project brief…" in the left pane's Threads view opens a dialog to edit it. "Generate"
 asks DeepSeek Flash (cheap and fast; the free model without a key; Claude's
 CLI doesn't fit one request) to write it from the top-level entries, README,
 AGENTS.md and thread titles. The text streams into the box; failures show in
@@ -136,8 +136,8 @@ rebuild, as before; turns of sessions with no file any more stay searchable.
 ## Worktree threads
 
 A worktree thread writes in its own git checkout, so several threads can
-change one project at once. "New thread in worktree" (dropdown entry and pane
-button, offered only when the folder is in a git repo) runs
+change one project at once. "New thread in worktree" (a Threads view button,
+offered only when the folder is in a git repo) runs
 `git worktree add -b grit/<first 8 of the id> <data dir>/worktrees/<id> HEAD`:
 the checkout lives outside the user's repo and holds the committed state (the
 creation notice says that uncommitted changes aren't in it). The thread still
@@ -150,8 +150,8 @@ scope stays the project folder. It is saved as soon as it is created, so its
 checkout is never unlisted.
 
 Its canvas starts with a header (branch, "Review changes", "Merge into
-<branch>", "Discard worktree"), the pane and dropdown rows show the branch,
-and the pane's right-click menu offers the same actions. The git work is a
+<branch>", "Discard worktree"), the thread list rows show the branch,
+and their right-click menu offers the same actions. The git work is a
 few free functions in `git_worktree.{h,cpp}` that run git synchronously with
 an argv (fork/exec, no shell); they are quick, and run only on the user's
 click.
@@ -193,29 +193,30 @@ worktree the same way.
 
 ## UI
 
-The session dropdown lists the current folder's threads (running ones marked,
-subagents indented under their parent) plus "New thread", "New thread in
-worktree" (git repos only), "Project brief…" and "Open folder…".
+The session dropdown stays at the folder level, as in 0.5.x: "New Session…"
+(pick a folder), then the folders, most recent first, a ● marking one with a
+running thread. Picking a folder opens its most recently used thread.
 
-The thread pane (toolbar toggle, remembered in preferences) shows the same
-rows at the far left: a "New thread" button, then per thread a state mark
-(● running, ○ waiting for the folder, ⚠ failed until viewed) with the title,
-and a dim line below: while running the current step (the tool it runs,
-"writing", "thinking", "waiting for <thread>"), after a failure its notice,
-otherwise when it was last used. Both are built from one row list
-(`FolderRows`), so they always agree; the step is derived from the thread's
-existing fields (pending tool calls in history or Claude's pending message,
-in-flight text), and a 1 s timer refreshes the pane only while a thread of
-the folder runs. Clicking a row selects the thread, right-click on a running
-one offers "Stop". The pane is a fixed-width panel beside the splitters (no
-sash): opening it grows the window by its width, or shares a tiled window,
-like the other panes. The agent map and the decision tray come later (see
+Threads are switched in the existing left pane (hamburger toggle). A
+Session | Threads switch on top picks its view, remembered in preferences:
+Session is the 0.5.x session reference, unchanged; Threads has "New thread",
+"New thread in worktree" (git repos only) and "Project brief…" buttons above
+the folder's threads, per thread a state mark (● running, ○ waiting for the
+folder, ⚠ failed until viewed) with the title, subagents indented under their
+parent, and a dim line below: while running the current step (the tool it
+runs, "writing", "thinking", "waiting for <thread>"), after a failure its
+notice, otherwise when it was last used. The rows come from `FolderRows`; the
+step is derived from the thread's existing fields (pending tool calls in
+history or Claude's pending message, in-flight text), and a 1 s timer
+refreshes the list only while it is on screen and a thread of the folder
+runs. Clicking a row selects the thread; right-click offers "Stop" on a
+running one and the worktree actions on a worktree thread. The agent map and the decision tray come later (see
 `orchestrator-conversation.md`).
 
 ## Steps
 
 1. Threads: struct, multi-thread runtime, store, per-thread cwd, write queue,
-   dropdown. (done)
+   thread switching. (done)
 2. Subagents: a DeepSeek `task` tool running a child thread headless, and
    Claude Code subagent events shown as child threads. (done)
 3. Fixes that matter once threads run at once (found on the old branch): a
@@ -226,8 +227,9 @@ like the other panes. The agent map and the decision tray come later (see
 4. Project brief: a short per-folder brief (written or generated) and a
    list of the folder's other threads in every thread's system prompt.
    (done)
-5. Thread pane: an optional left list of the folder's threads and their child
-   threads with state (running, waiting, failed, done). (done)
+5. Thread list: a Threads view in the left pane listing the folder's threads
+   and their child threads with state (running, waiting, failed, done); the
+   session dropdown stays per folder. (done)
 6. Worktree threads: a thread can run in its own git worktree, so several
    threads write in one project at once; diff and merge back. (done)
 7. Project-scoped history search for the memory tool. (done)

@@ -5,6 +5,7 @@
 #include <wx/treectrl.h>
 #include <wx/bmpbuttn.h>
 #include <wx/splitter.h>
+#include <wx/tglbtn.h>
 #include <wx/dnd.h>
 #include <wx/statbmp.h>
 #include <wx/wrapsizer.h>
@@ -86,7 +87,7 @@ private:
     // dropdowns and a gear button on the right.
     wxChoice* sessionChoice_ = nullptr;
     wxChoice* modelChoice_ = nullptr;
-    // "Thread:" / "Model:" captions. These, the settings/export/debug
+    // "Session:" / "Model:" captions. These, the settings/export/debug
     // buttons and the model dropdown hide as the chat pane narrows (see
     // UpdateToolbarFit).
     wxStaticText* sessionLabel_ = nullptr;
@@ -98,7 +99,6 @@ private:
     wxBitmapButton* exportBtn_ = nullptr;
     wxBitmapButton* hamburgerBtn_ = nullptr;
     wxBitmapButton* editorBtn_ = nullptr;
-    wxBitmapButton* threadsBtn_ = nullptr;
 
     // Streaming tool_call accumulator. Each delta carries an `index` field that
     // identifies which call the (id/name/arguments) fragments belong to.
@@ -296,10 +296,10 @@ private:
     wxString ThreadLabelOf(const std::string& id);
 
     // On-disk persistence: one session file per thread. The dropdown lists
-    // the active folder's threads (rows map to ids in threadRowIds_), then
-    // "New thread" and "Open folder…".
+    // "New Session…" and then the folders (rows map to sessionCwds_); a
+    // folder's threads are switched in the left pane.
     SessionStore store_;
-    std::vector<std::string> threadRowIds_;
+    std::vector<std::string> sessionCwds_;
     // Folder shown in the editor and file tree: the active thread's cwd.
     std::string activeCwd_;
 
@@ -469,31 +469,35 @@ private:
     void OnEditorShowInFiles(wxCommandEvent& e);
     wxTreeItemId FindTreeItemByPath(wxTreeItemId parent, const wxString& path);
 
-    // Repopulate the thread dropdown: the active folder's threads, most
-    // recent first (running ones marked), then "New thread", "New thread in
-    // worktree" (git repos only), "Project brief…" and "Open folder…", and
-    // select the active thread. Refreshes the thread pane too.
+    // Repopulate the session dropdown: "New Session…", then the folders,
+    // most recent first (ones with a running thread marked), selecting the
+    // active one. Refreshes the left pane's thread list too.
     void RefreshSessionChoice();
 
-    // ---- Thread pane (optional, left of everything) ----
-    // The active folder's threads with their state; the selected row is the
-    // active thread. Hidden unless toggled on (remembered in preferences).
-    wxPanel* threadPane_ = nullptr;
+    // ---- Left pane threads view ----
+    // The left pane (hamburger) switches between the session reference
+    // ("Session") and the active folder's threads ("Threads"); the mode is
+    // remembered in preferences.
+    wxToggleButton* sessionTab_ = nullptr;
+    wxToggleButton* threadsTab_ = nullptr;
+    wxPanel* loadView_ = nullptr;     // session reference
+    wxPanel* threadsView_ = nullptr;  // thread list
     ThreadList* threadList_ = nullptr;
     wxButton* newWorktreeBtn_ = nullptr;  // shown when the folder is a git repo
     // Refreshes the rows' current step while a thread of the folder runs.
     wxTimer threadPaneTimer_;
     // The active folder's threads, most recent first, each followed by its
-    // subagents; shared by the dropdown and the pane.
+    // subagents.
     std::vector<ThreadRow> FolderRows();
     // What running thread `t` is doing now: the tool it runs, "writing",
     // "thinking", or what it waits for.
     wxString CurrentStep(Thread& t);
     void UpdateThreadPane(std::vector<ThreadRow> rows);
-    void OnThreadPaneToggle(wxCommandEvent&);
+    // Picks the left pane's view; remembered for next time.
+    void ShowLeftView(bool threads);
+    // Whether the thread list is on screen (pane open, Threads view).
+    bool ThreadsShown() const;
     void OnThreadListContextMenu(wxContextMenuEvent& e);
-    // Width the thread pane takes from the window (0 when hidden).
-    int ThreadPaneW() const;
 
     // CreateNewSession pops a directory dialog and switches to that folder.
     // SwitchToCwd opens the most recently used thread of `cwd` (loading it,
