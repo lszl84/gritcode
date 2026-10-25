@@ -735,7 +735,8 @@ std::string SharedCheckoutNote(const std::string& repo, const std::string& workt
            "editing it.\n"
            "- Use a git worktree only when the user wants the work on its own branch, "
            "or when another thread is working here right now (a note on the user's "
-           "message says so) and your change is more than a small edit: `git worktree "
+           "message says so; it is for you, so don't bring it up unless it matters) "
+           "and your change is more than a small edit: `git worktree "
            "add -b <branch> " + dir + " HEAD` with a short branch name (or reuse one "
            "from `git worktree list`), then work only there, with absolute paths and "
            "`cd` in bash. Tell the user its path and branch, and that uncommitted "
@@ -2827,8 +2828,6 @@ void ChatFrame::RestoreCanvasFromHistory() {
             ub.runs.push_back(r);
             ub.visibleText = text;
             canvas_->AddBlock(std::move(ub));
-            if (std::string note = StringField(m, "note"); !note.empty())
-                canvas_->AddBlock(NoticeBlock(wxString::FromUTF8(note)));
 
             if (m.contains("images") && m["images"].is_array()) {
                 for (const auto& img : m["images"]) {
@@ -4406,7 +4405,7 @@ void ChatFrame::StartTurn(Thread& t, const wxString& userText,
     };
     // Other top-level threads working in the same checkout right now. The
     // model gets this note after the message (the system prompt says what to
-    // do about it), and the canvas shows it.
+    // do about it), only when it changed since the previous message.
     if (t.parent.empty()) {
         const std::string checkout = CheckoutOf(t.cwd);
         std::string others;
@@ -4416,11 +4415,17 @@ void ChatFrame::StartTurn(Thread& t, const wxString& userText,
             others += (others.empty() ? "\"" : ", \"")
                       + ThreadLabel(o.id, o.cwd, o.title).utf8_string() + "\"";
         }
-        if (!others.empty()) {
-            const std::string note = "Also working in " + checkout + " right now: " + others + ".";
-            userMsg["note"] = note;
-            if (Shown(t)) canvas_->AddBlock(NoticeBlock(wxString::FromUTF8(note)));
-        }
+        // The last note this thread's model got, and so what it believes now.
+        auto noted = [](const nlohmann::json& m) {
+            return IsUserTurn(m) && !StringField(m, "note").empty();
+        };
+        auto last = std::ranges::find_if(t.history.rbegin(), t.history.rend(), noted);
+        const std::string given =
+            last == t.history.rend() ? std::string() : StringField(*last, "note");
+        const std::string none = "No other thread is working in " + checkout + " now.";
+        const std::string note =
+            others.empty() ? none : "Also working in " + checkout + " right now: " + others + ".";
+        if (note != given && !(note == none && given.empty())) userMsg["note"] = note;
     }
     if (!images.empty()) {
         nlohmann::json arr = nlohmann::json::array();

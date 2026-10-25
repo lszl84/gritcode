@@ -127,22 +127,42 @@ b2 = g.new_thread(B)["threadId"]
 g.send(bash("date +%s.%N > second_start"))
 now = threads(g)
 check(now[b]["running"] and now[b2]["running"], "both threads run at once")
-check(any("Also working in " + B in blk["preview"] for blk in g.blocks()),
-      "the second thread shows that the first is working there")
-if not LIVE:
+check(not any("Also working in" in blk["preview"] for blk in g.blocks()),
+      "the chat doesn't show the note")
+
+
+def request_with(text):
     end = time.time() + 10
-    sent = []
-    while time.time() < end and not sent:
-        sent = [m for m in Handler.requests if "second_start" in json.dumps(m[-1])]
+    while time.time() < end:
+        found = [m for m in Handler.requests if text in json.dumps(m[-1])]
+        if found:
+            return found[0]
         time.sleep(0.2)
-    check(bool(sent) and f"[gritcode: Also working in {B} right now:" in sent[0][-1]["content"],
-          "and its model is told")
-    check(bool(sent) and "git worktree add -b" in sent[0][0]["content"],
+    return None
+
+
+if not LIVE:
+    sent = request_with("second_start")
+    check(sent is not None and f"[gritcode: Also working in {B} right now:" in sent[-1]["content"],
+          "the model is told the first thread is working there")
+    check(sent is not None and "git worktree add -b" in sent[0]["content"],
           "the system prompt of a thread in a git repo says when to use a worktree")
+    end = time.time() + 30
+    while time.time() < end and threads(g)[b2]["running"]:
+        time.sleep(0.2)
+    g.send("again-marker")  # the first thread is still running: nothing new
+    sent = request_with("again-marker")
+    check(sent is not None and "[gritcode:" not in sent[-1]["content"], "an unchanged note isn't repeated")
 check(wait_idle(g), "both turns finished")
 first, second = read(os.path.join(B, "first_done")), read(os.path.join(B, "second_start"))
 check(bool(first and second) and float(second) < float(first),
       "the second ran while the first was still going")
+if not LIVE:
+    g.send("later-marker")
+    sent = request_with("later-marker")
+    check(sent is not None and f"[gritcode: No other thread is working in {B} now.]"
+          in sent[-1]["content"], "the model is told when the other thread stopped")
+    check(wait_idle(g), "that turn finished")
 
 print("-- opening a folder")
 g.switch_session(A)

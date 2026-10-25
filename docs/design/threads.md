@@ -55,10 +55,12 @@ about worktrees:
   user how to merge, and leave the worktree.
 - "Right now" comes from a note on the user's message, written when the turn
   starts: the titles of the other top-level threads running in the same
-  checkout (the repo, so subfolders count). It is stored as the message's
-  `note`, added after the message for the model (`[gritcode: ...]`) and shown
-  as a notice in the canvas, so the user sees what the agent was told. No
-  note, no reason for a worktree, so most work makes none.
+  checkout (the repo, so subfolders count), or that none is any more. It is
+  stored as the message's `note` only when it differs from the last note the
+  thread got, and added after the message for the model (`[gritcode: ...]`).
+  The canvas doesn't show it (the thread list shows what runs), and the
+  prompt tells the model not to bring it up unless it matters. No note, no
+  reason for a worktree, so most work makes none.
 
 Subagents are read-only: `write_file`,
 `edit_file` and `run_project` are neither offered to them nor run for them,
