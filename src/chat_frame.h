@@ -144,6 +144,17 @@ private:
 
         // True from StartTurn until FinalizeTurn.
         bool streaming = false;
+        // The input as the user left it on switching away: text and images.
+        wxString draft;
+        std::vector<PendingImage> draftImages;
+        // Display-only blocks (Play runs): in the canvas, never sent to the
+        // model or saved. `after` is the history size when one was added, so
+        // a rebuilt canvas puts it back in place.
+        struct LocalBlock {
+            size_t after;
+            Block block;
+        };
+        std::vector<LocalBlock> localBlocks;
         // Pending user messages typed/queued while a turn was in flight. On
         // natural turn end the front auto-dispatches; on error/cancel we land
         // in idle-queue mode.
@@ -307,11 +318,17 @@ private:
     int currentModelIndex_ = 0;
     std::vector<std::string> remoteModels_;
 
-    // Separate thread for Play-button runs so a long-running dev server
-    // doesn't block the tool dispatch worker (they share the same cancellation
-    // pattern but must not contend for the same std::thread slot).
-    std::shared_ptr<ToolCancelToken> currentPlayToken_;
-    std::thread playWorker_;
+    // Play-button runs, one per folder, each on its own worker, so a
+    // long-running dev server blocks neither tool dispatch nor another
+    // folder's run. Play again in a folder restarts that folder's run.
+    struct PlayRun {
+        std::string cwd;
+        std::shared_ptr<ToolCancelToken> token;  // null once it ended
+        std::thread worker;
+    };
+    std::deque<PlayRun> plays_;
+    // Cancels `run` if it still runs and waits for its worker.
+    static void StopPlay(PlayRun& run);
 
     // Persist worker: runs the heavy SessionStore::WriteSessionFile +
     // MemoryDB::RebuildSession off the UI thread. Owned (not detached) so the
@@ -731,6 +748,9 @@ private:
                          const std::string& result,
                          const std::string& childId = std::string());
     void RenderErrorBlock(Thread& t, const wxString& msg);
+    // Adds a display-only block to `t` (see Thread::localBlocks), drawn now
+    // when `t` is shown.
+    void AddLocalBlock(Thread& t, Block b);
     // A failed turn's notice: drawn now when `t` is shown, otherwise kept on
     // the thread (with the prompt when it was rolled back) until viewed.
     void ShowTurnFailure(Thread& t, Block notice, bool promptRolledBack);

@@ -190,6 +190,10 @@ json MCPServer::HandleRequest(const json& request) {
         if (!cb_.play) return err(-32603, "not ready");
         return okResult(cb_.play());
     }
+    if (method == "setInput") {
+        if (!cb_.setInput) return err(-32603, "not ready");
+        return okResult(cb_.setInput(params.value("text", "")));
+    }
     if (method == "togglePanel") {
         if (!cb_.togglePanel) return err(-32603, "not ready");
         std::string panel = params.value("panel", std::string());

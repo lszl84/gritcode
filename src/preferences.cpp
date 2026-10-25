@@ -3,6 +3,7 @@
 #include <wx/fileconf.h>
 #include <wx/filename.h>
 #include <wx/stdpaths.h>
+#include <cstdlib>
 #if wxUSE_SECRETSTORE
 #include <wx/secretstore.h>
 #else
@@ -146,6 +147,12 @@ void Preferences::SetEnableGritHistory(bool enabled) {
 // ---- OS keyring (wxSecretStore / libsecret) ----
 
 wxString Preferences::GetApiKey(Provider p) {
+    // Test/dev hook for headless instances with no keyring (the hidden test
+    // launcher gives them a private D-Bus): a key from the environment,
+    // never stored.
+    if (const char* key = std::getenv("GRIT_DEEPSEEK_API_KEY");
+        key && *key && p == Provider::DeepSeek)
+        return wxString::FromUTF8(key);
 #if wxUSE_SECRETSTORE
     wxSecretStore store = wxSecretStore::GetDefault();
     if (!store.IsOk()) return wxString();

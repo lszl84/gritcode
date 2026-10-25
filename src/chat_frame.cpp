@@ -541,6 +541,42 @@ Block NoticeBlock(const wxString& msg) {
     return b;
 }
 
+// A collapsed tool call block: "name(args)" with the result inside.
+Block ToolBlock(const std::string& name, const std::string& argsJson, const std::string& result) {
+    // Compact the args JSON for display: parse + dump to drop whitespace.
+    std::string displayArgs = argsJson;
+    try {
+        if (!argsJson.empty()) {
+            displayArgs = nlohmann::json::parse(argsJson).dump(
+                -1, ' ', false, nlohmann::json::error_handler_t::replace);
+        }
+    } catch (...) { /* show raw */ }
+
+    std::string preview = result;
+    constexpr size_t kPreviewCap = 4000;
+    if (preview.size() > kPreviewCap) {
+        preview.resize(kPreviewCap);
+        preview += "\n... [preview truncated; full output sent to model]";
+    }
+
+    Block b;
+    b.type = BlockType::ToolCall;
+    b.toolName = wxString::FromUTF8(name);
+    b.toolArgs = wxString::FromUTF8(displayArgs);
+    b.toolResult = wxString::FromUTF8(preview);
+    b.toolExpanded = false;
+    // visibleText layout:
+    //   [0, headerLen)            "toolName(args)"
+    //   [headerLen, headerLen+2)  "\n\n" separator
+    //   [headerLen+2, end)        toolResult
+    // Header chars are selectable in the rendered header strip; body chars
+    // are selectable only when expanded. Selecting across a collapsed block
+    // (drag from another block, through this one) still grabs the full
+    // visibleText, so Ctrl+C captures both the header and the hidden body.
+    b.visibleText = b.toolName + "(" + b.toolArgs + ")\n\n" + b.toolResult;
+    return b;
+}
+
 // Notice ending in a link that opens thread `id` (see OnCanvasLink).
 Block ThreadLinkBlock(const wxString& msg, const std::string& id, const wxString& label) {
     Block b = NoticeBlock(msg);
@@ -1721,10 +1757,15 @@ ChatFrame::ChatFrame()
             return {{"ok", true}, {"modelIndex", currentModelIndex_}};
         });
     };
-    cb.getPreferences = [guiSync]() -> nlohmann::json {
-        return guiSync([]() -> nlohmann::json {
+    cb.getPreferences = [this, guiSync]() -> nlohmann::json {
+        return guiSync([this]() -> nlohmann::json {
+            // The model dropdown's rows, as setModel takes them.
+            nlohmann::json models = nlohmann::json::array();
+            for (unsigned i = 0; i < modelChoice_->GetCount(); ++i)
+                models.push_back(modelChoice_->GetString(i).utf8_string());
             return {
                 {"modelIndex", Preferences::GetLastModelIndex()},
+                {"models", std::move(models)},
                 {"hasDeepseekKey",
                  Preferences::HasApiKey(Preferences::Provider::DeepSeek)},
                 {"enableGritHistory", Preferences::GetEnableGritHistory()},
@@ -1876,6 +1917,12 @@ ChatFrame::ChatFrame()
             CallAfter([this]() { ShowImportDialog(); });
 
             return {{"ok", true}, {"promptCount", promptCount}};
+        });
+    };
+    cb.setInput = [this, guiSync](const std::string& text) -> nlohmann::json {
+        return guiSync([this, text]() -> nlohmann::json {
+            input_->SetValue(wxString::FromUTF8(text));
+            return {{"ok", true}};
         });
     };
     cb.play = [this, guiSync]() -> nlohmann::json {
@@ -2121,16 +2168,7 @@ ChatFrame::~ChatFrame() {
     delete themeWatcher_;
     themeWatcher_ = nullptr;
     themeTimer_.Stop();
-    if (playWorker_.joinable()) {
-        if (auto tok = currentPlayToken_) {
-            tok->cancelled.store(true);
-#ifndef _WIN32
-            int pgid = tok->activePgid.load();
-            if (pgid > 0) ::kill(-pgid, SIGTERM);
-#endif
-        }
-        playWorker_.join();
-    }
+    for (PlayRun& run : plays_) StopPlay(run);
     if (persistWorker_.joinable()) persistWorker_.join();
     if (remoteModelsWorker_.joinable()) remoteModelsWorker_.join();
 }
@@ -2299,7 +2337,7 @@ void ChatFrame::RequestCancel(Thread& t) {
         for (Thread& c : threads_)
             if (c.parent == t.id && c.streaming) RequestCancel(c);
     }
-    // Note: Play-button worker (currentPlayToken_) is intentionally NOT
+    // Note: Play-button runs (plays_) are intentionally NOT
     // cancelled here. Escape cancels AI-initiated tool calls, not user-
     // initiated Play runs. If the user started a dev server via Play,
     // they want it to keep running.
@@ -2601,9 +2639,18 @@ bool ChatFrame::ShowThread(const std::string& id) {
     }
 
     // The thread we leave keeps running; its canvas indices are now stale.
-    Active().liveThinkingIdx = -1;
+    // Its draft (input text and images) stays with it.
+    Thread& prev = Active();
+    prev.liveThinkingIdx = -1;
+    prev.draft = input_->GetValue();
+    prev.draftImages = std::move(pendingImages_);
     active_ = idx;
     Thread& t = Active();
+    input_->SetValue(t.draft);
+    pendingImages_ = std::move(t.draftImages);
+    t.draft.clear();
+    t.draftImages.clear();
+    RebuildImageRow();
     activeCwd_ = t.cwd;
     store_.SetLastActive(t.cwd, t.id);
     RestoreCanvasMaybeDeferred();
@@ -2803,10 +2850,17 @@ void ChatFrame::RestoreCanvasFromHistory() {
         canvas_->AddBlock(ThreadLinkBlock("Subagent thread (view only), started by ",
                                           t.parent, ThreadLabelOf(t.parent)));
     ModelSwitchTracker modelTracker;
+    // Display-only blocks go back where they were added (see localBlocks).
+    size_t local = 0;
+    auto emitLocal = [&](size_t upTo) {
+        for (; local < t.localBlocks.size() && t.localBlocks[local].after <= upTo; ++local)
+            canvas_->AddBlock(t.localBlocks[local].block);
+    };
     // Walk the message list and re-emit blocks. Tool call/result pairs are
     // stitched back together: an assistant message's tool_calls are matched
     // against the immediately-following "tool" messages by tool_call_id.
     for (size_t i = 0; i < t.history.size(); ++i) {
+        emitLocal(i);
         const auto& m = t.history[i];
         // Compacted messages are still part of the durable transcript.
         // They are hidden from the MODEL view (BuildModelView), but MUST be
@@ -2895,6 +2949,7 @@ void ChatFrame::RestoreCanvasFromHistory() {
     // in the order it streamed. A fresh markdown stream, fed the partial
     // text, carries the rest of the reply on this canvas.
     t.liveThinkingIdx = -1;
+    emitLocal(SIZE_MAX);
     if (!Started(t)) AddBriefNotice(t);
     // A turn that failed in the background: its notice, seen now.
     if (t.failureNotice) {
@@ -3015,6 +3070,17 @@ void ChatFrame::OnModelContextMenu(wxContextMenuEvent&) {
     PopupMenu(&menu);
 }
 
+void ChatFrame::StopPlay(PlayRun& run) {
+    if (auto tok = run.token) {
+        tok->cancelled.store(true);
+#ifndef _WIN32
+        int pgid = tok->activePgid.load();
+        if (pgid > 0) ::kill(-pgid, SIGTERM);
+#endif
+    }
+    if (run.worker.joinable()) run.worker.join();
+}
+
 void ChatFrame::OnPlay(wxCommandEvent&) {
     if (Active().streaming) return;
     auto cfg = RunConfigStore::Get(activeCwd_);
@@ -3032,24 +3098,21 @@ void ChatFrame::OnPlay(wxCommandEvent&) {
         userBlock.rawText = userMsg;
         userBlock.visibleText = userMsg;
         userBlock.runs.push_back({userMsg, false, false, false, {}});
-        canvas_->AddBlock(std::move(userBlock));
+        AddLocalBlock(Active(), std::move(userBlock));
 
         // Run the command on a background thread. Use a dedicated playWorker_
         // so a long-running dev server doesn't block the tool dispatch worker
         // — otherwise the model can't execute tool calls while the server runs.
-        auto token = std::make_shared<ToolCancelToken>();
-        // If a previous Play run is still alive (e.g. a dev server), cancel
-        // it so join() returns quickly instead of blocking the GUI forever.
-        if (auto old = currentPlayToken_) {
-            old->cancelled.store(true);
-#ifndef _WIN32
-            int pgid = old->activePgid.load();
-            if (pgid > 0) ::kill(-pgid, SIGTERM);
-#endif
+        auto run = std::ranges::find(plays_, activeCwd_, &PlayRun::cwd);
+        if (run == plays_.end()) {
+            plays_.emplace_back().cwd = activeCwd_;
+            run = plays_.end() - 1;
         }
-        if (playWorker_.joinable()) playWorker_.join();
-        currentPlayToken_ = token;
-        playWorker_ = std::thread([this, cmd = cfg->command, token, cwd = activeCwd_]() {
+        StopPlay(*run);  // this folder's previous run, e.g. a dev server
+        auto token = std::make_shared<ToolCancelToken>();
+        run->token = token;
+        run->worker = std::thread([this, cmd = cfg->command, token, cwd = activeCwd_,
+                                   id = Active().id]() {
             // Wrap the stored command with a cd to the project directory so
             // relative paths work regardless of the process's current cwd.
             // This is the key fix for the Play button: the model stores
@@ -3072,11 +3135,13 @@ void ChatFrame::OnPlay(wxCommandEvent&) {
             std::string wrapped = "cd " + qcwd + " && " + cmd;
 #endif
             std::string result = ToolBashDirect(wrapped.c_str(), token.get());
-            CallAfter([this, result, cmd]() {
+            CallAfter([this, result, cmd, cwd, id, token]() {
                 if (destroying_.load()) return;
-                currentPlayToken_.reset();
-                // Canvas-only display — no history modification.
-                RenderToolBlock(Active(), "bash", cmd, result);
+                if (auto r = std::ranges::find(plays_, cwd, &PlayRun::cwd);
+                    r != plays_.end() && r->token == token)
+                    r->token.reset();
+                // Display-only, in the thread Play was pressed in.
+                if (Thread* t = Find(id)) AddLocalBlock(*t, ToolBlock("bash", cmd, result));
             });
         });
     } else {
@@ -5421,44 +5486,18 @@ void ChatFrame::RenderToolBlock(Thread& t, const std::string& name,
                                 const std::string& result,
                                 const std::string& childId) {
     if (!Shown(t)) return;
-    // Compact the args JSON for display: parse + dump to drop whitespace.
-    std::string displayArgs = argsJson;
-    try {
-        if (!argsJson.empty()) {
-            displayArgs = nlohmann::json::parse(argsJson).dump(
-                -1, ' ', false, nlohmann::json::error_handler_t::replace);
-        }
-    } catch (...) { /* show raw */ }
-
-    std::string preview = result;
-    constexpr size_t kPreviewCap = 4000;
-    if (preview.size() > kPreviewCap) {
-        preview.resize(kPreviewCap);
-        preview += "\n... [preview truncated; full output sent to model]";
-    }
-
-    Block b;
-    b.type = BlockType::ToolCall;
-    b.toolName = wxString::FromUTF8(name);
-    b.toolArgs = wxString::FromUTF8(displayArgs);
-    b.toolResult = wxString::FromUTF8(preview);
-    b.toolExpanded = false;
-    // visibleText layout:
-    //   [0, headerLen)            "toolName(args)"
-    //   [headerLen, headerLen+2)  "\n\n" separator
-    //   [headerLen+2, end)        toolResult
-    // Header chars are selectable in the rendered header strip; body chars
-    // are selectable only when expanded. Selecting across a collapsed block
-    // (drag from another block, through this one) still grabs the full
-    // visibleText, so Ctrl+C captures both the header and the hidden body.
-    b.visibleText = b.toolName + "(" + b.toolArgs + ")\n\n" + b.toolResult;
-    canvas_->AddBlock(std::move(b));
+    canvas_->AddBlock(ToolBlock(name, argsJson, result));
     if (!childId.empty())
         canvas_->AddBlock(ThreadLinkBlock("Subagent thread: ", childId, ThreadLabelOf(childId)));
 }
 
 void ChatFrame::RenderErrorBlock(Thread& t, const wxString& msg) {
     if (Shown(t)) canvas_->AddBlock(NoticeBlock(msg));
+}
+
+void ChatFrame::AddLocalBlock(Thread& t, Block b) {
+    if (Shown(t)) canvas_->AddBlock(b);
+    t.localBlocks.push_back({t.history.size(), std::move(b)});
 }
 
 void ChatFrame::ShowTurnFailure(Thread& t, Block notice, bool promptRolledBack) {

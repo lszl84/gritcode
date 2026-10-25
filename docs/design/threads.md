@@ -173,7 +173,13 @@ rows come from `FolderRows`; the step is derived from the thread's existing
 fields (pending tool calls in history or Claude's pending message, in-flight
 text), and a 1 s timer refreshes the list only while it is on screen and a
 thread of the folder runs. Clicking a row selects the thread; right-click on
-a running one offers "Stop". The agent map and the decision tray come later (see
+a running one offers "Stop". The input belongs to its thread: switching away keeps the
+draft (text and attached images) with the thread you leave and brings back
+the one you return to. Play runs one command per folder, each on its own
+worker, so Play in one project never stops another's run (Play again in a
+folder restarts its run); its blocks are display-only, kept with the thread
+Play was pressed in (`localBlocks`, put back in place when the canvas is
+rebuilt), never sent to the model or saved. The agent map and the decision tray come later (see
 `orchestrator-conversation.md`).
 
 ## Steps

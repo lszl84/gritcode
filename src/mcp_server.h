@@ -100,6 +100,9 @@ struct MCPCallbacks {
     // {started: false, reason: "streaming"} while a turn is in flight.
     std::function<nlohmann::json()> play;
 
+    // Put `text` in the input box without sending it, as typing would.
+    std::function<nlohmann::json(const std::string& text)> setInput;
+
     // Toggle a side panel ("editor", "import" or "threads") as its toolbar
     // button would, then return getPanes().
     std::function<nlohmann::json(const std::string&)> togglePanel;
