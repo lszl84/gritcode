@@ -180,7 +180,7 @@ a running one offers "Stop". The agent map and the decision tray come later (see
    session dropdown stays per folder. (done)
 6. Worktree threads: a thread can run in its own git worktree, so several
    threads write in one project at once; diff and merge back. Built, then
-   taken out for now (merge d48a624, reverted); comes back from there.
+   taken out for now (merge 30541db, reverted); comes back from there.
 7. Project-scoped history search for the memory tool. (done)
 
 The orchestrator ideas (`orchestrator-conversation.md`) build on 2 and 5.
