@@ -6,7 +6,15 @@
 #include <wx/settings.h>
 
 ThreadList::ThreadList(wxWindow* parent)
-    : wxVListBox(parent, wxID_ANY, wxDefaultPosition, wxDefaultSize, wxBORDER_NONE) {}
+    : wxVListBox(parent, wxID_ANY, wxDefaultPosition, wxDefaultSize, wxBORDER_NONE) {
+    // wxVListBox pins the list background it was created with, while the text
+    // keeps following the theme: after a light/dark switch it would draw the
+    // new theme's text on the old background. Take the current one again.
+    Bind(wxEVT_SYS_COLOUR_CHANGED, [this](wxSysColourChangedEvent& e) {
+        SetBackgroundColour(GetDefaultAttributes().colBg);
+        e.Skip();  // the base handler repaints
+    });
+}
 
 void ThreadList::SetRows(std::vector<ThreadRow> rows, const std::string& activeId) {
     rows_ = std::move(rows);
